@@ -265,13 +265,14 @@ export class Agent {
         for (const r of (await this.session.records()).slice(1)) {
             if (r.type === "message") {
                 this.messages.push(r.message);
-                if (r.usage) {
-                    for (const k of ["input", "output", "cacheRead", "cacheWrite"] as const)
-                        this.usage[k] += r.usage[k] ?? 0;
-                    const prompt = r.usage.input + r.usage.cacheRead + r.usage.cacheWrite;
-                    if (prompt > 0) this.usage.cacheHitRate = (r.usage.cacheRead / prompt) * 100;
-                }
-            } else if (r.type === "compaction") {
+                if (!r.usage) continue;
+                for (const k of ["input", "output", "cacheRead", "cacheWrite"] as const)
+                    this.usage[k] += r.usage[k] ?? 0;
+                const prompt = r.usage.input + r.usage.cacheRead + r.usage.cacheWrite;
+                if (prompt > 0) this.usage.cacheHitRate = (r.usage.cacheRead / prompt) * 100;
+                continue;
+            }
+            if (r.type === "compaction") {
                 const recent = r.keptMessages > 0 ? this.messages.slice(-r.keptMessages) : [];
                 this.messages = [
                     this.messages[0],
@@ -336,11 +337,9 @@ export class Agent {
             } catch (e) {
                 const aborted = this.active?.controller.signal.aborted;
                 this.endOperation();
-                if (aborted) {
-                    await this.recordInterruption("model");
-                    return "Operation aborted.";
-                }
-                throw e;
+                if (!aborted) throw e;
+                await this.recordInterruption("model");
+                return "Operation aborted.";
             }
             this.endOperation();
             this.messages.push(answer);
@@ -364,23 +363,22 @@ export class Agent {
                 const result: Message = { role: "tool", tool_call_id: c.id, content };
                 this.messages.push(result);
                 await this.session?.append({ type: "message", message: result, toolName: c.function.name });
-                if (aborted) {
-                    for (const pending of answer.tool_calls.slice(i + 1)) {
-                        const skipped: Message = {
-                            role: "tool",
-                            tool_call_id: pending.id,
-                            content: "Operation aborted before execution",
-                        };
-                        this.messages.push(skipped);
-                        await this.session?.append({
-                            type: "message",
-                            message: skipped,
-                            toolName: pending.function.name,
-                        });
-                    }
-                    await this.recordInterruption("tool", c.id);
-                    return "Operation aborted.";
+                if (!aborted) continue;
+                for (const pending of answer.tool_calls.slice(i + 1)) {
+                    const skipped: Message = {
+                        role: "tool",
+                        tool_call_id: pending.id,
+                        content: "Operation aborted before execution",
+                    };
+                    this.messages.push(skipped);
+                    await this.session?.append({
+                        type: "message",
+                        message: skipped,
+                        toolName: pending.function.name,
+                    });
                 }
+                await this.recordInterruption("tool", c.id);
+                return "Operation aborted.";
             }
         }
     }
@@ -410,11 +408,9 @@ export class Agent {
         } catch (e) {
             const aborted = this.active?.controller.signal.aborted;
             this.endOperation();
-            if (aborted) {
-                await this.recordInterruption("compact");
-                return "Compaction aborted.";
-            }
-            throw e;
+            if (!aborted) throw e;
+            await this.recordInterruption("compact");
+            return "Compaction aborted.";
         }
         this.endOperation();
         const compacted: Message = { role: "user", content: `[Compacted history]\n${summary.content}` };

@@ -25,10 +25,9 @@ async function main() {
     emitKeypressEvents(process.stdin, rl);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     const escape = (_: string, key: { name?: string }) => {
-        if (key.name === "escape" && agent.busy) {
-            console.log("\n\x1b[33mAborting...\x1b[0m");
-            agent.abort();
-        }
+        if (key.name !== "escape" || !agent.busy) return;
+        console.log("\n\x1b[33mAborting...\x1b[0m");
+        agent.abort();
     };
     process.stdin.on("keypress", escape);
     const close = () => {
@@ -52,19 +51,21 @@ async function main() {
         if (input === "/compact") {
             console.log(await agent.compact());
             console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
-        } else if (input.startsWith("/skill:")) {
+            continue;
+        }
+        if (input.startsWith("/skill:")) {
             const [name, ...rest] = input.slice(7).split(" "),
                 skill = skills.find((s) => s.name === name);
-            console.log(
-                skill
-                    ? await agent.runAgentLoop(`${await readFile(skill.path, "utf8")}\n\nUser: ${rest.join(" ")}`)
-                    : `Unknown skill: ${name}`,
-            );
-            if (skill) console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
-        } else {
-            console.log(`\x1b[36m${await agent.runAgentLoop(input)}\x1b[0m`);
+            if (!skill) {
+                console.log(`Unknown skill: ${name}`);
+                continue;
+            }
+            console.log(await agent.runAgentLoop(`${await readFile(skill.path, "utf8")}\n\nUser: ${rest.join(" ")}`));
             console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
+            continue;
         }
+        console.log(`\x1b[36m${await agent.runAgentLoop(input)}\x1b[0m`);
+        console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
     }
     close();
 }
