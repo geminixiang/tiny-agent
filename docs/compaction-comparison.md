@@ -24,11 +24,11 @@
 3. request 不帶 tools，輸入為摘要 system prompt 加上 `JSON.stringify(old)`。
 4. 成功後把 active context 替換成：
 
-   ```text
-   system
-   + user: [Compacted history]\n<model-generated summary>
-   + last 6 messages
-   ```
+    ```text
+    system
+    + user: [Compacted history]\n<model-generated summary>
+    + last 6 messages
+    ```
 
 5. Session 追加 `{ type: "compaction", summary, compactedMessages, keptMessages: 6, usage }`。它不刪舊 JSONL lines。
 6. Resume replay 時遇到 compaction record，做同樣的 context replacement；之後再接續 replay 新 messages。

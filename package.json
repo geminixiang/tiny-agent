@@ -1,26 +1,26 @@
 {
-  "name": "tiny-agent-ts",
-  "version": "0.1.0",
-  "private": true,
-  "bin": {
-    "tiny-ts": "./dist/src/cli.js"
-  },
-  "type": "module",
-  "scripts": {
-    "dev": "tsx src/cli.ts",
-    "build": "tsc",
-    "prepare": "npm run build",
-    "check": "tsc --noEmit",
-    "lint": "oxlint src test",
-    "format": "oxfmt .",
-    "format:check": "oxfmt --check .",
-    "test": "node --import tsx --test test/*.test.ts"
-  },
-  "devDependencies": {
-    "@types/node": "^26.0.0",
-    "oxfmt": "^0.64.0",
-    "oxlint": "^1.79.0",
-    "tsx": "^4.23.0",
-    "typescript": "^7.0.0"
-  }
+    "name": "tiny-agent-ts",
+    "version": "0.1.0",
+    "private": true,
+    "bin": {
+        "tiny-ts": "./dist/src/cli.js"
+    },
+    "type": "module",
+    "scripts": {
+        "dev": "tsx src/cli.ts",
+        "build": "tsc",
+        "prepare": "npm run build",
+        "check": "tsc --noEmit",
+        "lint": "oxlint src test",
+        "format": "oxfmt .",
+        "format:check": "oxfmt --check .",
+        "test": "node --import tsx --test test/*.test.ts"
+    },
+    "devDependencies": {
+        "@types/node": "^26.0.0",
+        "oxfmt": "^0.64.0",
+        "oxlint": "^1.79.0",
+        "tsx": "^4.23.0",
+        "typescript": "^7.0.0"
+    }
 }

@@ -95,11 +95,11 @@ Bash output 超過 50KB 時，tool result 與 session 只保留最後 50KB，並
 
 ```json
 {
-  "type": "interruption",
-  "phase": "tool",
-  "toolCallId": "call_123",
-  "reason": "escape",
-  "timestamp": "..."
+    "type": "interruption",
+    "phase": "tool",
+    "toolCallId": "call_123",
+    "reason": "escape",
+    "timestamp": "..."
 }
 ```
 
