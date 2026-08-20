@@ -11,6 +11,7 @@
 - `/compact` 壓縮歷史
 - session 以版本化 JSONL 落在 `.tiny-agent/sessions/`
 - 啟動時將目前專案的 `./AGENTS.md` 放入 system prompt
+- `Esc` 可中斷模型、tool 與 compaction，且保持 session 可恢復
 - TUI 顯示 tool 呼叫與精簡結果
 - 每回合顯示 input/output token、cached token 與 cache ratio
 - 零 TUI framework 的基本互動 CLI
@@ -54,7 +55,32 @@ tiny-agent
   └ 842 chars
 ```
 
-Tool 執行失敗時，結束行會顯示錯誤訊息的字元數；完整錯誤仍會送回模型，讓 agent 可以自行修正。
+Tool 執行失敗時，結束行會顯示錯誤訊息的字元數；完整錯誤仍會送回模型，讓 agent 可以自行修正。`◆ ...`、`└ ...` 這些 TUI tool logs 只輸出到終端，不寫入 session；JSONL 只保留模型 transcript 必須存在的 assistant `tool_calls` 與 tool result。
+
+Bash output 超過 50KB 時，tool result 與 session 只保留最後 50KB，並附上回查路徑：
+
+```text
+[Output truncated. Full output: /project/.tiny-agent/tool-output/<uuid>.log]
+```
+
+完整 stdout/stderr 寫入 `.tiny-agent/tool-output/`；agent 可再用 `read` 讀取該 path。這個目錄不進 Git。
+
+## Esc 中斷語意
+
+互動或 one-shot 執行期間按 `Esc` 會透過同一個 `AbortController` 中斷目前 operation：
+
+- **等待模型時**：取消 HTTP request；user message 保留，追加 `interruption { phase: "model" }`，不偽造 assistant message。下一個 prompt 會接在該 user message後。
+- **tool 執行時**：取消目前 tool。已經完成的 tool results 保留；目前 call 寫入 `Operation aborted`；同一 assistant message 尚未執行的 calls 寫入 `Operation aborted before execution`。如此每個 `tool_call_id` 都有 result，後續 OpenRouter transcript 仍合法。
+- **compaction 時**：取消摘要 request，舊 messages 完全不變，只追加 `interruption { phase: "compact" }`。
+- **空閒時**：`Esc` 不做任何事。
+
+每次中斷都 append-only 寫入 session：
+
+```json
+{"type":"interruption","phase":"tool","toolCallId":"call_123","reason":"escape","timestamp":"..."}
+```
+
+Resume 時 `interruption` 是 audit event，不會成為模型 message；實際可續跑的 context 由已持久化的 user/assistant/tool messages 重建。
 
 usage 會像 pi-coding-agent 的 footer 一樣累計整個 session（包含同一 prompt 觸發的多輪 tool calls）：
 
@@ -159,15 +185,13 @@ npm run dev -- "列出目前目錄並解釋專案"
 npm run dev -- --skill ./some-skill/SKILL.md
 ```
 
-預設依序遞迴掃描：
+預設只遞迴掃描：
 
 ```text
 .tiny-agent/skills/**/SKILL.md
-.pi/skills/**/SKILL.md
-.agents/skills/**/SKILL.md
 ```
 
-`.tiny-agent/skills` 是此專案的主要 skill 位置；後兩者保留跨 agent harness 相容性。啟動時會解析 frontmatter，將每個 skill 的 `name`、`description` 與絕對 `location` 以 `<available_skills>` XML 填入 system prompt，但不會預先放入完整 instructions。模型判斷任務符合時，會使用 `read` 載入該 `SKILL.md`，維持 progressive disclosure；`/skill:name` 則會明確載入全文。
+啟動時會解析 frontmatter，將每個 skill 的 `name`、`description` 與絕對 `location` 以 `<available_skills>` XML 填入 system prompt，但不會預先放入完整 instructions。模型判斷任務符合時，會使用 `read` 載入該 `SKILL.md`，維持 progressive disclosure；`/skill:name` 則會明確載入全文。
 
 Repo 內附有可進版控的測試 skill：
 
@@ -186,7 +210,7 @@ Hello from tiny-agent-ts! Skill loaded successfully.
 
 ## Compact 的教學版語意
 
-`/compact` 保留 system prompt 與最近 6 則訊息，請同一模型摘要更舊內容，再以 `[Compacted history]` 放回對話。這是刻意簡化的版本：不做 tokenizer 計算或自動觸發。
+`/compact` 保留 system prompt 與至少最近 6 則訊息，並將切點向前移到 `user` message，避免拆散 assistant tool call 與 tool result。較舊內容交給同一模型摘要，再以 `[Compacted history]` 放回對話。這是刻意簡化的版本：不做 tokenizer 計算或自動觸發。
 
 ## 測試
 

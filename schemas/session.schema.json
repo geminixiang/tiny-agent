@@ -2,11 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://tiny-agent.local/schemas/session.schema.json",
   "title": "tiny-agent JSONL session record",
-  "description": "Each line in .tiny-agent/sessions/*.jsonl MUST independently validate against this schema. The first line MUST be a session record; remaining lines are chronological message or compaction records.",
+  "description": "Each line in .tiny-agent/sessions/*.jsonl MUST independently validate against this schema. The first line MUST be a session record; remaining lines are chronological message, compaction, or interruption records.",
   "oneOf": [
     { "$ref": "#/$defs/session" },
     { "$ref": "#/$defs/messageRecord" },
-    { "$ref": "#/$defs/compaction" }
+    { "$ref": "#/$defs/compaction" },
+    { "$ref": "#/$defs/interruption" }
   ],
   "$defs": {
     "timestamp": { "type": "string", "format": "date-time" },
@@ -95,6 +96,24 @@
         "keptMessages": { "type": "integer", "minimum": 0 },
         "usage": { "$ref": "#/$defs/usage" }
       }
+    },
+    "interruption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "timestamp", "phase", "reason"],
+      "properties": {
+        "type": { "const": "interruption" },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "phase": { "enum": ["model", "tool", "compact"] },
+        "reason": { "const": "escape" },
+        "toolCallId": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "phase": { "const": "tool" } }, "required": ["phase"] },
+          "then": { "required": ["toolCallId"] }
+        }
+      ]
     }
   }
 }

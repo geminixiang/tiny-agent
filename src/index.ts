@@ -3,17 +3,16 @@ import { exec } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
+import { createInterface, emitKeypressEvents } from "node:readline";
 import { promisify } from "node:util";
 
 export const MODEL = "deepseek/deepseek-v4-flash-0731";
-const run = promisify(exec), root = process.cwd();
+const run = promisify(exec), root = process.cwd(), MAX_TOOL_OUTPUT = 50 * 1024;
 type Msg = { role: "system" | "user" | "assistant" | "tool"; content: string | null; tool_call_id?: string; tool_calls?: Call[] };
 type Call = { id: string; type: "function"; function: { name: string; arguments: string } };
 type Skill = { name: string; description: string; path: string };
-type ContextFile = { path: string; content: string };
 type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number; cacheHitRate?: number };
-type SessionRecord = { type: "session" | "message" | "compaction"; [key: string]: unknown };
+type SessionRecord = { type: "session" | "message" | "compaction" | "interruption"; [key: string]: unknown };
 type ToolEvent = { phase: "start" | "end"; name: string; args: Record<string, string>; result?: string };
 
 export function toolLine({ phase, name, args, result }: ToolEvent) {
@@ -23,8 +22,8 @@ export function toolLine({ phase, name, args, result }: ToolEvent) {
 }
 
 function uuid7(now = Date.now()) {
-  const b = randomBytes(16), t = BigInt(now);
-  for (let i = 5; i >= 0; i--) b[i] = Number(t >> BigInt((5 - i) * 8) & 255n);
+  const b = randomBytes(16); let t = BigInt(now);
+  for (let i = 5; i >= 0; i--) { b[i] = Number(t & 0xffn); t >>= 8n; }
   b[6] = b[6] & 15 | 0x70; b[8] = b[8] & 63 | 0x80;
   const h = b.toString("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
@@ -71,15 +70,23 @@ function pathInRoot(path: string) {
   return full;
 }
 
-export async function tool(name: string, a: Record<string, string>) {
-  if (name === "bash") return (await run(a.command, { cwd: root, timeout: 120_000, maxBuffer: 1_000_000 })).stdout || "(no output)";
+export async function tool(name: string, a: Record<string, string>, signal?: AbortSignal) {
+  if (signal?.aborted) throw Error("Operation aborted");
+  if (name === "bash") {
+    const { stdout, stderr } = await run(a.command, { cwd: root, timeout: 120_000, maxBuffer: 10_000_000, signal }), output = stdout + stderr || "(no output)";
+    const bytes = Buffer.from(output); if (bytes.length <= MAX_TOOL_OUTPUT) return output;
+    const path = resolve(root, ".tiny-agent/tool-output", `${uuid7()}.log`); await mkdir(dirname(path), { recursive: true }); await writeFile(path, output);
+    let start = bytes.length - MAX_TOOL_OUTPUT; while ((bytes[start] & 0xc0) === 0x80) start++;
+    return `${bytes.subarray(start).toString()}\n\n[Output truncated. Full output: ${path}]`;
+  }
   const path = pathInRoot(a.path);
-  if (name === "read") return (await readFile(path, "utf8")).slice(0, 100_000);
-  if (name === "write") return mkdir(dirname(path), { recursive: true }).then(() => writeFile(path, a.content)).then(() => "ok");
+  if (name === "read") return (await readFile(path, { encoding: "utf8", signal })).slice(0, 100_000);
+  if (name === "write") return mkdir(dirname(path), { recursive: true }).then(() => { if (signal?.aborted) throw Error("Operation aborted"); return writeFile(path, a.content, { signal }); }).then(() => "ok");
   if (name === "edit") {
-    const text = await readFile(path, "utf8"), parts = text.split(a.oldText);
+    const text = await readFile(path, { encoding: "utf8", signal }), parts = text.split(a.oldText);
     if (parts.length !== 2) throw Error(`oldText must occur exactly once (found ${parts.length - 1})`);
-    await writeFile(path, parts.join(a.newText)); return "ok";
+    if (signal?.aborted) throw Error("Operation aborted");
+    await writeFile(path, parts.join(a.newText), { signal }); return "ok";
   }
   throw Error(`unknown tool: ${name}`);
 }
@@ -93,13 +100,11 @@ async function walk(dir: string): Promise<string[]> {
 }
 
 export async function loadAgents(cwd = root) {
-  const path = resolve(cwd, "AGENTS.md");
-  try { return [{ path, content: await readFile(path, "utf8") }]; } catch { return []; }
+  return readFile(resolve(cwd, "AGENTS.md"), "utf8").catch(() => "");
 }
 
 export async function loadSkills(extra: string[] = []) {
-  const dirs = [".tiny-agent/skills", ".pi/skills", ".agents/skills"];
-  const files = [...new Set([...(await Promise.all(dirs.map(dir => walk(resolve(root, dir))))).flat(), ...extra.map(path => resolve(path))])];
+  const files = [...new Set([...await walk(resolve(root, ".tiny-agent/skills")), ...extra.map(path => resolve(path))])];
   return Promise.all(files.map(async path => {
     const text = await readFile(path, "utf8"), head = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
     const field = (key: string) => head.match(new RegExp(`^${key}:\\s*["']?(.*?)["']?$`, "m"))?.[1] ?? "";
@@ -110,10 +115,20 @@ export async function loadSkills(extra: string[] = []) {
 export class Agent {
   messages: Msg[];
   usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  constructor(public skills: Skill[] = [], public fetcher: typeof fetch = fetch, public session?: Session, public onTool: (event: ToolEvent) => void = () => {}, contextFiles: ContextFile[] = []) {
+  private active?: { controller: AbortController; phase: "model" | "tool" | "compact"; toolCallId?: string };
+  constructor(public skills: Skill[] = [], public fetcher: typeof fetch = fetch, public session?: Session, public onTool: (event: ToolEvent) => void = () => {}, instructions = "") {
     const list = skills.map(s => `<skill>\n<name>${s.name}</name>\n<description>${s.description}</description>\n<location>${s.path}</location>\n</skill>`).join("\n") || "(none)";
-    const project = contextFiles.length ? `\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n${contextFiles.map(f => `<project_instructions path="${f.path}">\n${f.content}\n</project_instructions>`).join("\n\n")}\n\n</project_context>` : "";
+    const project = instructions ? `\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="${resolve(root, "AGENTS.md")}">\n${instructions}\n</project_instructions>\n\n</project_context>` : "";
     this.messages = [{ role: "system", content: `You are tiny-agent, a concise coding agent in ${root}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.${project}\n\n<available_skills>\n${list}\n</available_skills>` }];
+  }
+  get busy() { return !!this.active; }
+  abort() { this.active?.controller.abort(); }
+  private start(phase: "model" | "tool" | "compact", toolCallId?: string) {
+    const controller = new AbortController(); this.active = { controller, phase, toolCallId }; return controller.signal;
+  }
+  private finish() { this.active = undefined; }
+  private async interrupted(phase: "model" | "tool" | "compact", toolCallId?: string) {
+    await this.session?.append({ type: "interruption", phase, toolCallId, reason: "escape" });
   }
   async restore() {
     if (!this.session) return;
@@ -132,11 +147,11 @@ export class Agent {
       }
     }
   }
-  async call(messages = this.messages, tools: unknown = specs, updateCacheRate = true) {
+  async call(messages = this.messages, tools: unknown = specs, updateCacheRate = true, signal?: AbortSignal) {
     const key = process.env.OPENROUTER_API_KEY;
     if (!key) throw Error("Set OPENROUTER_API_KEY");
     const body = { model: MODEL, messages, ...(tools ? { tools } : {}) };
-    const r = await this.fetcher("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": "https://github.com/tiny-agent" }, body: JSON.stringify(body) });
+    const r = await this.fetcher("https://openrouter.ai/api/v1/chat/completions", { method: "POST", signal, headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": "https://github.com/tiny-agent" }, body: JSON.stringify(body) });
     if (!r.ok) throw Error(`OpenRouter ${r.status}: ${await r.text()}`);
     const data = await r.json() as any, u = data.usage ?? {}, details = u.prompt_tokens_details ?? {};
     const cacheRead = details.cached_tokens ?? u.prompt_cache_hit_tokens ?? 0, cacheWrite = details.cache_write_tokens ?? 0;
@@ -153,27 +168,52 @@ export class Agent {
     const user: Msg = { role: "user", content: text };
     this.messages.push(user); await this.session?.append({ type: "message", message: user });
     for (;;) {
-      const { message: answer, usage } = await this.call(); this.messages.push(answer);
+      let answer: Msg, usage: Omit<Usage, "cacheHitRate">;
+      try { ({ message: answer, usage } = await this.call(this.messages, specs, true, this.start("model"))); }
+      catch (e) {
+        const aborted = this.active?.controller.signal.aborted; this.finish();
+        if (aborted) { await this.interrupted("model"); return "Operation aborted."; }
+        throw e;
+      }
+      this.finish(); this.messages.push(answer);
       await this.session?.append({ type: "message", message: answer, usage });
       if (!answer.tool_calls?.length) return answer.content ?? "";
-      for (const c of answer.tool_calls) {
-        let content: string, args: Record<string, string> = {};
+      for (let i = 0; i < answer.tool_calls.length; i++) {
+        const c = answer.tool_calls[i]; let content: string, args: Record<string, string> = {}, aborted = false;
         try {
           args = JSON.parse(c.function.arguments); this.onTool({ phase: "start", name: c.function.name, args });
-          content = await tool(c.function.name, args);
+          content = await tool(c.function.name, args, this.start("tool", c.id));
         }
-        catch (e) { content = `Error: ${e instanceof Error ? e.message : e}`; }
-        this.onTool({ phase: "end", name: c.function.name, args, result: content });
+        catch (e) { aborted = !!this.active?.controller.signal.aborted; content = aborted ? "Operation aborted" : `Error: ${e instanceof Error ? e.message : e}`; }
+        this.finish(); this.onTool({ phase: "end", name: c.function.name, args, result: content });
         const result: Msg = { role: "tool", tool_call_id: c.id, content };
         this.messages.push(result); await this.session?.append({ type: "message", message: result, toolName: c.function.name });
+        if (aborted) {
+          for (const pending of answer.tool_calls.slice(i + 1)) {
+            const skipped: Msg = { role: "tool", tool_call_id: pending.id, content: "Operation aborted before execution" };
+            this.messages.push(skipped); await this.session?.append({ type: "message", message: skipped, toolName: pending.function.name });
+          }
+          await this.interrupted("tool", c.id);
+          return "Operation aborted.";
+        }
       }
     }
   }
-  async compact(keep = 6) {
+  async compact() {
+    const keep = 6;
     if (this.messages.length <= 1) return "Nothing to compact.";
-    const cut = Math.max(this.messages.length - keep, 1), recent = this.messages.slice(cut), old = this.messages.slice(1, cut);
+    let cut = Math.max(this.messages.length - keep, 1);
+    while (cut > 1 && this.messages[cut].role !== "user") cut--;
+    const recent = this.messages.slice(cut), old = this.messages.slice(1, cut);
     if (!old.length) return "Nothing to compact.";
-    const { message: summary, usage } = await this.call([{ role: "system", content: "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps." }, { role: "user", content: JSON.stringify(old) }], null, false);
+    let summary: Msg, usage: Omit<Usage, "cacheHitRate">;
+    try { ({ message: summary, usage } = await this.call([{ role: "system", content: "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps." }, { role: "user", content: JSON.stringify(old) }], null, false, this.start("compact"))); }
+    catch (e) {
+      const aborted = this.active?.controller.signal.aborted; this.finish();
+      if (aborted) { await this.interrupted("compact"); return "Compaction aborted."; }
+      throw e;
+    }
+    this.finish();
     const compacted: Msg = { role: "user", content: `[Compacted history]\n${summary.content}` };
     this.messages = [this.messages[0], compacted, ...recent];
     await this.session?.append({ type: "compaction", summary: summary.content, compactedMessages: old.length, keptMessages: keep, usage });
@@ -191,18 +231,22 @@ async function main() {
   if (sessionId) await agent.restore();
   const oneShot = args.filter((x, i) => !["--skill", "--session"].includes(x) && !["--skill", "--session"].includes(args[i - 1])).join(" ");
   const resume = () => console.log(`\nResume: npm run dev -- --session ${session.id}`);
+  const rl = createInterface({ input: process.stdin, output: process.stdout }), ask = (q: string) => new Promise<string>(ok => rl.question(q, ok));
+  emitKeypressEvents(process.stdin, rl); if (process.stdin.isTTY) process.stdin.setRawMode(true);
+  const escape = (_: string, key: { name?: string }) => { if (key.name === "escape" && agent.busy) { console.log("\n\x1b[33mAborting...\x1b[0m"); agent.abort(); } };
+  process.stdin.on("keypress", escape);
+  const close = () => { process.stdin.off("keypress", escape); rl.close(); resume(); };
   console.log(`\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: ${MODEL}\nsession: ${session.id}\npath: ${session.path}${sessionId ? "\nrestored: yes" : ""}`);
   if (oneShot) {
     console.log(`\n${await agent.prompt(oneShot)}`);
-    console.log(`\x1b[2m${usageLine(agent.usage)}\x1b[0m`); return resume();
+    console.log(`\x1b[2m${usageLine(agent.usage)}\x1b[0m`); return close();
   }
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  console.log("/compact  /compact all  /skill:name  /exit");
+  console.log("Esc aborts the active model/tool/compact operation.\n/compact  /skill:name  /exit");
   while (true) {
-    const input = (await rl.question("\x1b[32m›\x1b[0m ")).trim();
+    const input = (await ask("\x1b[32m›\x1b[0m ")).trim();
     if (!input) continue; if (input === "/exit") break;
-    if (input === "/compact" || input === "/compact all") {
-      console.log(await agent.compact(input === "/compact all" ? 0 : 6));
+    if (input === "/compact") {
+      console.log(await agent.compact());
       console.log(`\x1b[2m${usageLine(agent.usage)}\x1b[0m`);
     }
     else if (input.startsWith("/skill:")) {
@@ -214,7 +258,7 @@ async function main() {
       console.log(`\x1b[2m${usageLine(agent.usage)}\x1b[0m`);
     }
   }
-  rl.close(); resume();
+  close();
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) main().catch(e => { console.error(e.message); process.exitCode = 1; });
