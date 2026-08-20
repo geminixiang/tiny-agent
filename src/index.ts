@@ -103,29 +103,11 @@ export class Session {
   }
 }
 
-function formatTokens(n: number) {
-  return n < 1e3
-    ? `${n}`
-    : n < 1e4
-      ? `${(n / 1e3).toFixed(1)}k`
-      : n < 1e6
-        ? `${Math.round(n / 1e3)}k`
-        : n < 1e7
-          ? `${(n / 1e6).toFixed(1)}M`
-          : `${Math.round(n / 1e6)}M`;
-}
+// prettier-ignore
+function formatTokens(n: number) { return n < 1e3 ? `${n}` : n < 1e4 ? `${(n / 1e3).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1e3)}k` : n < 1e7 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e6)}M`; }
 
-export function formatUsage({ input, output, cacheRead, cacheWrite, cacheHitRate }: Usage) {
-  return [
-    `↑${formatTokens(input)}`,
-    `↓${formatTokens(output)}`,
-    cacheRead && `R${formatTokens(cacheRead)}`,
-    cacheWrite && `W${formatTokens(cacheWrite)}`,
-    (cacheRead > 0 || cacheWrite > 0) && cacheHitRate !== undefined && `CH${cacheHitRate.toFixed(1)}%`,
-  ]
-    .filter(Boolean)
-    .join(" ");
-}
+// prettier-ignore
+export function formatUsage({ input, output, cacheRead, cacheWrite, cacheHitRate }: Usage) { return [`↑${formatTokens(input)}`, `↓${formatTokens(output)}`, cacheRead && `R${formatTokens(cacheRead)}`, cacheWrite && `W${formatTokens(cacheWrite)}`, (cacheRead > 0 || cacheWrite > 0) && cacheHitRate !== undefined && `CH${cacheHitRate.toFixed(1)}%`].filter(Boolean).join(" "); }
 
 const toolDefinitions = [
   ["bash", "Run a shell command in the working directory", { command: { type: "string" } }],
