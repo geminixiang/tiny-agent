@@ -25,19 +25,20 @@ async function main() {
     emitKeypressEvents(process.stdin, rl);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     let exiting = false;
-    const onKeypress = (_: string, key: { name?: string; ctrl?: boolean; meta?: boolean }) => {
-        if ((key.ctrl || key.meta) && key.name === "c") {
-            exiting = true;
-            if (agent.busy) agent.abort();
-            else rl.write("/exit\n");
-            return;
-        }
+    const onInterrupt = () => {
+        exiting = true;
+        if (agent.busy) agent.abort();
+        else rl.write("/exit\n");
+    };
+    const onKeypress = (_: string, key: { name?: string }) => {
         if (key.name !== "escape" || !agent.busy) return;
         console.log("\n\x1b[33mAborting...\x1b[0m");
         agent.abort();
     };
+    rl.on("SIGINT", onInterrupt);
     process.stdin.on("keypress", onKeypress);
     const close = () => {
+        rl.off("SIGINT", onInterrupt);
         process.stdin.off("keypress", onKeypress);
         rl.close();
         resume();
