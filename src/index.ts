@@ -6,7 +6,7 @@ import { basename, dirname, resolve } from "node:path";
 import { createInterface, emitKeypressEvents } from "node:readline";
 import { promisify } from "node:util";
 
-export const MODEL = "deepseek/deepseek-v4-flash-0731";
+export const MODEL = process.env.TINY_MODEL || "deepseek/deepseek-v4-flash-0731";
 const run = promisify(exec), root = process.cwd(), MAX_TOOL_OUTPUT = 50 * 1024;
 type Msg = { role: "system" | "user" | "assistant" | "tool"; content: string | null; tool_call_id?: string; tool_calls?: Call[] };
 type Call = { id: string; type: "function"; function: { name: string; arguments: string } };

@@ -4,7 +4,7 @@
 
 ## 已有功能
 
-- OpenRouter（固定 `deepseek/deepseek-v4-flash-0731`）
+- OpenRouter（預設 `deepseek/deepseek-v4-flash-0731`，可用 `TINY_MODEL` 覆寫）
 - agent/tool loop
 - `bash`、`read`、`write`、`edit`
 - Agent Skills 漸進載入
@@ -34,6 +34,12 @@ npm link
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
 tiny-ts
+```
+
+預設模型是 `deepseek/deepseek-v4-flash-0731`。要改用其他 OpenRouter model：
+
+```bash
+TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 ```
 
 確認安裝成功：

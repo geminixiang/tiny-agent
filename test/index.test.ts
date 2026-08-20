@@ -113,7 +113,7 @@ test("formats pi-style token usage and cache ratio", () => {
   assert.equal(usageLine({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), "↑0 ↓0");
 });
 
-test("pins the requested OpenRouter model", () => assert.equal(MODEL, "deepseek/deepseek-v4-flash-0731"));
+test("uses the default OpenRouter model", () => assert.equal(MODEL, process.env.TINY_MODEL || "deepseek/deepseek-v4-flash-0731"));
 
 test("write, read, edit", async () => {
   assert.equal(await tool("write", { path: "a.txt", content: "hello" }), "ok");
