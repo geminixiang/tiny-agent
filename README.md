@@ -94,7 +94,13 @@ Bash output 超過 50KB 時，tool result 與 session 只保留最後 50KB，並
 每次中斷都 append-only 寫入 session：
 
 ```json
-{"type":"interruption","phase":"tool","toolCallId":"call_123","reason":"escape","timestamp":"..."}
+{
+  "type": "interruption",
+  "phase": "tool",
+  "toolCallId": "call_123",
+  "reason": "escape",
+  "timestamp": "..."
+}
 ```
 
 Resume 時 `interruption` 是 audit event，不會成為模型 message；實際可續跑的 context 由已持久化的 user/assistant/tool messages 重建。
@@ -234,8 +240,16 @@ Hello from tiny-agent-ts! Skill loaded successfully.
 測試 mock OpenRouter，不花 API 額度，但會確認 request 使用指定模型：
 
 ```bash
-npm test
+npm run lint
+npm run format:check
 npm run check
+npm test
+```
+
+自動排版：
+
+```bash
+npm run format
 ```
 
 若要 smoke test 真實 API：

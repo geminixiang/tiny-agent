@@ -35,7 +35,10 @@
           "required": ["name", "arguments"],
           "properties": {
             "name": { "enum": ["bash", "read", "write", "edit"] },
-            "arguments": { "type": "string", "description": "JSON-encoded tool arguments as returned by OpenRouter." }
+            "arguments": {
+              "type": "string",
+              "description": "JSON-encoded tool arguments as returned by OpenRouter."
+            }
           }
         }
       }
@@ -64,7 +67,11 @@
       "properties": {
         "type": { "const": "session" },
         "version": { "const": 1 },
-        "id": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
         "createdAt": { "$ref": "#/$defs/timestamp" },
         "timestamp": { "$ref": "#/$defs/timestamp" },
         "cwd": { "type": "string" },
