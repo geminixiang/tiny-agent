@@ -24,14 +24,21 @@ async function main() {
         ask = (q: string) => new Promise<string>((ok) => rl.question(q, ok));
     emitKeypressEvents(process.stdin, rl);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
-    const escape = (_: string, key: { name?: string }) => {
+    let exiting = false;
+    const onKeypress = (_: string, key: { name?: string; ctrl?: boolean; meta?: boolean }) => {
+        if ((key.ctrl || key.meta) && key.name === "c") {
+            exiting = true;
+            if (agent.busy) agent.abort();
+            else rl.write("/exit\n");
+            return;
+        }
         if (key.name !== "escape" || !agent.busy) return;
         console.log("\n\x1b[33mAborting...\x1b[0m");
         agent.abort();
     };
-    process.stdin.on("keypress", escape);
+    process.stdin.on("keypress", onKeypress);
     const close = () => {
-        process.stdin.off("keypress", escape);
+        process.stdin.off("keypress", onKeypress);
         rl.close();
         resume();
     };
@@ -43,13 +50,14 @@ async function main() {
         console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
         return close();
     }
-    console.log("Esc aborts the active model/tool/compact operation.\n/compact  /skill:name  /exit");
+    console.log("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit");
     while (true) {
         const input = (await ask("\x1b[32m›\x1b[0m ")).trim();
         if (!input) continue;
         if (input === "/exit") break;
         if (input === "/compact") {
             console.log(await agent.compact());
+            if (exiting) break;
             console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
             continue;
         }
@@ -60,11 +68,15 @@ async function main() {
                 console.log(`Unknown skill: ${name}`);
                 continue;
             }
-            console.log(await agent.runAgentLoop(`${await readFile(skill.path, "utf8")}\n\nUser: ${rest.join(" ")}`));
+            const answer = await agent.runAgentLoop(`${await readFile(skill.path, "utf8")}\n\nUser: ${rest.join(" ")}`);
+            if (exiting) break;
+            console.log(answer);
             console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
             continue;
         }
-        console.log(`\x1b[36m${await agent.runAgentLoop(input)}\x1b[0m`);
+        const answer = await agent.runAgentLoop(input);
+        if (exiting) break;
+        console.log(`\x1b[36m${answer}\x1b[0m`);
         console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
     }
     close();

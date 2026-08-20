@@ -74,6 +74,7 @@ user prompt → model → tool calls → tool results → model → final answer
 /skill:hello   明確載入 hello skill
 /exit          結束並顯示 session 恢復指令
 Esc            中斷目前的 model、tool 或 compact operation
+Ctrl+C         退出並顯示 session 恢復指令
 ```
 
 Tool 執行時只在終端顯示精簡 log：
