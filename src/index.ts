@@ -150,18 +150,8 @@ export async function executeTool(name: string, args: Record<string, string>, si
     throw Error(`unknown tool: ${name}`);
 }
 
-function uuid7(now = Date.now()) {
-    const b = randomBytes(16);
-    let t = BigInt(now);
-    for (let i = 5; i >= 0; i--) {
-        b[i] = Number(t & 0xffn);
-        t >>= 8n;
-    }
-    b[6] = (b[6] & 15) | 0x70;
-    b[8] = (b[8] & 63) | 0x80;
-    const h = b.toString("hex");
-    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
-}
+// prettier-ignore
+function uuid7(now = Date.now()) { const b = randomBytes(16); let t = BigInt(now); for (let i = 5; i >= 0; i--) { b[i] = Number(t & 0xffn); t >>= 8n; } b[6] = (b[6] & 15) | 0x70; b[8] = (b[8] & 63) | 0x80; const h = b.toString("hex"); return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`; }
 
 export class Session {
     private constructor(
@@ -310,7 +300,7 @@ export class Agent {
             headers: {
                 Authorization: `Bearer ${key}`,
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/tiny-agent",
+                "HTTP-Referer": "https://github.com/geminixiang/tiny-agent",
             },
             body: JSON.stringify(body),
         });
