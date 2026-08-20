@@ -18,22 +18,33 @@
 
 核心刻意集中在 [`src/index.ts`](src/index.ts)，方便從上到下閱讀；production agent 還需要權限確認、串流與更完整的 session resume UX 等。
 
-## 執行
+## 安裝與執行
 
-需要 Node.js 22+：
+需要 Node.js 22+。Clone 後執行：
 
 ```bash
+git clone https://github.com/geminixiang/tiny-agent.git
+cd tiny-agent
 npm install
-export OPENROUTER_API_KEY=sk-or-...
-npm run dev
+npm link
 ```
 
-也可安裝成真正的 CLI：
+設定 OpenRouter key，然後啟動：
 
 ```bash
-npm link
-tiny-agent
+export OPENROUTER_API_KEY=sk-or-...
+tiny-ts
 ```
+
+確認安裝成功：
+
+```bash
+command -v tiny-ts
+tiny-ts --session invalid
+# 應顯示：Invalid session ID: invalid
+```
+
+`npm link` 只需在每個 Node/npm 環境做一次。若使用 `nvm` 切換 Node 版本，需要在新版本下重新執行 `npm link`。開發模式可用 `npm run dev`。
 
 互動模式：
 
@@ -135,13 +146,13 @@ path: /project/.tiny-agent/sessions/2026-08-03T03-55-50-062Z_019fc5c3-79ae-7298-
 結束時會提供恢復指令：
 
 ```bash
-npm run dev -- --session 019fc5c3-79ae-7298-b7f3-182d602638c7
+tiny-ts --session 019fc5c3-79ae-7298-b7f3-182d602638c7
 ```
 
 也可以恢復後直接送出新 prompt：
 
 ```bash
-npm run dev -- --session 019fc5c3-79ae-7298-b7f3-182d602638c7 "繼續剛才的工作"
+tiny-ts --session 019fc5c3-79ae-7298-b7f3-182d602638c7 "繼續剛才的工作"
 ```
 
 恢復會 replay message records；遇到 compaction record 時，會用 summary 與當時保留的最近訊息重建有效 context。Usage 則從全部歷史 records 累計。
@@ -176,13 +187,13 @@ npm run dev -- --session 019fc5c3-79ae-7298-b7f3-182d602638c7 "繼續剛才的�
 單次模式：
 
 ```bash
-npm run dev -- "列出目前目錄並解釋專案"
+tiny-ts "列出目前目錄並解釋專案"
 ```
 
 指定額外 skill：
 
 ```bash
-npm run dev -- --skill ./some-skill/SKILL.md
+tiny-ts --skill ./some-skill/SKILL.md
 ```
 
 預設只遞迴掃描：
@@ -196,7 +207,7 @@ npm run dev -- --skill ./some-skill/SKILL.md
 Repo 內附有可進版控的測試 skill：
 
 ```bash
-npm run dev -- "say hello"
+tiny-ts "say hello"
 # 或進入互動模式後：/skill:hello
 ```
 
@@ -224,7 +235,7 @@ npm run check
 若要 smoke test 真實 API：
 
 ```bash
-OPENROUTER_API_KEY=... npm run dev -- "只回答 ok"
+OPENROUTER_API_KEY=... tiny-ts "只回答 ok"
 ```
 
 ## 四語言路線

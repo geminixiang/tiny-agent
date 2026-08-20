@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": { "tiny-agent": "./dist/src/index.js" },
+  "bin": { "tiny-ts": "./dist/src/cli.js" },
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/cli.ts",
     "build": "tsc",
     "prepare": "npm run build",
     "check": "tsc --noEmit",

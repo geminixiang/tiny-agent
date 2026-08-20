@@ -221,7 +221,7 @@ export class Agent {
   }
 }
 
-async function main() {
+export async function main() {
   const args = process.argv.slice(2), value = (flag: string) => args[args.indexOf(flag) + 1], sessionId = value("--session");
   if (args.includes("--session") && !sessionId) throw Error("--session requires a UUIDv7");
   const extras = args.flatMap((x, i) => x === "--skill" && args[i + 1] ? [args[i + 1]] : []), skills = await loadSkills(extras), instructions = await loadAgents();
@@ -230,7 +230,7 @@ async function main() {
   const agent = new Agent(skills, fetch, session, showTool, instructions);
   if (sessionId) await agent.restore();
   const oneShot = args.filter((x, i) => !["--skill", "--session"].includes(x) && !["--skill", "--session"].includes(args[i - 1])).join(" ");
-  const resume = () => console.log(`\nResume: npm run dev -- --session ${session.id}`);
+  const resume = () => console.log(`\nResume: tiny-ts --session ${session.id}`);
   const rl = createInterface({ input: process.stdin, output: process.stdout }), ask = (q: string) => new Promise<string>(ok => rl.question(q, ok));
   emitKeypressEvents(process.stdin, rl); if (process.stdin.isTTY) process.stdin.setRawMode(true);
   const escape = (_: string, key: { name?: string }) => { if (key.name === "escape" && agent.busy) { console.log("\n\x1b[33mAborting...\x1b[0m"); agent.abort(); } };
@@ -260,5 +260,3 @@ async function main() {
   }
   close();
 }
-
-if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) main().catch(e => { console.error(e.message); process.exitCode = 1; });
