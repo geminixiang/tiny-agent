@@ -261,7 +261,7 @@ export class Agent {
             this.endOperation();
         }
     }
-    async restore() {
+    async resumeSession() {
         if (!this.session) return;
         for (const r of (await this.session.records()).slice(1)) {
             if (r.type === "message") {

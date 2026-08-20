@@ -15,7 +15,7 @@ async function main() {
     const showTool = (event: Parameters<typeof formatToolEvent>[0]) =>
         console.log(`\x1b[${event.phase === "start" ? "33" : "2"}m${formatToolEvent(event)}\x1b[0m`);
     const agent = new Agent(skills, fetch, session, showTool, instructions);
-    if (sessionId) await agent.restore();
+    if (sessionId) await agent.resumeSession();
     const oneShot = args
         .filter((x, i) => !["--skill", "--session"].includes(x) && !["--skill", "--session"].includes(args[i - 1]))
         .join(" ");

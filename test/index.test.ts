@@ -70,7 +70,7 @@ test("restores messages, compaction, and cumulative usage", async () => {
     });
     await session.append({ type: "message", message: { role: "user", content: "new" } });
     const agent = new Agent([], fetch, session);
-    await agent.restore();
+    await agent.resumeSession();
     assert.deepEqual(agent.messages.slice(1), [
         { role: "user", content: "[Compacted history]\nsummary" },
         { role: "user", content: "new" },
@@ -389,7 +389,7 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         { summary: "summary", compactedMessages: 6, keptMessages: 6 },
     );
     const restored = new Agent([], fetch, session);
-    await restored.restore();
+    await restored.resumeSession();
     assert.deepEqual(restored.messages, agent.messages);
     assert.equal(requests[0].model, MODEL);
     assert.equal(requests[2].tools, undefined);
