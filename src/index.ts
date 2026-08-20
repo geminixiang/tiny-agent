@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { exec } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
@@ -48,67 +47,45 @@ export function formatToolEvent({ phase, name, args, result }: ToolEvent) {
     return `◆ ${name}${target ? ` ${target.length > 80 ? target.slice(0, 77) + "..." : target}` : ""}${suffix}`;
 }
 
-function uuid7(now = Date.now()) {
-    const b = randomBytes(16);
-    let t = BigInt(now);
-    for (let i = 5; i >= 0; i--) {
-        b[i] = Number(t & 0xffn);
-        t >>= 8n;
-    }
-    b[6] = (b[6] & 15) | 0x70;
-    b[8] = (b[8] & 63) | 0x80;
-    const h = b.toString("hex");
-    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
-}
-
-export class Session {
-    private constructor(
-        public id: string,
-        public path: string,
-    ) {}
-    static async create(cwd = root, now = new Date()) {
-        const id = uuid7(now.getTime()),
-            dir = resolve(cwd, ".tiny-agent/sessions");
-        const path = resolve(dir, `${now.toISOString().replace(/[:.]/g, "-")}_${id}.jsonl`);
-        await mkdir(dir, { recursive: true });
-        const session = new Session(id, path);
-        await session.append({
-            type: "session",
-            version: 1,
-            id,
-            createdAt: now.toISOString(),
-            cwd,
-            provider: "openrouter",
-            model: MODEL,
-        });
-        return session;
-    }
-    static async open(id: string, cwd = root) {
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))
-            throw Error(`Invalid session ID: ${id}`);
-        const dir = resolve(cwd, ".tiny-agent/sessions"),
-            matches = (await readdir(dir).catch(() => [])).filter((f) => f.endsWith(`_${id}.jsonl`));
-        if (matches.length !== 1)
-            throw Error(matches.length ? `Duplicate session ID: ${id}` : `Session not found: ${id}`);
-        return new Session(id, resolve(dir, matches[0]));
-    }
-    async records() {
-        return (await readFile(this.path, "utf8"))
-            .trim()
-            .split("\n")
-            .filter(Boolean)
-            .map((line) => JSON.parse(line) as any);
-    }
-    async append(record: SessionRecord) {
-        await appendFile(this.path, JSON.stringify({ ...record, timestamp: new Date().toISOString() }) + "\n");
-    }
-}
-
 // prettier-ignore
 function formatTokens(n: number) { return n < 1e3 ? `${n}` : n < 1e4 ? `${(n / 1e3).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1e3)}k` : n < 1e7 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e6)}M`; }
 
 // prettier-ignore
 export function formatUsage({ input, output, cacheRead, cacheWrite, cacheHitRate }: Usage) { return [`↑${formatTokens(input)}`, `↓${formatTokens(output)}`, cacheRead && `R${formatTokens(cacheRead)}`, cacheWrite && `W${formatTokens(cacheWrite)}`, (cacheRead > 0 || cacheWrite > 0) && cacheHitRate !== undefined && `CH${cacheHitRate.toFixed(1)}%`].filter(Boolean).join(" "); }
+
+async function findSkillFiles(dir: string): Promise<string[]> {
+    const out: string[] = [];
+    for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+        if (e.isDirectory()) out.push(...(await findSkillFiles(resolve(dir, e.name))));
+        else if (e.name === "SKILL.md") out.push(resolve(dir, e.name));
+    }
+    return out;
+}
+
+export async function loadProjectInstructions(cwd = root) {
+    return readFile(resolve(cwd, "AGENTS.md"), "utf8").catch(() => "");
+}
+
+export async function loadSkills(extra: string[] = []) {
+    const files = [
+        ...new Set([
+            ...(await findSkillFiles(resolve(root, ".tiny-agent/skills"))),
+            ...extra.map((path) => resolve(path)),
+        ]),
+    ];
+    return Promise.all(
+        files.map(async (path) => {
+            const text = await readFile(path, "utf8"),
+                head = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
+            const field = (key: string) => head.match(new RegExp(`^${key}:\\s*["']?(.*?)["']?$`, "m"))?.[1] ?? "";
+            return {
+                name: field("name") || basename(dirname(path)),
+                description: field("description"),
+                path,
+            };
+        }),
+    );
+}
 
 const toolDefinitions = [
     ["bash", "Run a shell command in the working directory", { command: { type: "string" } }],
@@ -173,42 +150,60 @@ export async function executeTool(name: string, args: Record<string, string>, si
     throw Error(`unknown tool: ${name}`);
 }
 
-async function findSkillFiles(dir: string): Promise<string[]> {
-    try {
-        const out: string[] = [];
-        for (const e of await readdir(dir, { withFileTypes: true })) {
-            if (e.isDirectory()) out.push(...(await findSkillFiles(resolve(dir, e.name))));
-            else if (e.name === "SKILL.md") out.push(resolve(dir, e.name));
-        }
-        return out;
-    } catch {
-        return [];
+function uuid7(now = Date.now()) {
+    const b = randomBytes(16);
+    let t = BigInt(now);
+    for (let i = 5; i >= 0; i--) {
+        b[i] = Number(t & 0xffn);
+        t >>= 8n;
     }
+    b[6] = (b[6] & 15) | 0x70;
+    b[8] = (b[8] & 63) | 0x80;
+    const h = b.toString("hex");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
-export async function loadProjectInstructions(cwd = root) {
-    return readFile(resolve(cwd, "AGENTS.md"), "utf8").catch(() => "");
-}
-
-export async function loadSkills(extra: string[] = []) {
-    const files = [
-        ...new Set([
-            ...(await findSkillFiles(resolve(root, ".tiny-agent/skills"))),
-            ...extra.map((path) => resolve(path)),
-        ]),
-    ];
-    return Promise.all(
-        files.map(async (path) => {
-            const text = await readFile(path, "utf8"),
-                head = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
-            const field = (key: string) => head.match(new RegExp(`^${key}:\\s*["']?(.*?)["']?$`, "m"))?.[1] ?? "";
-            return {
-                name: field("name") || basename(dirname(path)),
-                description: field("description"),
-                path,
-            };
-        }),
-    );
+export class Session {
+    private constructor(
+        public id: string,
+        public path: string,
+    ) {}
+    static async create(cwd = root, now = new Date()) {
+        const id = uuid7(now.getTime()),
+            dir = resolve(cwd, ".tiny-agent/sessions");
+        const path = resolve(dir, `${now.toISOString().replace(/[:.]/g, "-")}_${id}.jsonl`);
+        await mkdir(dir, { recursive: true });
+        const session = new Session(id, path);
+        await session.append({
+            type: "session",
+            version: 1,
+            id,
+            createdAt: now.toISOString(),
+            cwd,
+            provider: "openrouter",
+            model: MODEL,
+        });
+        return session;
+    }
+    static async open(id: string, cwd = root) {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))
+            throw Error(`Invalid session ID: ${id}`);
+        const dir = resolve(cwd, ".tiny-agent/sessions"),
+            matches = (await readdir(dir).catch(() => [])).filter((f) => f.endsWith(`_${id}.jsonl`));
+        if (matches.length !== 1)
+            throw Error(matches.length ? `Duplicate session ID: ${id}` : `Session not found: ${id}`);
+        return new Session(id, resolve(dir, matches[0]));
+    }
+    async records() {
+        return (await readFile(this.path, "utf8"))
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => JSON.parse(line) as any);
+    }
+    async append(record: SessionRecord) {
+        await appendFile(this.path, JSON.stringify({ ...record, timestamp: new Date().toISOString() }) + "\n");
+    }
 }
 
 export class Agent {
@@ -259,6 +254,22 @@ export class Agent {
     }
     private async recordInterruption(phase: "model" | "tool" | "compact", toolCallId?: string) {
         await this.session?.append({ type: "interruption", phase, toolCallId, reason: "escape" });
+    }
+    private async runModelRequest(
+        messages: Message[],
+        tools: unknown,
+        phase: "model" | "compact",
+        updateCacheRate = true,
+    ) {
+        const signal = this.beginOperation(phase);
+        try {
+            return await this.callModel(messages, tools, updateCacheRate, signal);
+        } catch (error) {
+            if (!signal.aborted) throw error;
+            await this.recordInterruption(phase);
+        } finally {
+            this.endOperation();
+        }
     }
     async restore() {
         if (!this.session) return;
@@ -326,22 +337,9 @@ export class Agent {
         this.messages.push(user);
         await this.session?.append({ type: "message", message: user });
         for (;;) {
-            let answer: Message, usage: Omit<Usage, "cacheHitRate">;
-            try {
-                ({ message: answer, usage } = await this.callModel(
-                    this.messages,
-                    toolDefinitions,
-                    true,
-                    this.beginOperation("model"),
-                ));
-            } catch (e) {
-                const aborted = this.active?.controller.signal.aborted;
-                this.endOperation();
-                if (!aborted) throw e;
-                await this.recordInterruption("model");
-                return "Operation aborted.";
-            }
-            this.endOperation();
+            const response = await this.runModelRequest(this.messages, toolDefinitions, "model");
+            if (!response) return "Operation aborted.";
+            const { message: answer, usage } = response;
             this.messages.push(answer);
             await this.session?.append({ type: "message", message: answer, usage });
             if (!answer.tool_calls?.length) return answer.content ?? "";
@@ -390,29 +388,21 @@ export class Agent {
         const recent = this.messages.slice(cut),
             old = this.messages.slice(1, cut);
         if (!old.length) return "Nothing to compact.";
-        let summary: Message, usage: Omit<Usage, "cacheHitRate">;
-        try {
-            ({ message: summary, usage } = await this.callModel(
-                [
-                    {
-                        role: "system",
-                        content:
-                            "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps.",
-                    },
-                    { role: "user", content: JSON.stringify(old) },
-                ],
-                null,
-                false,
-                this.beginOperation("compact"),
-            ));
-        } catch (e) {
-            const aborted = this.active?.controller.signal.aborted;
-            this.endOperation();
-            if (!aborted) throw e;
-            await this.recordInterruption("compact");
-            return "Compaction aborted.";
-        }
-        this.endOperation();
+        const response = await this.runModelRequest(
+            [
+                {
+                    role: "system",
+                    content:
+                        "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps.",
+                },
+                { role: "user", content: JSON.stringify(old) },
+            ],
+            null,
+            "compact",
+            false,
+        );
+        if (!response) return "Compaction aborted.";
+        const { message: summary, usage } = response;
         const compacted: Message = { role: "user", content: `[Compacted history]\n${summary.content}` };
         this.messages = [this.messages[0], compacted, ...recent];
         await this.session?.append({
