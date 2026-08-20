@@ -1,0 +1,19 @@
+{
+  "name": "tiny-agent-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "tiny-agent": "./dist/src/index.js" },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "prepare": "npm run build",
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.0"
+  }
+}
