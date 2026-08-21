@@ -399,9 +399,9 @@ export class Agent {
             type: "compaction",
             summary: summary.content,
             compactedMessages: old.length,
-            keptMessages: keep,
+            keptMessages: recent.length,
             usage,
         });
-        return `Compacted ${old.length} messages (kept last ${keep}).`;
+        return `Compacted ${old.length} messages (kept last ${recent.length}).`;
     }
 }

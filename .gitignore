@@ -2,5 +2,8 @@ node_modules/
 dist/
 .tiny-agent/sessions/
 .tiny-agent/tool-output/
+**/.tiny-agent/sessions/
+**/.tiny-agent/tool-output/
 .env
 *.log
+go/tiny-go

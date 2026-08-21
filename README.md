@@ -1,6 +1,8 @@
+<img src="assets/hero.png" alt="A tiny robot agent looking toward a wide blue sky" width="100%">
+
 # tiny-agent
 
-用最少概念實作可用的 AI coding agent。這個教學專案會分別用 TypeScript、Python、Rust、Go 完成 POC；目前先完成 TypeScript 版。
+用最少概念實作可用的 AI coding agent。這個教學專案會分別用 TypeScript、Python、Rust、Go 完成 POC；目前已完成 TypeScript 與 Go 版。
 
 ## 功能
 
@@ -13,7 +15,7 @@
 - `Esc` 中斷 model、tool、compaction
 - Token、cache usage 與精簡 tool log
 
-核心在 [`src/index.ts`](src/index.ts)，CLI 在 [`src/cli.ts`](src/cli.ts)。
+核心在 [`src/index.ts`](src/index.ts)，CLI 在 [`src/cli.ts`](src/cli.ts)。Go 版則集中於 [`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)。
 
 ## 安裝
 
@@ -40,6 +42,21 @@ TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 
 ```bash
 tiny-ts "讀取 README 並摘要"
+```
+
+Go 版需要 Go 1.24+：
+
+```bash
+cd go
+go install ./cmd/tiny-go
+cd ..
+tiny-go
+```
+
+同樣支援 `TINY_MODEL`、`--skill`、`--session` 與 one-shot prompt：
+
+```bash
+tiny-go "讀取 README 並摘要"
 ```
 
 ## 架構
@@ -155,6 +172,6 @@ npm run format
 ## 四語言路線
 
 1. TypeScript：目前版本
-2. Python：待完成
-3. Rust：待完成
-4. Go：待完成
+2. Go：目前版本
+3. Python：待完成
+4. Rust：待完成

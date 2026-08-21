@@ -173,6 +173,26 @@ test("Esc aborts compaction without changing context", async () => {
     assert.equal((await session.records()).find((r) => r.type === "interruption")?.phase, "compact");
 });
 
+test("compact records the actual number retained at a user boundary", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const summary = { choices: [{ message: { role: "assistant", content: "summary" } }], usage: {} };
+    const session = await Session.create(dir, new Date("2026-08-07T12:00:00Z"));
+    const agent = new Agent(
+        [],
+        (async () => new Response(JSON.stringify(summary), { status: 200 })) as typeof fetch,
+        session,
+    );
+    agent.messages.push(
+        { role: "user", content: "old" },
+        { role: "assistant", content: "old answer" },
+        { role: "user", content: "keep" },
+        ...Array.from({ length: 6 }, (_, i) => ({ role: "assistant", content: `${i}` }) as const),
+    );
+    assert.equal(await agent.compact(), "Compacted 2 messages (kept last 7).");
+    const record = (await session.records()).at(-1);
+    assert.equal(record.keptMessages, 7);
+});
+
 test("compact keeps assistant tool calls with their results", async () => {
     process.env.OPENROUTER_API_KEY = "test";
     const summary = { choices: [{ message: { role: "assistant", content: "summary" } }], usage: {} };
