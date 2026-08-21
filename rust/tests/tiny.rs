@@ -47,7 +47,7 @@ fn read_request(stream: &mut TcpStream) -> String {
         }
     }
     // fallback: return everything we read after headers
-    head_body_split(&buf).unwrap_or_else(|| String::new())
+    head_body_split(&buf).unwrap_or_default()
 }
 
 fn head_body_split(buf: &[u8]) -> Option<String> {
@@ -117,6 +117,66 @@ fn test_agent(cwd: &str, endpoint: &str, session: Option<Session>) -> Agent {
     let mut agent = new_agent(Vec::new(), session, String::new(), cwd);
     agent.endpoint = endpoint.to_string();
     agent
+}
+
+fn tool_args(call_id: &str, name: &str, arguments: &str) -> String {
+    format!(
+        r#"{{"choices":[{{"finish_reason":"tool_calls","message":{{"role":"assistant","content":null,"tool_calls":[{{"id":"{}","type":"function","function":{{"name":"{}","arguments":{}}}}}]}}}}],"usage":{{"prompt_tokens":10,"completion_tokens":1}}}}"#,
+        call_id,
+        name,
+        serde_json::to_string(arguments).unwrap()
+    )
+}
+
+#[test]
+fn handles_finish_reasons_and_empty_assistant() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+
+    let empty = start_serving(vec![r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":" \n"}}],"usage":{}}"#.into()]);
+    let mut agent = test_agent(&cwd, &empty.url, None);
+    assert!(
+        agent
+            .run_agent_loop("hi")
+            .unwrap_err()
+            .contains("empty response")
+    );
+
+    let missing = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"stop"}],"usage":{}}"#.into(),
+    ]);
+    let mut agent = test_agent(&cwd, &missing.url, None);
+    assert!(
+        agent
+            .run_agent_loop("hi")
+            .unwrap_err()
+            .contains("no assistant message")
+    );
+
+    let filtered = start_serving(vec![r#"{"choices":[{"finish_reason":"content_filter","message":{"role":"assistant","content":"no"}}],"usage":{}}"#.into()]);
+    let mut agent = test_agent(&cwd, &filtered.url, None);
+    assert!(
+        agent
+            .run_agent_loop("hi")
+            .unwrap_err()
+            .contains("content_filter")
+    );
+
+    let replies = vec![
+        tool_args("1", "write", r#"{"path":"no.txt","content":"bad"}"#).replace("\"finish_reason\":\"tool_calls\"", "\"finish_reason\":\"length\""),
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"recovered"}}],"usage":{}}"#.into(),
+    ];
+    let server = start_serving(replies);
+    let mut agent = test_agent(&cwd, &server.url, None);
+    assert_eq!(agent.run_agent_loop("hi").unwrap(), "recovered");
+    assert!(!std::path::Path::new(&format!("{}/no.txt", cwd)).exists());
+    assert!(agent.messages.iter().any(|message| {
+        message
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("truncated by the model token limit")
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +284,10 @@ fn session_create_open_records() {
     assert!(session.path.contains(".tiny-agent/sessions/"));
     assert!(session.path.ends_with(&format!("_{}.jsonl", session.id)));
     assert!(Session::open(&session.id, &cwd).unwrap().path == session.path);
+    let fixed = uuid7_at(0x019f_c5c3_79ae);
+    assert_eq!(&fixed[..13], "019fc5c3-79ae");
+    assert_eq!(fixed.as_bytes()[14], b'7');
+    assert!(matches!(fixed.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
     assert!(Session::open("bad", &cwd).is_err());
     let mut map = serde_json::Map::new();
     map.insert("type".into(), serde_json::Value::String("message".into()));
@@ -249,17 +313,16 @@ fn session_create_open_records() {
 fn resume_restores_messages_compact_and_usage() {
     let cwd = temp_dir();
     let session = Session::create(&cwd).unwrap();
-    for m in [Message {
+    let m = Message {
         role: "user".into(),
         content: Some("old".into()),
         tool_call_id: String::new(),
         tool_calls: Vec::new(),
-    }] {
-        let mut map = serde_json::Map::new();
-        map.insert("type".into(), serde_json::Value::String("message".into()));
-        map.insert("message".into(), serde_json::to_value(m).unwrap());
-        session.append_value(&map).unwrap();
-    }
+    };
+    let mut map = serde_json::Map::new();
+    map.insert("type".into(), serde_json::Value::String("message".into()));
+    map.insert("message".into(), serde_json::to_value(m).unwrap());
+    session.append_value(&map).unwrap();
     let mut map = serde_json::Map::new();
     map.insert("type".into(), serde_json::Value::String("message".into()));
     map.insert(
@@ -541,10 +604,10 @@ fn write_reports_bytes_and_edit_applies_atomic_replacements() {
             before
         );
     }
-    // BOM + CRLF handling
+    // Unicode before match, BOM, CRLF, and untouched mixed endings.
     std::fs::write(
         format!("{}/windows.txt", cwd),
-        "\u{FEFF}first\r\nsecond\r\n",
+        "\u{FEFF}你好😀\r\nfirst\nsecond\r\ntail\n",
     )
     .unwrap();
     let mut ed = args();
@@ -556,7 +619,7 @@ fn write_reports_bytes_and_edit_applies_atomic_replacements() {
     agent.execute_tool("edit", &ed).unwrap();
     assert_eq!(
         std::fs::read_to_string(format!("{}/windows.txt", cwd)).unwrap(),
-        "\u{FEFF}third\r\nfourth\r\n"
+        "\u{FEFF}你好😀\r\nthird\r\nfourth\r\ntail\n"
     );
     // path guard
     let mut g = args();
@@ -567,6 +630,25 @@ fn write_reports_bytes_and_edit_applies_atomic_replacements() {
             .unwrap_err()
             .contains("inside cwd")
     );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(std::env::temp_dir(), format!("{}/outside", cwd)).unwrap();
+        for name in ["read", "write", "edit"] {
+            let mut escaped = args();
+            escaped.path = "outside/tiny-agent-secret".into();
+            escaped.content = "secret".into();
+            escaped.edits = vec![ToolEdit {
+                old_text: "x".into(),
+                new_text: "y".into(),
+            }];
+            assert!(
+                agent
+                    .execute_tool(name, &escaped)
+                    .unwrap_err()
+                    .contains("inside cwd")
+            );
+        }
+    }
 }
 
 #[test]
@@ -654,6 +736,15 @@ fn bash_preserves_failures_short_and_long() {
     let result = agent.execute_tool("bash", &big).unwrap();
     assert!(result.contains("Full output:"), "result: {}", result);
     assert!(result.len() <= 2_002 * 8);
+    // The reader keeps draining after its 10MB capture cap, so the producer exits quickly.
+    let mut capped = args();
+    capped.command = "head -c 11000000 /dev/zero | tr '\\0' x".into();
+    capped.timeout = 10.0;
+    let start = std::time::Instant::now();
+    let result = agent.execute_tool("bash", &capped).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert!(result.contains("complete output was not captured"));
+    assert!(!result.contains("Full output:"));
 }
 
 #[test]

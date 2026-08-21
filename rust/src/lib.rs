@@ -23,7 +23,7 @@ pub const BASH_TIMEOUT: u64 = 120;
 
 pub fn model_name() -> String {
     match std::env::var("TINY_MODEL") {
-        Ok(v) if v != "" => v,
+        Ok(v) if !v.is_empty() => v,
         _ => DEFAULT_MODEL.to_string(),
     }
 }
@@ -152,10 +152,18 @@ pub struct UsageState {
     pub cache_hit_rate: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    Stop,
+    Length,
+    ToolUse,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelData {
     pub message: Message,
     pub usage: UsageJSON,
+    pub stop_reason: StopReason,
 }
 
 // ---------------------------------------------------------------------------
@@ -227,10 +235,7 @@ pub fn format_tool_event(event: ToolEvent) -> String {
 // system prompt / skills
 // ---------------------------------------------------------------------------
 pub fn load_project_instructions(cwd: &str) -> String {
-    match std::fs::read_to_string(join_path(cwd, "AGENTS.md")) {
-        Ok(text) => text,
-        Err(_) => String::new(),
-    }
+    std::fs::read_to_string(join_path(cwd, "AGENTS.md")).unwrap_or_default()
 }
 
 fn build_system_prompt(cwd: &str, project: &str, list: &str) -> String {
@@ -427,7 +432,7 @@ pub fn new_agent(
 ) -> Agent {
     let list = skills
         .iter()
-        .map(|s| format_skill(s))
+        .map(format_skill)
         .collect::<Vec<_>>()
         .join("\n");
     let project = if instructions.is_empty() {
@@ -468,14 +473,19 @@ fn format_skill(s: &Skill) -> String {
 fn open_router_agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(600)))
+        .timeout_global(Some(Duration::from_secs(120)))
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_send_request(Some(Duration::from_secs(30)))
+        .timeout_send_body(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(120)))
+        .timeout_recv_body(Some(Duration::from_secs(120)))
         .build();
     ureq::Agent::new_with_config(config)
 }
 
 fn api_key() -> String {
     match std::env::var("OPENROUTER_API_KEY") {
-        Ok(v) if v != "" => v,
+        Ok(v) if !v.is_empty() => v,
         _ => String::new(),
     }
 }
@@ -631,6 +641,7 @@ impl Agent {
     }
 
     pub fn run_agent_loop(&mut self, input: &str) -> Result<String, String> {
+        self.cancel.store(false, Ordering::SeqCst);
         let user = Message {
             role: "user".to_string(),
             content: Some(input.to_string()),
@@ -649,7 +660,14 @@ impl Agent {
             self.messages.push(answer.clone());
             self.session_append(message_record(&answer, Some(data.usage), None))?;
             if answer.tool_calls.is_empty() {
-                return Ok(answer.content.unwrap_or_default());
+                let content = answer.content.unwrap_or_default();
+                if !content.trim().is_empty() {
+                    return Ok(content);
+                }
+                return Err(format!(
+                    "Model returned an empty response (finish_reason: {}).",
+                    stop_reason_name(data.stop_reason)
+                ));
             }
             for i in 0..answer.tool_calls.len() {
                 let call = answer.tool_calls[i].clone();
@@ -660,36 +678,40 @@ impl Agent {
                     Ok(args) => args.clone(),
                     Err(_) => ToolArgs::default_layout(),
                 };
-                match parsed {
-                    Ok(args) => {
-                        (self.on_tool.as_ref())(ToolEvent {
-                            phase: "start".into(),
-                            name: call.function.name.clone(),
-                            args: args.clone(),
-                            result: String::new(),
-                        });
-                        let result = self.execute_tool(&call.function.name, &args);
-                        aborted = self.cancel.load(Ordering::SeqCst);
-                        content = match &result {
-                            Err(e) if aborted => "Operation aborted".to_string(),
-                            Err(e) => format!("Error: {}", e),
-                            Ok(text) => text.clone(),
-                        };
-                        (self.on_tool.as_ref())(ToolEvent {
-                            phase: "end".into(),
-                            name: call.function.name.clone(),
-                            args: args,
-                            result: content.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        content = format!("Error: {}", e);
-                        (self.on_tool.as_ref())(ToolEvent {
-                            phase: "end".into(),
-                            name: call.function.name.clone(),
-                            args: event_args,
-                            result: content.clone(),
-                        });
+                if data.stop_reason == StopReason::Length {
+                    content = "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.".to_string();
+                } else {
+                    match parsed {
+                        Ok(args) => {
+                            (self.on_tool.as_ref())(ToolEvent {
+                                phase: "start".into(),
+                                name: call.function.name.clone(),
+                                args: args.clone(),
+                                result: String::new(),
+                            });
+                            let result = self.execute_tool(&call.function.name, &args);
+                            aborted = self.cancel.load(Ordering::SeqCst);
+                            content = match &result {
+                                Err(_) if aborted => "Operation aborted".to_string(),
+                                Err(e) => format!("Error: {}", e),
+                                Ok(text) => text.clone(),
+                            };
+                            (self.on_tool.as_ref())(ToolEvent {
+                                phase: "end".into(),
+                                name: call.function.name.clone(),
+                                args,
+                                result: content.clone(),
+                            });
+                        }
+                        Err(e) => {
+                            content = format!("Error: {}", e);
+                            (self.on_tool.as_ref())(ToolEvent {
+                                phase: "end".into(),
+                                name: call.function.name.clone(),
+                                args: event_args,
+                                result: content.clone(),
+                            });
+                        }
                     }
                 }
                 let tool_msg = Message {
@@ -724,6 +746,7 @@ impl Agent {
     }
 
     pub fn compact(&mut self) -> Result<String, String> {
+        self.cancel.store(false, Ordering::SeqCst);
         let keep = 6;
         if self.messages.len() <= 1 {
             return Ok("Nothing to compact.".to_string());
@@ -815,7 +838,7 @@ impl Agent {
         if args.path.is_empty() {
             return Err("path is required".to_string());
         }
-        let path = resolve_path(&self.cwd, &args.path)?;
+        let path = resolve_path(&self.cwd, &args.path, name == "write")?;
         if name == "read" {
             let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
             return read_lines(&text, args.offset, args.limit);
@@ -919,7 +942,7 @@ fn post_chat(client: &ureq::Agent, endpoint: &str, body: &str) -> Result<String,
         .send(body.as_bytes())
         .map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
-    if status < 200 || status >= 300 {
+    if !(200..300).contains(&status) {
         let text = resp
             .body_mut()
             .read_to_string()
@@ -939,8 +962,9 @@ fn parse_model_body(text: &str) -> Result<ModelData, String> {
     }
     #[derive(Deserialize)]
     struct Choice {
+        message: Option<Message>,
         #[serde(default)]
-        message: Message,
+        finish_reason: Option<String>,
     }
     #[derive(Deserialize, Default)]
     struct UsageResp {
@@ -975,15 +999,43 @@ fn parse_model_body(text: &str) -> Result<ModelData, String> {
         .usage
         .prompt_tokens
         .saturating_sub(cache_read + cache_write);
+    let message = choice
+        .message
+        .clone()
+        .ok_or("OpenRouter returned no assistant message".to_string())?;
+    let stop_reason = match choice.finish_reason.as_deref() {
+        Some("length") => StopReason::Length,
+        Some("tool_calls" | "function_call") => StopReason::ToolUse,
+        Some("content_filter" | "network_error") => {
+            return Err(format!(
+                "Provider finish_reason: {}",
+                choice.finish_reason.as_deref().unwrap_or_default()
+            ));
+        }
+        Some(reason) if reason != "stop" => {
+            return Err(format!("Unknown provider finish_reason: {}", reason));
+        }
+        _ if !message.tool_calls.is_empty() => StopReason::ToolUse,
+        _ => StopReason::Stop,
+    };
     Ok(ModelData {
-        message: choice.message.clone(),
+        message,
         usage: UsageJSON {
             input,
             output: data.usage.completion_tokens,
             cache_read,
             cache_write,
         },
+        stop_reason,
     })
+}
+
+fn stop_reason_name(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::Stop => "stop",
+        StopReason::Length => "length",
+        StopReason::ToolUse => "toolUse",
+    }
 }
 
 pub fn tool_definitions_json() -> &'static str {
@@ -1067,14 +1119,35 @@ pub fn tool_definitions_json() -> &'static str {
 // ---------------------------------------------------------------------------
 // tools
 // ---------------------------------------------------------------------------
-fn resolve_path(cwd: &str, path: &str) -> Result<String, String> {
-    let full = absolute(&join_path(cwd, path))?;
-    let root = absolute(cwd)?;
-    if full == root || full.starts_with(&format!("{}/", root)) {
-        Ok(full)
+fn resolve_path(cwd: &str, path: &str, new_file: bool) -> Result<String, String> {
+    let root = std::fs::canonicalize(cwd).map_err(|e| e.to_string())?;
+    let candidate = if FsPath::new(path).is_absolute() {
+        FsPath::new(path).to_path_buf()
     } else {
-        Err("path must stay inside cwd".to_string())
+        root.join(path)
+    };
+    let exists = candidate.exists();
+    let full = if !exists {
+        let mut existing = candidate.as_path();
+        while !existing.exists() {
+            existing = existing.parent().ok_or("path must stay inside cwd")?;
+        }
+        let base = std::fs::canonicalize(existing).map_err(|e| e.to_string())?;
+        base.join(
+            candidate
+                .strip_prefix(existing)
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        std::fs::canonicalize(&candidate).map_err(|e| e.to_string())?
+    };
+    if full != root && !full.starts_with(&root) {
+        return Err("path must stay inside cwd".to_string());
     }
+    if !new_file && !exists {
+        return Err(format!("{} does not exist", candidate.display()));
+    }
+    Ok(full.to_string_lossy().to_string())
 }
 
 fn run_bash(command: &str, timeout: f64, cancel: &Arc<AtomicBool>, cwd: &str) -> String {
@@ -1111,8 +1184,9 @@ fn run_bash(command: &str, timeout: f64, cancel: &Arc<AtomicBool>, cwd: &str) ->
         }
         thread::sleep(Duration::from_millis(10));
     }
-    let stdout_out = out_rx.recv().unwrap_or_default();
-    let stderr_out = err_rx.recv().unwrap_or_default();
+    let (stdout_out, stdout_capped) = out_rx.recv().unwrap_or_default();
+    let (stderr_out, stderr_capped) = err_rx.recv().unwrap_or_default();
+    let capped = stdout_capped || stderr_capped;
     let status = child.wait().ok();
     let mut combined = stdout_out;
     combined.extend(stderr_out);
@@ -1125,13 +1199,16 @@ fn run_bash(command: &str, timeout: f64, cancel: &Arc<AtomicBool>, cwd: &str) ->
         } else {
             String::from_utf8_lossy(&combined).to_string()
         };
-        let tail = if combined.len() > MAX_BASH_OUTPUT {
+        let tail = if capped {
             limit_output(
                 &append_note(
                     &text,
-                    &format!("Command timed out after {} seconds.", timeout),
+                    &format!(
+                        "Bash output exceeded the 10MB safety cap; complete output was not captured.\n\nCommand timed out after {} seconds.",
+                        timeout
+                    ),
                 ),
-                true,
+                false,
                 cwd,
             )
         } else {
@@ -1157,6 +1234,16 @@ fn run_bash(command: &str, timeout: f64, cancel: &Arc<AtomicBool>, cwd: &str) ->
             code.unwrap_or_default()
         )
     };
+    if capped {
+        return limit_output(
+            &append_note(
+                &final_text,
+                "Bash output exceeded the 10MB safety cap; complete output was not captured.",
+            ),
+            false,
+            cwd,
+        );
+    }
     limit_output(&final_text, true, cwd)
 }
 
@@ -1168,30 +1255,30 @@ fn append_note(text: &str, note: &str) -> String {
     }
 }
 
-fn spawn_reader(handle: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+fn spawn_reader(handle: Option<impl Read + Send + 'static>) -> mpsc::Receiver<(Vec<u8>, bool)> {
+    let (tx, rx) = mpsc::channel::<(Vec<u8>, bool)>();
     thread::spawn(move || {
         let mut buf = Vec::new();
+        let mut capped = false;
         if let Some(mut reader) = handle {
             let mut chunk = [0u8; 8192];
-            let mut capped = false;
             loop {
                 match reader.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if buf.len() + n > MAX_BASH_OUTPUT {
+                        if buf.len() < MAX_BASH_OUTPUT {
+                            let keep = n.min(MAX_BASH_OUTPUT - buf.len());
+                            buf.extend_from_slice(&chunk[..keep]);
+                            capped |= keep < n;
+                        } else {
                             capped = true;
-                            buf.extend_from_slice(&chunk[..(MAX_BASH_OUTPUT - buf.len())]);
-                            break;
                         }
-                        buf.extend_from_slice(&chunk[..n]);
                     }
                     Err(_) => break,
                 }
             }
-            let _ = capped;
         }
-        let _ = tx.send(buf);
+        let _ = tx.send((buf, capped));
     });
     rx
 }
@@ -1328,7 +1415,7 @@ fn apply_edit_file(path: &str, display_path: &str, edits: &[ToolEdit]) -> Result
                 index, display_path
             )
         })?;
-        if normalized[first + old.len()..].find(old.as_str()).is_some() {
+        if normalized[first + old.len()..].contains(old.as_str()) {
             return Err(format!(
                 "edits[{}].oldText occurs more than once in {}; add more context.",
                 index, display_path
@@ -1371,22 +1458,25 @@ fn apply_edit_file(path: &str, display_path: &str, edits: &[ToolEdit]) -> Result
 }
 
 fn normalize_map(text: &str) -> (String, Vec<usize>) {
-    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
     let mut positions = vec![0usize];
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
     let mut source = 0;
-    while source < n {
-        if chars[source] == '\r' && source + 1 < n && chars[source + 1] == '\n' {
-            out.push('\n');
+    while source < bytes.len() {
+        if bytes[source..].starts_with(b"\r\n") {
+            out.push(b'\n');
             source += 2;
-        } else {
-            out.push(chars[source]);
-            source += 1;
+            positions.push(source);
+            continue;
         }
-        positions.push(source);
+        let width = text[source..].chars().next().unwrap().len_utf8();
+        out.extend_from_slice(&bytes[source..source + width]);
+        for offset in 1..=width {
+            positions.push(source + offset);
+        }
+        source += width;
     }
-    (out, positions)
+    (String::from_utf8(out).unwrap(), positions)
 }
 
 // ---------------------------------------------------------------------------
@@ -1444,9 +1534,9 @@ fn iso_utc_ms_now() -> String {
     let secs = now.as_secs() as i64;
     let ms = now.subsec_millis();
     let (y, mo, d) = civil_from_days(secs.div_euclid(86_400));
-    let hh = (secs.rem_euclid(86_400) / 3_600) as i64;
-    let mm = (secs.rem_euclid(3_600) / 60) as i64;
-    let ss = secs.rem_euclid(60) as i64;
+    let hh = secs.rem_euclid(86_400) / 3_600;
+    let mm = secs.rem_euclid(3_600) / 60;
+    let ss = secs.rem_euclid(60);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
         y, mo, d, hh, mm, ss, ms
@@ -1491,25 +1581,34 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 pub fn uuid7() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
+    uuid7_at(millis)
+}
+
+pub fn uuid7_at(millis: u64) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id() as u64;
     let mut b = [0u8; 16];
-    let x = millis ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ pid;
-    b[0..8].copy_from_slice(&x.to_be_bytes());
-    b[8..16].copy_from_slice(&(counter ^ millis ^ pid).to_be_bytes());
+    b[..6].copy_from_slice(&millis.to_be_bytes()[2..]);
+    let random = counter.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ millis.rotate_left(17) ^ pid;
+    b[6..14].copy_from_slice(&random.to_be_bytes());
+    b[14..].copy_from_slice(&(counter as u16 ^ pid as u16).to_be_bytes());
     b[6] = (b[6] & 0x0f) | 0x70;
     b[8] = (b[8] & 0x3f) | 0x80;
-    let mut s = String::with_capacity(36);
-    for (i, byte) in b.iter().enumerate() {
-        if i == 4 || i == 6 || i == 8 || i == 10 {
-            s.push('-');
-        }
-        s.push_str(&format!("{:02x}", byte));
-    }
-    s
+    let h = b
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
 }

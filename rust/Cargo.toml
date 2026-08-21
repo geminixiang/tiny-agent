@@ -6,7 +6,7 @@ license = "MIT"
 description = "Minimal Rust AI coding agent POC"
 
 [[bin]]
-name = "tiny-rust"
+name = "tiny-rs"
 path = "src/main.rs"
 
 [dependencies]

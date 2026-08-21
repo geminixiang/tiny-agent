@@ -1,6 +1,6 @@
-.PHONY: install install-ts install-go install-py test test-ts test-go test-py test-rust check check-ts check-go check-py build build-ts build-go build-py build-rust format format-ts format-go format-py format-rust
+.PHONY: install install-ts install-go install-py install-rs test test-ts test-go test-py test-rs check check-ts check-go check-py check-rs build build-ts build-go build-py build-rs format format-ts format-go format-py format-rs
 
-install: install-ts install-go install-py
+install: install-ts install-go install-py install-rs
 
 install-ts:
 	npm install --prefix typescript
@@ -12,9 +12,12 @@ install-go:
 install-py:
 	uv tool install --force ./python
 
-test: test-ts test-go test-py test-rust
+install-rs:
+	cargo install --path ./rust --force
 
-test-rust:
+test: test-ts test-go test-py test-rs
+
+test-rs:
 	cd rust && cargo test --offline
 
 test-ts:
@@ -26,7 +29,7 @@ test-go:
 test-py:
 	uv run --project python python -m unittest discover -s python/tests
 
-check: check-ts check-go check-py
+check: check-ts check-go check-py check-rs
 
 check-ts:
 	npm --prefix typescript run lint
@@ -39,9 +42,12 @@ check-go:
 check-py:
 	uv run --project python python -m compileall -q python/tiny_agent python/tests
 
-format: format-ts format-go format-py format-rust
+check-rs:
+	cd rust && cargo clippy --all-targets --offline -- -D warnings
 
-format-rust:
+format: format-ts format-go format-py format-rs
+
+format-rs:
 	cd rust && cargo fmt
 
 format-ts:
@@ -53,9 +59,9 @@ format-go:
 format-py:
 	@true
 
-build: build-ts build-go build-py build-rust
+build: build-ts build-go build-py build-rs
 
-build-rust:
+build-rs:
 	cd rust && cargo build --release --offline
 
 build-ts:

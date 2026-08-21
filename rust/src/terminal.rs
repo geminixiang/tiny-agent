@@ -1,10 +1,10 @@
 //! Terminal handling for tiny-rs: raw mode, ANSI-aware line editing, and
 //! Esc/Ctrl+C cancellation. Mirrors the Python and Go CLIs.
 
-use std::io::Write;
-use std::sync::Arc;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -23,10 +23,7 @@ const ARROW_TIMEOUT: Duration = Duration::from_millis(20);
 /// fullwidth (CJK) characters count 2, matching `x/term` and Node readline's
 /// cell accounting. `None` (control char) is treated as 1.
 fn char_width(c: char) -> usize {
-    match c.width_cjk() {
-        Some(w) => w,
-        None => 1,
-    }
+    c.width_cjk().unwrap_or(1)
 }
 
 /// Compute the (row, column) at which the cursor lands, given the visible runes
@@ -79,32 +76,89 @@ pub fn redraw<W: Write>(
     target_row
 }
 
+pub struct CrlfWriter<W: Write> {
+    inner: W,
+    previous_cr: bool,
+}
+
+impl<W: Write> CrlfWriter<W> {
+    pub fn new(inner: W) -> CrlfWriter<W> {
+        CrlfWriter {
+            inner,
+            previous_cr: false,
+        }
+    }
+}
+
+impl<W: Write> Write for CrlfWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut converted = Vec::with_capacity(bytes.len() + 16);
+        for byte in bytes {
+            if *byte == b'\n' && !self.previous_cr {
+                converted.push(b'\r');
+            }
+            converted.push(*byte);
+            self.previous_cr = *byte == b'\r';
+        }
+        self.inner.write_all(&converted)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[derive(Clone)]
+pub struct Output(Arc<Mutex<CrlfWriter<Box<dyn Write + Send>>>>);
+
+impl Output {
+    pub fn new(out: Box<dyn Write + Send>) -> Output {
+        Output(Arc::new(Mutex::new(CrlfWriter::new(out))))
+    }
+
+    pub fn print(&self, text: &str) {
+        let mut out = self.0.lock().unwrap();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
+    }
+}
+
 pub struct Terminal {
     pub keys: mpsc::Receiver<u8>,
-    pub out: Box<dyn Write>,
+    pub out: Output,
     fd: i32,
     raw: Option<libc::termios>,
     tty: bool,
+    shutdown: Arc<AtomicBool>,
     reader: Option<thread::JoinHandle<()>>,
 }
 
 impl Terminal {
     /// Interactive terminal bound to real stdin (fd 0). Enters raw mode and
     /// starts a background reader that forwards bytes to the key channel.
-    pub fn from_stdin(out: Box<dyn Write>) -> Terminal {
+    pub fn from_stdin(out: Box<dyn Write + Send>) -> Terminal {
         let fd = 0;
         let tty = unsafe { libc::isatty(fd) != 0 };
         let (tx, rx) = mpsc::channel::<u8>();
         let raw = if tty { make_raw(fd) } else { None };
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let stop = shutdown.clone();
         let reader = if tty {
             Some(thread::spawn(move || {
-                loop {
-                    let mut b = [0u8; 1];
-                    let n = unsafe { libc::read(fd, b.as_mut_ptr().cast(), 1) };
-                    if n <= 0 {
-                        break;
+                while !stop.load(Ordering::SeqCst) {
+                    let mut pollfd = libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    if unsafe { libc::poll(&mut pollfd, 1, 50) } <= 0 {
+                        continue;
                     }
-                    if tx.send(b[0]).is_err() {
+                    let mut b = [0u8; 1];
+                    if unsafe { libc::read(fd, b.as_mut_ptr().cast(), 1) } <= 0
+                        || tx.send(b[0]).is_err()
+                    {
                         break;
                     }
                 }
@@ -114,24 +168,29 @@ impl Terminal {
         };
         Terminal {
             keys: rx,
-            out,
+            out: Output::new(out),
             fd,
             raw,
             tty,
+            shutdown,
             reader,
         }
     }
 
-    /// Testable terminal with an injected key channel and no actual raw mode.
-    pub fn from_keys(keys: mpsc::Receiver<u8>, out: Box<dyn Write>, tty: bool) -> Terminal {
+    pub fn from_keys(keys: mpsc::Receiver<u8>, out: Box<dyn Write + Send>, tty: bool) -> Terminal {
         Terminal {
             keys,
-            out,
+            out: Output::new(out),
             fd: 0,
-            raw: if tty { make_raw(0) } else { None },
+            raw: None,
             tty,
+            shutdown: Arc::new(AtomicBool::new(false)),
             reader: None,
         }
+    }
+
+    pub fn output(&self) -> Output {
+        self.out.clone()
     }
 
     pub fn restore(&mut self) {
@@ -172,8 +231,10 @@ impl Terminal {
     /// Edit a single line in raw mode. Returns Err(TermError::Exit) on Ctrl+C.
     pub fn read_line(&mut self, prompt: &str) -> Result<String, TermError> {
         let prompt_visible: Vec<char> = strip_ansi(prompt);
-        write!(self.out, "{}", prompt).unwrap();
-        self.out.flush().unwrap();
+        let mut out = self.out.0.lock().unwrap();
+        write!(out, "{}", prompt).unwrap();
+        out.flush().unwrap();
+        drop(out);
         let mut line: Vec<char> = Vec::new();
         let mut cursor = 0usize;
         let mut row = 0usize;
@@ -193,7 +254,7 @@ impl Terminal {
                             cursor -= 1;
                         }
                         row = redraw(
-                            &mut self.out,
+                            &mut *self.out.0.lock().unwrap(),
                             prompt,
                             &prompt_visible,
                             &line,
@@ -207,7 +268,7 @@ impl Terminal {
                             cursor += 1;
                         }
                         row = redraw(
-                            &mut self.out,
+                            &mut *self.out.0.lock().unwrap(),
                             prompt,
                             &prompt_visible,
                             &line,
@@ -220,8 +281,7 @@ impl Terminal {
                 continue;
             }
             if key == b'\r' || key == b'\n' {
-                write!(self.out, "\r\n").unwrap();
-                self.out.flush().unwrap();
+                self.out.print("\r\n");
                 return Ok(line.into_iter().collect::<String>().trim().to_string());
             }
             if key == 0x7f || key == 0x08 {
@@ -233,7 +293,7 @@ impl Terminal {
                     line.drain(start..cursor);
                     cursor = start;
                     row = redraw(
-                        &mut self.out,
+                        &mut *self.out.0.lock().unwrap(),
                         prompt,
                         &prompt_visible,
                         &line,
@@ -254,7 +314,7 @@ impl Terminal {
                 cursor += 1;
                 pending.clear();
                 row = redraw(
-                    &mut self.out,
+                    &mut *self.out.0.lock().unwrap(),
                     prompt,
                     &prompt_visible,
                     &line,
@@ -272,6 +332,7 @@ impl Terminal {
     where
         F: FnOnce() -> Result<String, String> + Send + 'static,
     {
+        cancel.store(false, Ordering::SeqCst);
         if !self.tty {
             return operation().map_err(TermError::Error);
         }
@@ -287,8 +348,7 @@ impl Terminal {
             if key == 0x1b {
                 let (_, is_arrow) = self.escape_sequence();
                 if !is_arrow {
-                    write!(self.out, "\r\n\x1b[33mAborting...\x1b[0m\r\n").unwrap();
-                    self.out.flush().unwrap();
+                    self.out.print("\r\n\x1b[33mAborting...\x1b[0m\r\n");
                     cancel.store(true, Ordering::SeqCst);
                 }
             } else if key == 3 {
@@ -308,6 +368,7 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         self.restore();
+        self.shutdown.store(true, Ordering::SeqCst);
         if let Some(thread) = self.reader.take() {
             let _ = thread.join();
         }
@@ -378,6 +439,31 @@ mod tests {
             tx.send(*b).unwrap();
         }
         rx
+    }
+
+    #[test]
+    fn crlf_writer_preserves_lines_and_write_count() {
+        let mut out = CrlfWriter::new(Vec::new());
+        assert_eq!(out.write(b"one\ntwo\r").unwrap(), 8);
+        assert_eq!(out.write(b"\nthree\n").unwrap(), 7);
+        assert_eq!(out.inner, b"one\r\ntwo\r\nthree\r\n");
+    }
+
+    #[test]
+    fn operation_resets_previous_cancellation() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let (_tx, rx) = mpsc::channel();
+        let mut tty = Terminal::from_keys(rx, Box::new(Vec::new()), true);
+        assert_eq!(tty.run(&cancel, || Ok("next".into())).unwrap(), "next");
+        assert!(!cancel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn terminal_without_reader_drops_without_waiting() {
+        let (_tx, rx) = mpsc::channel();
+        let start = std::time::Instant::now();
+        drop(Terminal::from_keys(rx, Box::new(Vec::new()), false));
+        assert!(start.elapsed() < Duration::from_millis(100));
     }
 
     #[test]

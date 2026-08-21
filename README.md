@@ -53,13 +53,13 @@ make install
 export OPENROUTER_API_KEY=sk-or-...
 ```
 
-這會從 repo root 安裝三個 CLI（Rust 版可用 `make build-rust` 編譯）；四種 CLI 用法一致：
+這會從 repo root 安裝四個 CLI，且用法一致：
 
 ```bash
 tiny-ts
 tiny-go
 tiny-py
-cargo run --manifest-path rust/Cargo.toml --release
+tiny-rs
 ```
 
 使用 `nvm` 切換 Node.js 版本後需再次執行 `make install-ts`。若 shell 找不到 `tiny-go`，請將 `$(go env GOPATH)/bin` 加入 `PATH`。
@@ -81,7 +81,7 @@ Go、Python、Rust 與 TypeScript 版共用 `TINY_MODEL`、`--skill`、`--sessio
 ```bash
 tiny-go "讀取 README 並摘要"
 tiny-py "讀取 README 並摘要"
-cargo run --manifest-path rust/Cargo.toml --release -- "讀取 README 並摘要"
+tiny-rs "讀取 README 並摘要"
 ```
 
 ## 使用
@@ -164,7 +164,7 @@ make format
 make build
 ```
 
-個別實作也可使用 `make test-ts`、`make test-go`、`make test-py`、`make test-rust` 等對應 target。測試使用 mock OpenRouter，不消耗 API 額度。
+個別實作也可使用 `make test-ts`、`make test-go`、`make test-py`、`make test-rs` 等對應 target。測試使用 mock OpenRouter，不消耗 API 額度。
 
 ## 四語言路線
 
@@ -173,7 +173,7 @@ make build
 3. Python：目前版本
 4. Rust：目前版本
 
-Rust 版使用 `ureq`（blocking HTTP）、`libc` + `unicode-width`（raw terminal 與 CJK 顯示寬度）、`serde`（session/JSON）。由於 Rust std 沒有非同步 HTTP 中斷機制，model request 在子執行緒執行並輪詢取消旗標，bash 工具以 process group 清除背景子行程；Esc/Ctrl+C 語意與 Go/Python 版一致。
+Rust 版使用 `ureq`（blocking HTTP）、`libc` + `unicode-width`（raw terminal 與 CJK 顯示寬度）、`serde`（session/JSON）。model request 設有 connect/read/write timeout；按 Esc 會立即停止前景等待，但 `ureq` 的 blocking transport thread 可能在 timeout 前繼續完成。Bash 工具則會清除整個 process group。
 
 ## License
 

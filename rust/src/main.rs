@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use tiny_agent_rust::terminal::{TermError, Terminal};
 use tiny_agent_rust::{
-    Session, ToolEvent, format_tool_event, format_usage, load_project_instructions, load_skills,
-    model_name, new_agent,
+    Session, format_tool_event, format_usage, load_project_instructions, load_skills, model_name,
+    new_agent,
 };
 
 struct CliArgs {
@@ -40,13 +40,8 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
     })
 }
 
-fn show_tool(event: ToolEvent) {
-    let color = if event.phase == "start" { "33" } else { "2" };
-    println!("\x1b[{}m{}\x1b[0m", color, format_tool_event(event));
-}
-
-fn resume_line(id: &str) {
-    println!("\nResume: tiny-rs --session {}", id);
+fn resume_line(out: &tiny_agent_rust::terminal::Output, id: &str) {
+    out.print(&format!("\nResume: tiny-rs --session {}\n", id));
 }
 
 fn term_err_to_string(e: TermError) -> String {
@@ -77,17 +72,26 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
     if is_restored {
         agent.lock().unwrap().resume_session()?;
     }
-    agent.lock().unwrap().on_tool = Arc::new(show_tool);
 
-    println!(
-        "\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {}\nsession: {}\npath: {}{}",
+    let mut term = Terminal::from_stdin(Box::new(std::io::stdout()));
+    let out = term.output();
+    let tool_out = out.clone();
+    agent.lock().unwrap().on_tool = Arc::new(move |event| {
+        let color = if event.phase == "start" { "33" } else { "2" };
+        tool_out.print(&format!(
+            "\x1b[{}m{}\x1b[0m\n",
+            color,
+            format_tool_event(event)
+        ));
+    });
+
+    out.print(&format!(
+        "\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {}\nsession: {}\npath: {}{}\n",
         model_name(),
         session_id,
         session_path,
         if is_restored { "\nrestored: yes" } else { "" }
-    );
-
-    let mut term = Terminal::from_stdin(Box::new(std::io::stdout()));
+    ));
 
     if !parsed.prompt.is_empty() {
         let cancel = { agent.lock().unwrap().cancel.clone() };
@@ -97,21 +101,21 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
         let answer = match result {
             Ok(a) => a,
             Err(TermError::Exit) | Err(TermError::Eof) => {
-                resume_line(&session_id);
+                resume_line(&out, &session_id);
                 return Ok(0);
             }
             Err(TermError::Error(e)) => return Err(e),
         };
-        println!(
-            "\n{}\n\x1b[2m{}\x1b[0m",
+        out.print(&format!(
+            "\n{}\n\x1b[2m{}\x1b[0m\n",
             answer,
             format_usage(agent.lock().unwrap().usage)
-        );
-        resume_line(&session_id);
+        ));
+        resume_line(&out, &session_id);
         return Ok(0);
     }
 
-    println!("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit");
+    out.print("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit\n");
     loop {
         let input = match term.read_line("\x1b[32m›\x1b[0m ") {
             Ok(line) => line,
@@ -129,8 +133,8 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
             let a3 = agent.clone();
             term.run(&cancel, move || a3.lock().unwrap().compact())
                 .map_err(term_err_to_string)
-        } else if input.starts_with("/skill:") {
-            let rest = input[7..].to_string();
+        } else if let Some(rest) = input.strip_prefix("/skill:") {
+            let rest = rest.to_string();
             let mut parts = rest.splitn(2, ' ');
             let name = parts.next().unwrap_or("").to_string();
             let request = parts.next().unwrap_or("").to_string();
@@ -142,7 +146,7 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
                 .find(|s| s.name == name)
                 .cloned();
             let Some(skill) = skill else {
-                println!("Unknown skill: {}", name);
+                out.print(&format!("Unknown skill: {}\n", name));
                 continue;
             };
             let text = std::fs::read_to_string(&skill.path).map_err(|e| e.to_string())?;
@@ -157,13 +161,13 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
         };
         let answer = answer?;
         let usage = agent.lock().unwrap().usage;
-        println!(
-            "\x1b[36m{}\x1b[0m\n\x1b[2m{}\x1b[0m",
+        out.print(&format!(
+            "\x1b[36m{}\x1b[0m\n\x1b[2m{}\x1b[0m\n",
             answer,
             format_usage(usage)
-        );
+        ));
     }
-    resume_line(&session_id);
+    resume_line(&out, &session_id);
     Ok(0)
 }
 
