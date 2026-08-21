@@ -332,6 +332,63 @@ test("bash preserves failures, validates timeout, and stores truncated output", 
     assert.match(await executeTool("read", { path, limit: 2 }), /Use offset=3 to continue/);
 });
 
+test("handles provider stop reasons and rejects empty final responses", async () => {
+    const responses = [
+        {
+            choices: [
+                {
+                    finish_reason: "length",
+                    message: {
+                        role: "assistant",
+                        content: null,
+                        tool_calls: [
+                            {
+                                id: "truncated",
+                                type: "function",
+                                function: { name: "write", arguments: '{"path":"never.txt"' },
+                            },
+                        ],
+                    },
+                },
+            ],
+            usage: {},
+        },
+        { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "done" } }], usage: {} },
+    ];
+    const agent = new Agent([], async () => new Response(JSON.stringify(responses.shift()), { status: 200 }));
+    assert.equal(await agent.runAgentLoop("work"), "done");
+    await assert.rejects(() => readFile("never.txt"), /ENOENT/);
+    assert.match(agent.messages.at(-2)?.content ?? "", /truncated by the model token limit/);
+
+    const empty = new Agent(
+        [],
+        async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [{ finish_reason: "stop", message: { role: "assistant", content: "\n\n" } }],
+                    usage: {},
+                }),
+                { status: 200 },
+            ),
+    );
+    await assert.rejects(() => empty.runAgentLoop("work"), /empty response.*finish_reason: stop/);
+
+    for (const finish_reason of ["content_filter", "network_error", "mystery"]) {
+        const rejected = new Agent(
+            [],
+            async () =>
+                new Response(
+                    JSON.stringify({
+                        choices: [{ finish_reason, message: { role: "assistant", content: "" } }],
+                        usage: {},
+                    }),
+                    { status: 200 },
+                ),
+        );
+        await assert.rejects(() => rejected.runAgentLoop("work"), /Provider finish_reason|Unknown provider/);
+    }
+});
+
 test("discovers skills and fills system prompt", async () => {
     await mkdir(".tiny-agent/skills/teach", { recursive: true });
     await writeFile(

@@ -355,6 +355,17 @@ export class Session {
     }
 }
 
+type StopReason = "stop" | "length" | "toolUse";
+
+function stopReason(finishReason: string | null | undefined, message: Message): StopReason {
+    if (finishReason === "length") return "length";
+    if (finishReason === "tool_calls" || finishReason === "function_call") return "toolUse";
+    if (finishReason === "content_filter" || finishReason === "network_error")
+        throw Error(`Provider finish_reason: ${finishReason}`);
+    if (finishReason && finishReason !== "stop") throw Error(`Unknown provider finish_reason: ${finishReason}`);
+    return message.tool_calls?.length ? "toolUse" : "stop";
+}
+
 export class Agent {
     messages: Message[];
     usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -484,8 +495,11 @@ ${list}
         this.usage.cacheWrite += cacheWrite;
         const prompt = input + cacheRead + cacheWrite;
         if (updateCacheRate && prompt > 0) this.usage.cacheHitRate = (cacheRead / prompt) * 100;
+        const choice = data.choices?.[0];
+        if (!choice?.message) throw Error("OpenRouter returned no assistant message");
         return {
-            message: data.choices[0].message as Message,
+            message: choice.message as Message,
+            stopReason: stopReason(choice.finish_reason, choice.message),
             usage: { input, output: u.completion_tokens ?? 0, cacheRead, cacheWrite },
         };
     }
@@ -496,19 +510,27 @@ ${list}
         for (;;) {
             const response = await this.runModelRequest(this.messages, toolDefinitions, "model");
             if (!response) return "Operation aborted.";
-            const { message: answer, usage } = response;
+            const { message: answer, usage, stopReason } = response;
             this.messages.push(answer);
             await this.session?.append({ type: "message", message: answer, usage });
-            if (!answer.tool_calls?.length) return answer.content ?? "";
+            if (!answer.tool_calls?.length) {
+                if (answer.content?.trim()) return answer.content;
+                throw Error(`Model returned an empty response (finish_reason: ${stopReason}).`);
+            }
             for (let i = 0; i < answer.tool_calls.length; i++) {
                 const c = answer.tool_calls[i];
                 let content: string,
                     args: ToolArgs = {},
                     aborted = false;
                 try {
-                    args = JSON.parse(c.function.arguments);
-                    this.onTool({ phase: "start", name: c.function.name, args });
-                    content = await executeTool(c.function.name, args, this.beginOperation("tool", c.id));
+                    if (stopReason === "length") {
+                        content =
+                            "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.";
+                    } else {
+                        args = JSON.parse(c.function.arguments);
+                        this.onTool({ phase: "start", name: c.function.name, args });
+                        content = await executeTool(c.function.name, args, this.beginOperation("tool", c.id));
+                    }
                 } catch (e) {
                     aborted = !!this.active?.controller.signal.aborted;
                     content = aborted ? "Operation aborted" : `Error: ${e instanceof Error ? e.message : e}`;
