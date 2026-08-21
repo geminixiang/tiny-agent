@@ -9,7 +9,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-import tiny_agent as tiny
+from tiny_agent import agent as tiny
+from tiny_agent.cli import Terminal
 
 
 class TinyAgentTest(unittest.TestCase):
@@ -125,12 +126,12 @@ class TinyAgentTest(unittest.TestCase):
         ])
 
     def test_terminal_display_position(self):
-        self.assertEqual(tiny.Terminal.display_position("你a", 80), (0, 3))
-        self.assertEqual(tiny.Terminal.display_position("abcdefg你", 8), (1, 2))
-        self.assertEqual(tiny.Terminal.display_position("e\u0301你", 8), (0, 3))
+        self.assertEqual(Terminal.display_position("你a", 80), (0, 3))
+        self.assertEqual(Terminal.display_position("abcdefg你", 8), (1, 2))
+        self.assertEqual(Terminal.display_position("e\u0301你", 8), (0, 3))
 
     def test_terminal_edits_at_cursor_and_distinguishes_escape(self):
-        read_fd, write_fd = os.pipe(); terminal = tiny.Terminal.__new__(tiny.Terminal); terminal.fd = read_fd; terminal.tty = True
+        read_fd, write_fd = os.pipe(); terminal = Terminal.__new__(Terminal); terminal.fd = read_fd; terminal.tty = True
         try:
             os.write(write_fd, "你a\x1b[Db\x1b[C\x7f\r".encode()); self.assertEqual(terminal.readline(""), "你b")
             os.write(write_fd, b"[D"); self.assertEqual(terminal.escape_sequence(), b"D")

@@ -40,7 +40,7 @@ user prompt → model → tool calls → tool results → model → final answer
 - `Esc` 中斷 model、tool、compaction
 - Token、cache usage 與精簡 tool log
 
-核心實作：[`typescript/src/index.ts`](typescript/src/index.ts)、[`typescript/src/cli.ts`](typescript/src/cli.ts)、[`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)、[`python/tiny_agent/__init__.py`](python/tiny_agent/__init__.py)。共用的 skill、session schema 與文件留在 repo root。
+核心實作：[`typescript/src/index.ts`](typescript/src/index.ts)、[`typescript/src/cli.ts`](typescript/src/cli.ts)、[`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)、[`python/tiny_agent/agent.py`](python/tiny_agent/agent.py)、[`python/tiny_agent/cli.py`](python/tiny_agent/cli.py)。共用的 skill、session schema 與文件留在 repo root。
 
 ## 安裝
 

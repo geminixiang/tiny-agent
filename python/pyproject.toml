@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 license = "MIT"
 
 [project.scripts]
-tiny-py = "tiny_agent:main"
+tiny-py = "tiny_agent.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.9.28,<0.13.0"]
