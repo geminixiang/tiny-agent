@@ -10,7 +10,7 @@
 
 ```mermaid
 flowchart TD
-    CLI["tiny-ts CLI"] --> Context["載入 AGENTS.md、skills、session"]
+    CLI["tiny-ts / tiny-go CLI"] --> Context["載入 AGENTS.md、skills、session"]
     Context --> User["User prompt"]
     User --> Model["OpenRouter / LLM"]
     Model --> Decision{"有 tool calls?"}
@@ -40,22 +40,27 @@ user prompt → model → tool calls → tool results → model → final answer
 - `Esc` 中斷 model、tool、compaction
 - Token、cache usage 與精簡 tool log
 
-核心在 [`src/index.ts`](src/index.ts)，CLI 在 [`src/cli.ts`](src/cli.ts)。Go 版則集中於 [`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)。
+核心實作：[`typescript/src/index.ts`](typescript/src/index.ts)、[`typescript/src/cli.ts`](typescript/src/cli.ts)、[`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)。共用的 skill、session schema 與文件留在 repo root。
 
 ## 安裝
 
-需要 Node.js 22+ 與 [OpenRouter API key](https://openrouter.ai/settings/keys)：
+需要 Node.js 22+、Go 1.24+ 與 [OpenRouter API key](https://openrouter.ai/settings/keys)：
 
 ```bash
 git clone https://github.com/geminixiang/tiny-agent.git
 cd tiny-agent
-npm install
-npm link
+make install
 export OPENROUTER_API_KEY=sk-or-...
-tiny-ts
 ```
 
-`npm link` 每個 Node/npm 環境只需執行一次；使用 `nvm` 切換 Node 版本後需重新執行。
+這會從 repo root 安裝兩個 CLI：
+
+```bash
+tiny-ts
+tiny-go
+```
+
+使用 `nvm` 切換 Node.js 版本後需再次執行 `make install-ts`。若 shell 找不到 `tiny-go`，請將 `$(go env GOPATH)/bin` 加入 `PATH`。
 
 指定其他 OpenRouter model：
 
@@ -69,16 +74,7 @@ TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 tiny-ts "讀取 README 並摘要"
 ```
 
-Go 版需要 Go 1.24+：
-
-```bash
-cd go
-go install ./cmd/tiny-go
-cd ..
-tiny-go
-```
-
-同樣支援 `TINY_MODEL`、`--skill`、`--session` 與 one-shot prompt：
+Go 與 TypeScript 版共用 `TINY_MODEL`、`--skill`、`--session` 與 one-shot prompt：
 
 ```bash
 tiny-go "讀取 README 並摘要"
@@ -155,21 +151,16 @@ system prompt + compacted summary + 最近至少 6 則完整 turn
 
 ## 開發
 
-```bash
-npm run dev
-npm run lint
-npm run format:check
-npm run check
-npm test
-```
-
-自動排版：
+所有開發指令都從 repo root 執行：
 
 ```bash
-npm run format
+make test
+make check
+make format
+make build
 ```
 
-測試使用 mock OpenRouter，不消耗 API 額度。
+個別實作也可使用 `make test-ts`、`make test-go` 等對應 target。測試使用 mock OpenRouter，不消耗 API 額度。
 
 ## 四語言路線
 

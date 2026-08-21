@@ -3,5 +3,5 @@
     "printWidth": 120,
     "tabWidth": 4,
     "useTabs": false,
-    "ignorePatterns": []
+    "ignorePatterns": ["package-lock.json"]
 }

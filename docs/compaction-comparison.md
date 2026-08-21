@@ -4,7 +4,7 @@
 
 ## 先看結論
 
-`tiny-agent` 的 `/compact` 是 **client-side、由目前設定的 DeepSeek 模型產生摘要**：它透過 OpenRouter Chat Completions 發出另一個 LLM request，不是本機演算法壓縮，也沒有使用 OpenRouter/OpenAI/Anthropic 的 provider-side compaction API。成功後，記憶體 context 變成 `system + 摘要 + 最近 6 則 message`；JSONL 則追加 compaction record，保留先前 audit trail。[tiny-agent 實作](../src/index.ts)
+`tiny-agent` 的 `/compact` 是 **client-side、由目前設定的 DeepSeek 模型產生摘要**：它透過 OpenRouter Chat Completions 發出另一個 LLM request，不是本機演算法壓縮，也沒有使用 OpenRouter/OpenAI/Anthropic 的 provider-side compaction API。成功後，記憶體 context 變成 `system + 摘要 + 最近 6 則 message`；JSONL 則追加 compaction record，保留先前 audit trail。[tiny-agent 實作](../typescript/src/index.ts)
 
 | 實作                                | 壓縮機制                                                                                                            | 觸發門檻                                                                                     | 保留近期內容                                                                                                | 持久化與 resume                                                                                                                                       |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -17,7 +17,7 @@
 
 ## tiny-agent 現況
 
-`Agent.compact()` 的流程如下（目前位於 [`src/index.ts`](../src/index.ts)）：
+`Agent.compact()` 的流程如下（目前位於 [`typescript/src/index.ts`](../typescript/src/index.ts)）：
 
 1. 固定 `keep = 6`，把 system message 排除後切成 `old` 與 `recent`。
 2. 呼叫同一個 `Agent.call()`；因此 endpoint 仍是 OpenRouter `/api/v1/chat/completions`，model 仍是 `MODEL = deepseek/deepseek-v4-flash-0731`。

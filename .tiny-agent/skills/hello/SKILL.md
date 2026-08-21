@@ -8,7 +8,7 @@ description: Greets the user and reports the current project name. Use when the 
 
 When this skill is used:
 
-1. Read `package.json` with the `read` tool.
+1. Read `typescript/package.json` with the `read` tool.
 2. Find the project `name`.
 3. Reply with exactly this structure:
 
