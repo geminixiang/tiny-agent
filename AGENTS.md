@@ -9,4 +9,4 @@
 - Keep non-core formatting helpers on one line when that reduces visual noise; keep agent, session, tool, and cancellation flows expanded for teaching.
 - Use four spaces, never tabs. Run the language formatter instead of hand-aligning code.
 - Preserve valid model transcripts, append-only sessions, resumability, and cancellation semantics when simplifying.
-- Keep TypeScript and Go behavior equivalent unless a language constraint is documented.
+- Keep TypeScript, Go, and Python behavior equivalent unless a language constraint is documented.

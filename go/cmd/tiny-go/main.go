@@ -21,6 +21,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -810,13 +811,100 @@ func (t *terminal) close() error {
 	return term.Restore(t.fd, t.old)
 }
 
+func (t *terminal) escapeSequence() (byte, bool, error) {
+	timer := time.NewTimer(20 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case event := <-t.keys:
+		if event.err != nil {
+			return 0, false, event.err
+		}
+		if event.key != '[' && event.key != 'O' {
+			return 0, false, nil
+		}
+		for {
+			event = <-t.keys
+			if event.err != nil {
+				return 0, false, event.err
+			}
+			if event.key >= 64 && event.key <= 126 {
+				return event.key, false, nil
+			}
+		}
+	case <-timer.C:
+		return 0, true, nil
+	}
+}
+
+func runeWidth(r rune) int {
+	if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Cf, r) {
+		return 0
+	}
+	if r >= 0x1100 && (r <= 0x115f || r == 0x2329 || r == 0x232a || r >= 0x2e80 && r <= 0xa4cf || r >= 0xac00 && r <= 0xd7a3 || r >= 0xf900 && r <= 0xfaff || r >= 0xfe10 && r <= 0xfe6f || r >= 0xff00 && r <= 0xff60 || r >= 0xffe0 && r <= 0xffe6 || r >= 0x1f300 && r <= 0x1faff || r >= 0x20000 && r <= 0x3fffd) {
+		return 2
+	}
+	return 1
+}
+
+func visibleRunes(text []rune) []rune {
+	visible := []rune{}
+	for i := 0; i < len(text); i++ {
+		if text[i] != 27 || i+1 >= len(text) || text[i+1] != '[' {
+			visible = append(visible, text[i])
+			continue
+		}
+		i += 2
+		for i < len(text) && (text[i] < 64 || text[i] > 126) {
+			i++
+		}
+	}
+	return visible
+}
+
+func displayPosition(text []rune, columns int) (int, int) {
+	offset := 0
+	for _, r := range visibleRunes(text) {
+		width := runeWidth(r)
+		if width == 2 && offset%columns == columns-1 {
+			offset++
+		}
+		offset += width
+	}
+	return offset / columns, offset % columns
+}
+
+func (t *terminal) redraw(prompt string, line []rune, cursor, oldRow int) int {
+	width := 80
+	if columns, _, err := term.GetSize(t.fd); err == nil && columns > 0 {
+		width = columns
+	}
+	if oldRow > 0 {
+		fmt.Fprintf(t.out, "\x1b[%dA", oldRow)
+	}
+	fmt.Fprintf(t.out, "\r\x1b[J%s%s", prompt, string(line))
+	promptRunes := []rune(prompt)
+	endRow, endColumn := displayPosition(append(append([]rune{}, promptRunes...), line...), width)
+	targetRow, targetColumn := displayPosition(append(append([]rune{}, promptRunes...), line[:cursor]...), width)
+	if endColumn == 0 {
+		fmt.Fprint(t.out, " ")
+	}
+	if endRow > targetRow {
+		fmt.Fprintf(t.out, "\x1b[%dA", endRow-targetRow)
+	}
+	fmt.Fprint(t.out, "\r")
+	if targetColumn > 0 {
+		fmt.Fprintf(t.out, "\x1b[%dC", targetColumn)
+	}
+	return targetRow
+}
+
 func (t *terminal) readLine(prompt string) (string, error) {
 	fmt.Fprint(t.out, prompt)
 	if t.old == nil {
 		line, err := t.reader.ReadString('\n')
 		return strings.TrimSpace(line), err
 	}
-	line := []byte{}
+	line, cursor, row, pending := []rune{}, 0, 0, []byte{}
 	for {
 		event := <-t.keys
 		if event.err != nil {
@@ -825,24 +913,57 @@ func (t *terminal) readLine(prompt string) (string, error) {
 		if event.key == 3 {
 			return "", errExit
 		}
+		if event.key == 27 {
+			key, _, err := t.escapeSequence()
+			if err != nil {
+				return "", err
+			}
+			if key == 'D' && cursor > 0 {
+				cursor--
+				for cursor > 0 && runeWidth(line[cursor]) == 0 {
+					cursor--
+				}
+				row = t.redraw(prompt, line, cursor, row)
+			}
+			if key == 'C' && cursor < len(line) {
+				cursor++
+				for cursor < len(line) && runeWidth(line[cursor]) == 0 {
+					cursor++
+				}
+				row = t.redraw(prompt, line, cursor, row)
+			}
+			continue
+		}
 		if event.key == '\r' || event.key == '\n' {
 			fmt.Fprint(t.out, "\r\n")
 			return strings.TrimSpace(string(line)), nil
 		}
 		if event.key == 8 || event.key == 127 {
-			if len(line) == 0 {
+			if cursor == 0 {
 				continue
 			}
-			_, size := utf8.DecodeLastRune(line)
-			line = line[:len(line)-size]
-			fmt.Fprint(t.out, "\b \b")
+			start := cursor - 1
+			for start > 0 && runeWidth(line[start]) == 0 {
+				start--
+			}
+			line = append(line[:start], line[cursor:]...)
+			cursor = start
+			row = t.redraw(prompt, line, cursor, row)
 			continue
 		}
 		if event.key < 32 || event.key == 127 {
 			continue
 		}
-		line = append(line, event.key)
-		_, _ = t.out.Write([]byte{event.key})
+		pending = append(pending, event.key)
+		if !utf8.FullRune(pending) {
+			continue
+		}
+		r, _ := utf8.DecodeRune(pending)
+		line = append(line, 0)
+		copy(line[cursor+1:], line[cursor:])
+		line[cursor], cursor = r, cursor+1
+		pending = pending[:0]
+		row = t.redraw(prompt, line, cursor, row)
 	}
 }
 
@@ -872,8 +993,16 @@ func (t *terminal) run(agent *Agent, operation func() (string, error)) (string, 
 				return "", event.err
 			}
 			if event.key == 27 {
-				fmt.Fprint(t.out, "\r\n\x1b[33mAborting...\x1b[0m\r\n")
-				agent.abort()
+				_, standalone, err := t.escapeSequence()
+				if err != nil {
+					agent.abort()
+					<-done
+					return "", err
+				}
+				if standalone {
+					fmt.Fprint(t.out, "\r\n\x1b[33mAborting...\x1b[0m\r\n")
+					agent.abort()
+				}
 			}
 			if event.key == 3 {
 				agent.abort()

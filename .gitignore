@@ -7,3 +7,9 @@ dist/
 .env
 *.log
 go/tiny-go
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+python/build/
+python/dist/

@@ -1,0 +1,17 @@
+[project]
+name = "tiny-agent-py"
+version = "0.1.0"
+description = "Minimal Python AI coding agent POC"
+requires-python = ">=3.12"
+license = "MIT"
+
+[project.scripts]
+tiny-py = "tiny_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.9.28,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = "tiny_agent"

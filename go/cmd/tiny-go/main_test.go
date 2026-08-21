@@ -33,16 +33,32 @@ func TestCRLFWriter(t *testing.T) {
 	}
 }
 
+func TestTerminalDisplayPosition(t *testing.T) {
+	for _, test := range []struct {
+		text        string
+		width       int
+		row, column int
+	}{{"你a", 80, 0, 3}, {"abcdefg你", 8, 1, 2}, {"e\u0301你", 8, 0, 3}} {
+		row, column := displayPosition([]rune(test.text), test.width)
+		if row != test.row || column != test.column {
+			t.Fatalf("%q: got %d,%d want %d,%d", test.text, row, column, test.row, test.column)
+		}
+	}
+}
+
 func TestTerminalLineEditingAndExit(t *testing.T) {
 	out := &strings.Builder{}
-	tty := &terminal{keys: make(chan keyEvent, 8), out: out, old: &term.State{}}
+	tty := &terminal{keys: make(chan keyEvent, 24), out: out, old: &term.State{}}
 	for _, key := range []byte("你a") {
+		tty.keys <- keyEvent{key: key}
+	}
+	for _, key := range []byte("\x1b[Db\x1b[C\x1b[A\x1b[B") {
 		tty.keys <- keyEvent{key: key}
 	}
 	tty.keys <- keyEvent{key: 127}
 	tty.keys <- keyEvent{key: '\r'}
 	line, err := tty.readLine("› ")
-	if err != nil || line != "你" {
+	if err != nil || line != "你b" {
 		t.Fatalf("line: %q %v", line, err)
 	}
 	tty.keys <- keyEvent{key: 3}
@@ -52,7 +68,7 @@ func TestTerminalLineEditingAndExit(t *testing.T) {
 }
 
 func TestTerminalEscAbortsOperation(t *testing.T) {
-	tty := &terminal{keys: make(chan keyEvent, 1), out: &strings.Builder{}, old: &term.State{}}
+	tty := &terminal{keys: make(chan keyEvent, 8), out: &strings.Builder{}, old: &term.State{}}
 	agent := newAgent(nil, nil, "")
 	started := make(chan struct{})
 	done := make(chan error)
@@ -67,6 +83,14 @@ func TestTerminalEscAbortsOperation(t *testing.T) {
 		done <- err
 	}()
 	<-started
+	for _, key := range []byte("\x1b[D") {
+		tty.keys <- keyEvent{key: key}
+	}
+	select {
+	case <-done:
+		t.Fatal("arrow key aborted operation")
+	case <-time.After(50 * time.Millisecond):
+	}
 	tty.keys <- keyEvent{key: 27}
 	if err := <-done; err != nil {
 		t.Fatal(err)
