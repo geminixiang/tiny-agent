@@ -1,24 +1,27 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { createInterface, emitKeypressEvents } from "node:readline";
+import { parseArgs } from "node:util";
 import { Agent, MODEL, Session, loadProjectInstructions, loadSkills, formatToolEvent, formatUsage } from "./index.js";
 
+function parseCLIArgs(args = process.argv.slice(2)) {
+    const { values, positionals } = parseArgs({
+        args,
+        options: { session: { type: "string" }, skill: { type: "string", multiple: true } },
+        allowPositionals: true,
+    });
+    return { sessionId: values.session, extras: values.skill ?? [], oneShot: positionals.join(" ") };
+}
+
 async function main() {
-    const args = process.argv.slice(2),
-        value = (flag: string) => args[args.indexOf(flag) + 1],
-        sessionId = value("--session");
-    if (args.includes("--session") && !sessionId) throw Error("--session requires a UUIDv7");
-    const extras = args.flatMap((x, i) => (x === "--skill" && args[i + 1] ? [args[i + 1]] : [])),
-        skills = await loadSkills(extras),
+    const { sessionId, extras, oneShot } = parseCLIArgs();
+    const skills = await loadSkills(extras),
         instructions = await loadProjectInstructions();
     const session = sessionId ? await Session.open(sessionId) : await Session.create();
     const showTool = (event: Parameters<typeof formatToolEvent>[0]) =>
         console.log(`\x1b[${event.phase === "start" ? "33" : "2"}m${formatToolEvent(event)}\x1b[0m`);
     const agent = new Agent(skills, fetch, session, showTool, instructions);
     if (sessionId) await agent.resumeSession();
-    const oneShot = args
-        .filter((x, i) => !["--skill", "--session"].includes(x) && !["--skill", "--session"].includes(args[i - 1]))
-        .join(" ");
     const resume = () => console.log(`\nResume: tiny-ts --session ${session.id}`);
     const rl = createInterface({ input: process.stdin, output: process.stdout }),
         ask = (q: string) => new Promise<string>((ok) => rl.question(q, ok));
