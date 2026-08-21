@@ -212,14 +212,14 @@ function readLines(text: string, offset = 1, limit = 2_000) {
     return `${selected.join("\n")}${end < lines.length ? `\n\n[Showing lines ${offset}-${end} of ${lines.length}. Use offset=${end + 1} to continue.]` : ""}`;
 }
 
-async function runBash(command: string, timeout: number, signal?: AbortSignal) {
+async function runBash(command: string, timeout: number, sandbox: boolean, signal?: AbortSignal) {
     const options = {
         cwd: root,
         timeout: timeout * 1_000,
         maxBuffer: 10_000_000,
         signal,
     };
-    if (process.env.TINY_SANDBOX === "0") return run(command, options);
+    if (!sandbox) return run(command, options);
     const rustupHome = process.env.RUSTUP_HOME || resolve(homedir(), ".rustup");
     const sandboxPath = (process.env.PATH ?? "")
         .split(delimiter)
@@ -260,9 +260,7 @@ async function runBash(command: string, timeout: number, signal?: AbortSignal) {
     } catch (error) {
         const commandError = error as NodeJS.ErrnoException;
         if (commandError.code === "ENOENT") {
-            throw Error(
-                "Fence sandbox is required but was not found. Install: brew install fencesandbox/tap/fence (or set TINY_SANDBOX=0 to disable).",
-            );
+            throw Error("Fence sandbox is required but was not found. Install: brew install fencesandbox/tap/fence.");
         }
         throw error;
     } finally {
@@ -270,7 +268,7 @@ async function runBash(command: string, timeout: number, signal?: AbortSignal) {
     }
 }
 
-export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal) {
+export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal, sandbox = false) {
     if (signal?.aborted) throw Error("Operation aborted");
     if (name === "bash") {
         if (!args.command) throw Error("command is required");
@@ -280,7 +278,7 @@ export async function executeTool(name: string, args: ToolArgs, signal?: AbortSi
         let stdout = "",
             stderr = "";
         try {
-            ({ stdout, stderr } = await runBash(args.command, timeout, signal));
+            ({ stdout, stderr } = await runBash(args.command, timeout, sandbox, signal));
         } catch (error) {
             if (signal?.aborted) throw Error("Operation aborted");
             const commandError = error as ExecException & { stdout?: string; stderr?: string };
@@ -435,6 +433,7 @@ export class Agent {
         public session?: Session,
         public onTool: (event: ToolEvent) => void = () => {},
         instructions = "",
+        public sandbox = false,
     ) {
         const list =
             skills
@@ -584,7 +583,12 @@ ${list}
                     } else {
                         args = JSON.parse(c.function.arguments);
                         this.onTool({ phase: "start", name: c.function.name, args });
-                        content = await executeTool(c.function.name, args, this.beginOperation("tool", c.id));
+                        content = await executeTool(
+                            c.function.name,
+                            args,
+                            this.beginOperation("tool", c.id),
+                            this.sandbox,
+                        );
                     }
                 } catch (e) {
                     aborted = !!this.active?.controller.signal.aborted;
