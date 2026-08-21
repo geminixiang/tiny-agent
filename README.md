@@ -1,8 +1,33 @@
-<img src="assets/hero.png" alt="A tiny robot agent looking toward a wide blue sky" width="100%">
+<p align="center">
+  <img src="assets/hero.png" alt="A tiny robot agent looking toward a wide blue sky" width="100%">
+</p>
 
-# tiny-agent
+<h1 align="center">tiny-agent</h1>
 
 用最少概念實作可用的 AI coding agent。這個教學專案會分別用 TypeScript、Python、Rust、Go 完成 POC；目前已完成 TypeScript 與 Go 版。
+
+## 架構
+
+```mermaid
+flowchart TD
+    CLI["tiny-ts CLI"] --> Context["載入 AGENTS.md、skills、session"]
+    Context --> User["User prompt"]
+    User --> Model["OpenRouter / LLM"]
+    Model --> Decision{"有 tool calls?"}
+    Decision -- 否 --> Answer["顯示回答並寫入 session"]
+    Decision -- 是 --> Tools["bash / read / write / edit"]
+    Tools --> Result["Tool result 寫入 session"]
+    Result --> Model
+    CLI -- Esc --> Abort["AbortController"]
+    Abort --> Model
+    Abort --> Tools
+```
+
+Agent loop 的核心：
+
+```text
+user prompt → model → tool calls → tool results → model → final answer
+```
 
 ## 功能
 
@@ -57,29 +82,6 @@ tiny-go
 
 ```bash
 tiny-go "讀取 README 並摘要"
-```
-
-## 架構
-
-```mermaid
-flowchart TD
-    CLI["tiny-ts CLI"] --> Context["載入 AGENTS.md、skills、session"]
-    Context --> User["User prompt"]
-    User --> Model["OpenRouter / LLM"]
-    Model --> Decision{"有 tool calls?"}
-    Decision -- 否 --> Answer["顯示回答並寫入 session"]
-    Decision -- 是 --> Tools["bash / read / write / edit"]
-    Tools --> Result["Tool result 寫入 session"]
-    Result --> Model
-    CLI -- Esc --> Abort["AbortController"]
-    Abort --> Model
-    Abort --> Tools
-```
-
-Agent loop 的核心：
-
-```text
-user prompt → model → tool calls → tool results → model → final answer
 ```
 
 ## 使用
@@ -175,3 +177,7 @@ npm run format
 2. Go：目前版本
 3. Python：待完成
 4. Rust：待完成
+
+## License
+
+[MIT](LICENSE) © 2026 Ying Xiang
