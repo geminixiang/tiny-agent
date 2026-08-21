@@ -29,7 +29,10 @@ test("formats concise TUI tool events", () => {
         "◆ write a.txt (5 chars)",
     );
     assert.equal(formatToolEvent({ phase: "end", name: "read", args: {}, result: "hello" }), "  └ 5 chars");
-    assert.equal(formatToolEvent({ phase: "end", name: "write", args: {}, result: "ok" }), "  └ ok");
+    assert.equal(
+        formatToolEvent({ phase: "end", name: "write", args: {}, result: "Successfully wrote 5 bytes to a.txt." }),
+        "  └ 36 chars",
+    );
 });
 
 test("creates versioned UUIDv7 JSONL sessions", async () => {
@@ -236,25 +239,97 @@ test("formats pi-style token usage and cache ratio", () => {
 test("uses the default OpenRouter model", () =>
     assert.equal(MODEL, process.env.TINY_MODEL || "deepseek/deepseek-v4-flash-0731"));
 
-test("write, read, edit", async () => {
-    assert.equal(await executeTool("write", { path: "a.txt", content: "hello" }), "ok");
-    assert.equal(await executeTool("read", { path: "a.txt" }), "hello");
-    assert.equal(await executeTool("edit", { path: "a.txt", oldText: "hello", newText: "hi" }), "ok");
-    assert.equal(await executeTool("read", { path: "a.txt" }), "hi");
+test("read paginates complete UTF-8 lines with actionable errors", async () => {
+    await writeFile("read.txt", "one\ntwo\nthree\nfour\n");
+    assert.equal(
+        await executeTool("read", { path: "read.txt", limit: 2 }),
+        "one\ntwo\n\n[Showing lines 1-2 of 4. Use offset=3 to continue.]",
+    );
+    assert.equal(
+        await executeTool("read", { path: "read.txt", offset: 2, limit: 2 }),
+        "two\nthree\n\n[Showing lines 2-3 of 4. Use offset=4 to continue.]",
+    );
+    await assert.rejects(() => executeTool("read", { path: "read.txt", offset: 5 }), /beyond end.*4 lines/);
+    await writeFile("wide.txt", "你".repeat(30_000) + "\nnext\n");
+    assert.match(await executeTool("read", { path: "wide.txt" }), /Line 1 exceeds 50KB.*byte-oriented/);
+    await writeFile("many.txt", Array.from({ length: 2_001 }, (_, i) => `${i + 1}`).join("\n"));
+    const many = await executeTool("read", { path: "many.txt" });
+    assert.match(many, /\[Showing lines 1-2000 of 2001\. Use offset=2001 to continue\.\]$/);
+});
+
+test("write reports UTF-8 bytes and edit applies atomic exact replacements", async () => {
+    assert.equal(
+        await executeTool("write", { path: "a.txt", content: "你好" }),
+        "Successfully wrote 6 bytes to a.txt.",
+    );
+    await writeFile("edit.txt", "alpha\nbeta\ngamma\n");
+    assert.equal(
+        await executeTool("edit", {
+            path: "edit.txt",
+            edits: [
+                { oldText: "alpha", newText: "one" },
+                { oldText: "gamma", newText: "three" },
+            ],
+        }),
+        "Successfully replaced 2 block(s) in edit.txt.",
+    );
+    assert.equal(await readFile("edit.txt", "utf8"), "one\nbeta\nthree\n");
+
+    for (const edits of [
+        [{ oldText: "", newText: "x" }],
+        [{ oldText: "missing", newText: "x" }],
+        [{ oldText: "e", newText: "x" }],
+        [
+            { oldText: "one\nbeta", newText: "x" },
+            { oldText: "beta\nthree", newText: "y" },
+        ],
+    ]) {
+        const before = await readFile("edit.txt", "utf8");
+        await assert.rejects(
+            () => executeTool("edit", { path: "edit.txt", edits }),
+            /must not be empty|not found|more than once|overlap/,
+        );
+        assert.equal(await readFile("edit.txt", "utf8"), before);
+    }
+
+    await writeFile("windows.txt", "\uFEFFfirst\r\nsecond\r\n");
+    await executeTool("edit", {
+        path: "windows.txt",
+        edits: [{ oldText: "first\nsecond", newText: "third\nfourth" }],
+    });
+    assert.equal(await readFile("windows.txt", "utf8"), "\uFEFFthird\r\nfourth\r\n");
+    await writeFile("mixed.txt", "first\r\nkeep\nlast\r\n");
+    await executeTool("edit", {
+        path: "mixed.txt",
+        edits: [{ oldText: "first\nkeep", newText: "changed\nkeep" }],
+    });
+    assert.equal(await readFile("mixed.txt", "utf8"), "changed\r\nkeep\nlast\r\n");
     await assert.rejects(() => executeTool("read", { path: "../secret" }), /inside cwd/);
 });
 
-test("stores large bash output and returns a searchable path", async () => {
+test("bash preserves failures, validates timeout, and stores truncated output", async () => {
+    const failed = await executeTool("bash", { command: "printf 'stdout'; printf 'stderr' >&2; exit 7" });
+    assert.match(failed, /stdoutstderr\n\nCommand exited with code 7$/);
+    await assert.rejects(() => executeTool("bash", { command: "true", timeout: 0 }), /positive number/);
+    assert.match(await executeTool("bash", { command: "sleep 1", timeout: 0.01 }), /timed out after 0.01 seconds/);
+
     const result = await executeTool("bash", {
-        command: "printf 'begin\\n'; yes x | head -n 30000; printf 'end\\n'",
+        command: "printf 'begin\\n'; yes x | head -n 3000; printf 'end\\n'",
     });
-    assert.match(result, /\[Output truncated\. Full output: (.*\.tiny-agent\/tool-output\/[0-9a-f-]+\.log)\]$/);
+    assert.match(
+        result,
+        /\[Showing lines \d+-3002 of 3002\. Full output: (.*\.tiny-agent\/tool-output\/[0-9a-f-]+\.log)\]$/,
+    );
     const path = result.match(/Full output: (.*)\]/)![1],
         full = await readFile(path, "utf8");
     assert.match(full, /^begin\n/);
     assert.match(full, /end\n$/);
+    assert.ok(result.split("\n").length <= 2_002);
     assert.ok(Buffer.byteLength(result) < Buffer.byteLength(full));
-    assert.equal(await executeTool("read", { path }), full.slice(0, 100_000));
+    const longLine = await executeTool("bash", { command: `printf '${"x".repeat(60_000)}\\ndone\\n'` });
+    assert.ok(Buffer.byteLength(longLine) > 40_000);
+    assert.match(longLine, /done\n/);
+    assert.match(await executeTool("read", { path, limit: 2 }), /Use offset=3 to continue/);
 });
 
 test("discovers skills and fills system prompt", async () => {
@@ -359,7 +434,7 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         events.map(({ phase, name, result }) => ({ phase, name, result })),
         [
             { phase: "start", name: "write", result: undefined },
-            { phase: "end", name: "write", result: "ok" },
+            { phase: "end", name: "write", result: "Successfully wrote 3 bytes to made.txt." },
         ],
     );
     assert.deepEqual(agent.usage, {
@@ -415,20 +490,18 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
     await restored.resumeSession();
     assert.deepEqual(restored.messages, agent.messages);
     assert.equal(requests[0].model, MODEL);
-    assert.deepEqual(
-        requests[0].tools.map((tool: any) => [tool.function.name, tool.function.description]),
-        [
-            [
-                "bash",
-                "Run commands, builds, tests, and file discovery in the working directory. Use read, write, or edit for ordinary text file operations.",
-            ],
-            ["read", "Read a UTF-8 text file. Prefer this over cat or sed when inspecting source files."],
-            [
-                "write",
-                "Create a new UTF-8 text file or completely rewrite one. Parent directories are created automatically.",
-            ],
-            ["edit", "Make one precise replacement in an existing UTF-8 text file. oldText must match exactly once."],
-        ],
-    );
+    const definitions = Object.fromEntries(requests[0].tools.map((tool: any) => [tool.function.name, tool.function]));
+    assert.match(definitions.bash.description, /last 2,000 lines or 50KB/);
+    assert.match(definitions.bash.parameters.properties.timeout.description, /Defaults to 120/);
+    assert.deepEqual(definitions.bash.parameters.required, ["command"]);
+    assert.match(definitions.read.description, /UTF-8.*cat or sed.*2,000 complete lines or 50KB/);
+    assert.equal(definitions.read.parameters.properties.offset.minimum, 1);
+    assert.equal(definitions.read.parameters.properties.limit.minimum, 1);
+    assert.deepEqual(definitions.read.parameters.required, ["path"]);
+    assert.match(definitions.write.description, /completely rewrite.*Parent directories.*edit for partial/);
+    assert.match(definitions.edit.description, /exactly once.*must not overlap.*validated before writing/);
+    assert.equal(definitions.edit.parameters.properties.edits.minItems, 1);
+    assert.equal(definitions.edit.parameters.properties.edits.items.properties.oldText.minLength, 1);
+    assert.deepEqual(definitions.edit.parameters.required, ["path", "edits"]);
     assert.equal(requests[2].tools, undefined);
 });

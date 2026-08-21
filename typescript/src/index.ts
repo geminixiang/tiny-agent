@@ -1,4 +1,4 @@
-import { exec } from "node:child_process";
+import { exec, type ExecException } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
@@ -27,10 +27,20 @@ type SessionRecord = {
     type: "session" | "message" | "compaction" | "interruption";
     [key: string]: unknown;
 };
+type ToolEdit = { oldText: string; newText: string };
+type ToolArgs = {
+    command?: string;
+    timeout?: number;
+    path?: string;
+    content?: string;
+    offset?: number;
+    limit?: number;
+    edits?: ToolEdit[];
+};
 type ToolEvent = {
     phase: "start" | "end";
     name: string;
-    args: Record<string, string>;
+    args: ToolArgs;
     result?: string;
 };
 
@@ -42,7 +52,7 @@ export function formatToolEvent({ phase, name, args, result }: ToolEvent) {
             name === "write"
                 ? ` (${args.content?.length ?? 0} chars)`
                 : name === "edit"
-                  ? ` (${args.oldText?.length ?? 0}→${args.newText?.length ?? 0} chars)`
+                  ? ` (${args.edits?.length ?? 0} blocks)`
                   : "";
     return `◆ ${name}${target ? ` ${target.length > 80 ? target.slice(0, 77) + "..." : target}` : ""}${suffix}`;
 }
@@ -88,33 +98,70 @@ export async function loadSkills(extra: string[] = []) {
 }
 
 const toolDefinitions = [
-    [
-        "bash",
-        "Run commands, builds, tests, and file discovery in the working directory. Use read, write, or edit for ordinary text file operations.",
-        { command: { type: "string" } },
-    ],
-    [
-        "read",
-        "Read a UTF-8 text file. Prefer this over cat or sed when inspecting source files.",
-        { path: { type: "string" } },
-    ],
-    [
-        "write",
-        "Create a new UTF-8 text file or completely rewrite one. Parent directories are created automatically.",
-        { path: { type: "string" }, content: { type: "string" } },
-    ],
-    [
-        "edit",
-        "Make one precise replacement in an existing UTF-8 text file. oldText must match exactly once.",
-        { path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } },
-    ],
-].map(([name, description, properties]) => ({
-    type: "function",
-    function: {
-        name,
-        description,
-        parameters: { type: "object", properties, required: Object.keys(properties as object) },
+    {
+        name: "bash",
+        description:
+            "Run commands, builds, tests, and file discovery in the working directory. Use read, write, or edit for ordinary text file operations. Output is limited to the last 2,000 lines or 50KB; truncated output includes a full-output path.",
+        properties: {
+            command: { type: "string", description: "Shell command to execute in the working directory." },
+            timeout: {
+                type: "number",
+                exclusiveMinimum: 0,
+                description: "Optional timeout in seconds. Defaults to 120.",
+            },
+        },
+        required: ["command"],
     },
+    {
+        name: "read",
+        description:
+            "Read a UTF-8 text file. Prefer this over cat or sed. Returns at most 2,000 complete lines or 50KB and includes an offset hint when more lines remain.",
+        properties: {
+            path: { type: "string", description: "Path to the UTF-8 text file within the working directory." },
+            offset: { type: "integer", minimum: 1, description: "1-indexed line number to start reading from." },
+            limit: { type: "integer", minimum: 1, description: "Maximum number of lines to return." },
+        },
+        required: ["path"],
+    },
+    {
+        name: "write",
+        description:
+            "Create a new UTF-8 text file or completely rewrite an existing file. Parent directories are created automatically. Use edit for partial changes.",
+        properties: {
+            path: { type: "string", description: "Path to create or completely rewrite." },
+            content: { type: "string", description: "Complete UTF-8 file content." },
+        },
+        required: ["path", "content"],
+    },
+    {
+        name: "edit",
+        description:
+            "Make precise replacements in an existing UTF-8 text file. Every oldText must match exactly once in the original file, and edits must not overlap. All edits are validated before writing.",
+        properties: {
+            path: { type: "string", description: "Path to the existing UTF-8 text file." },
+            edits: {
+                type: "array",
+                minItems: 1,
+                description: "Non-overlapping replacements, all matched against the original file.",
+                items: {
+                    type: "object",
+                    properties: {
+                        oldText: {
+                            type: "string",
+                            minLength: 1,
+                            description: "Exact text that must occur exactly once in the original file.",
+                        },
+                        newText: { type: "string", description: "Replacement text." },
+                    },
+                    required: ["oldText", "newText"],
+                },
+            },
+        },
+        required: ["path", "edits"],
+    },
+].map(({ name, description, properties, required }) => ({
+    type: "function",
+    function: { name, description, parameters: { type: "object", properties, required } },
 }));
 
 function pathInRoot(path: string) {
@@ -123,41 +170,141 @@ function pathInRoot(path: string) {
     return full;
 }
 
-export async function executeTool(name: string, args: Record<string, string>, signal?: AbortSignal) {
+async function limitBashOutput(output: string, complete = true) {
+    const lines = output.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    if (lines.length <= 2_000 && Buffer.byteLength(output) <= MAX_TOOL_OUTPUT) return output;
+    const buffer = Buffer.from(output);
+    let byteStart = Math.max(0, buffer.length - MAX_TOOL_OUTPUT);
+    while (byteStart < buffer.length && (buffer[byteStart] & 0xc0) === 0x80) byteStart++;
+    let tailLines = buffer.subarray(byteStart).toString().split("\n");
+    if (tailLines.length > 2_000) tailLines = tailLines.slice(-2_000);
+    const tail = tailLines.join("\n"),
+        start = Math.max(1, lines.length - tailLines.length + 1),
+        path = resolve(root, ".tiny-agent/tool-output", `${uuid7()}.log`);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, output);
+    const label = complete ? "Full output" : "Captured output; command exceeded the 10MB safety cap";
+    return `${tail}\n\n[Showing lines ${start}-${lines.length} of ${lines.length}. ${label}: ${path}]`;
+}
+
+function readLines(text: string, offset = 1, limit = 2_000) {
+    if (!Number.isInteger(offset) || offset < 1) throw Error("offset must be an integer >= 1");
+    if (!Number.isInteger(limit) || limit < 1) throw Error("limit must be an integer >= 1");
+    const lines = text === "" ? [] : text.replace(/\r\n/g, "\n").split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    if (!lines.length) {
+        if (offset === 1) return "";
+        throw Error(`Offset ${offset} is beyond end of file (0 lines total).`);
+    }
+    if (offset > lines.length) throw Error(`Offset ${offset} is beyond end of file (${lines.length} lines total).`);
+    const selected: string[] = [];
+    for (const line of lines.slice(offset - 1, offset - 1 + Math.min(limit, 2_000))) {
+        const next = selected.length ? `${selected.join("\n")}\n${line}` : line;
+        if (Buffer.byteLength(next) > MAX_TOOL_OUTPUT) break;
+        selected.push(line);
+    }
+    if (!selected.length)
+        return `Line ${offset} exceeds 50KB. Use bash with a byte-oriented command to inspect this line.`;
+    const end = offset + selected.length - 1;
+    return `${selected.join("\n")}${end < lines.length ? `\n\n[Showing lines ${offset}-${end} of ${lines.length}. Use offset=${end + 1} to continue.]` : ""}`;
+}
+
+export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal) {
     if (signal?.aborted) throw Error("Operation aborted");
     if (name === "bash") {
-        const { stdout, stderr } = await run(args.command, {
+        if (!args.command) throw Error("command is required");
+        const timeout = args.timeout ?? 120;
+        if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0)
+            throw Error("timeout must be a positive number of seconds");
+        let stdout = "",
+            stderr = "";
+        try {
+            ({ stdout, stderr } = await run(args.command, {
                 cwd: root,
-                timeout: 120_000,
+                timeout: timeout * 1_000,
                 maxBuffer: 10_000_000,
                 signal,
-            }),
-            output = stdout + stderr || "(no output)";
-        const bytes = Buffer.from(output);
-        if (bytes.length <= MAX_TOOL_OUTPUT) return output;
-        const path = resolve(root, ".tiny-agent/tool-output", `${uuid7()}.log`);
-        await mkdir(dirname(path), { recursive: true });
-        await writeFile(path, output);
-        let start = bytes.length - MAX_TOOL_OUTPUT;
-        while ((bytes[start] & 0xc0) === 0x80) start++;
-        return `${bytes.subarray(start).toString()}\n\n[Output truncated. Full output: ${path}]`;
+            }));
+        } catch (error) {
+            if (signal?.aborted) throw Error("Operation aborted");
+            const commandError = error as ExecException & { stdout?: string; stderr?: string };
+            stdout = commandError.stdout ?? "";
+            stderr = commandError.stderr ?? "";
+            if (commandError.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+                return limitBashOutput(
+                    `${stdout}${stderr}${stdout || stderr ? "\n\n" : ""}Bash output exceeded the 10MB safety cap; complete output was not captured.`,
+                    false,
+                );
+            if (commandError.killed)
+                return limitBashOutput(
+                    `${stdout}${stderr}${stdout || stderr ? "\n\n" : ""}Command timed out after ${timeout} seconds.`,
+                );
+            const code = typeof commandError.code === "number" ? commandError.code : "unknown";
+            return limitBashOutput(
+                `${stdout}${stderr}${stdout || stderr ? "\n\n" : ""}Command exited with code ${code}`,
+            );
+        }
+        return limitBashOutput(stdout + stderr || "(no output)");
     }
+    if (!args.path) throw Error("path is required");
     const path = pathInRoot(args.path);
-    if (name === "read") return (await readFile(path, { encoding: "utf8", signal })).slice(0, 100_000);
-    if (name === "write")
-        return mkdir(dirname(path), { recursive: true })
-            .then(() => {
-                if (signal?.aborted) throw Error("Operation aborted");
-                return writeFile(path, args.content, { signal });
-            })
-            .then(() => "ok");
-    if (name === "edit") {
-        const text = await readFile(path, { encoding: "utf8", signal }),
-            parts = text.split(args.oldText);
-        if (parts.length !== 2) throw Error(`oldText must occur exactly once (found ${parts.length - 1})`);
+    if (name === "read") {
+        const text = await readFile(path, { encoding: "utf8", signal });
+        return readLines(text, args.offset, args.limit);
+    }
+    if (name === "write") {
+        if (args.content === undefined) throw Error("content is required");
+        await mkdir(dirname(path), { recursive: true });
         if (signal?.aborted) throw Error("Operation aborted");
-        await writeFile(path, parts.join(args.newText), { signal });
-        return "ok";
+        await writeFile(path, args.content, { signal });
+        return `Successfully wrote ${Buffer.byteLength(args.content)} bytes to ${args.path}.`;
+    }
+    if (name === "edit") {
+        if (!args.edits?.length) throw Error("edits must be a nonempty array");
+        const original = await readFile(path, { encoding: "utf8", signal }),
+            bom = original.startsWith("\uFEFF"),
+            text = bom ? original.slice(1) : original,
+            ending = text.match(/\r\n|\n/)?.[0] ?? "\n";
+        let normalized = "",
+            source = 0;
+        const positions = [0];
+        while (source < text.length) {
+            if (text.startsWith("\r\n", source)) {
+                normalized += "\n";
+                source += 2;
+            } else {
+                normalized += text[source++];
+            }
+            positions.push(source);
+        }
+        const ranges = args.edits.map((edit, index) => {
+            const oldText = edit.oldText.replace(/\r\n/g, "\n");
+            if (!oldText) throw Error(`edits[${index}].oldText must not be empty`);
+            const start = normalized.indexOf(oldText),
+                second = start < 0 ? -1 : normalized.indexOf(oldText, start + 1);
+            if (start < 0) throw Error(`edits[${index}].oldText was not found in ${args.path}.`);
+            if (second >= 0)
+                throw Error(`edits[${index}].oldText occurs more than once in ${args.path}; add more context.`);
+            return {
+                index,
+                start: positions[start],
+                end: positions[start + oldText.length],
+                newText: edit.newText.replace(/\r\n|\n/g, ending),
+            };
+        });
+        const sorted = [...ranges].sort((a, b) => a.start - b.start);
+        for (let i = 1; i < sorted.length; i++) {
+            if (sorted[i].start >= sorted[i - 1].end) continue;
+            throw Error(`edits[${sorted[i - 1].index}] and edits[${sorted[i].index}] overlap in ${args.path}.`);
+        }
+        let edited = text;
+        for (const range of [...ranges].sort((a, b) => b.start - a.start))
+            edited = edited.slice(0, range.start) + range.newText + edited.slice(range.end);
+        if (bom) edited = "\uFEFF" + edited;
+        if (signal?.aborted) throw Error("Operation aborted");
+        await writeFile(path, edited, { signal });
+        return `Successfully replaced ${args.edits.length} block(s) in ${args.path}.`;
     }
     throw Error(`unknown tool: ${name}`);
 }
@@ -356,7 +503,7 @@ ${list}
             for (let i = 0; i < answer.tool_calls.length; i++) {
                 const c = answer.tool_calls[i];
                 let content: string,
-                    args: Record<string, string> = {},
+                    args: ToolArgs = {},
                     aborted = false;
                 try {
                     args = JSON.parse(c.function.arguments);
