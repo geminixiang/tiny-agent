@@ -7,29 +7,20 @@ import { Agent, MODEL, Session, loadProjectInstructions, loadSkills, formatToolE
 function parseCLIArgs(args = process.argv.slice(2)) {
     const { values, positionals } = parseArgs({
         args,
-        options: {
-            session: { type: "string" },
-            skill: { type: "string", multiple: true },
-            sandbox: { type: "boolean" },
-        },
+        options: { session: { type: "string" }, skill: { type: "string", multiple: true } },
         allowPositionals: true,
     });
-    return {
-        sessionId: values.session,
-        extras: values.skill ?? [],
-        sandbox: values.sandbox ?? false,
-        oneShot: positionals.join(" "),
-    };
+    return { sessionId: values.session, extras: values.skill ?? [], oneShot: positionals.join(" ") };
 }
 
 async function main() {
-    const { sessionId, extras, sandbox, oneShot } = parseCLIArgs();
+    const { sessionId, extras, oneShot } = parseCLIArgs();
     const skills = await loadSkills(extras),
         instructions = await loadProjectInstructions();
     const session = sessionId ? await Session.open(sessionId) : await Session.create();
     const showTool = (event: Parameters<typeof formatToolEvent>[0]) =>
         console.log(`\x1b[${event.phase === "start" ? "33" : "2"}m${formatToolEvent(event)}\x1b[0m`);
-    const agent = new Agent(skills, fetch, session, showTool, instructions, sandbox);
+    const agent = new Agent(skills, fetch, session, showTool, instructions);
     if (sessionId) await agent.resumeSession();
     const resume = () => console.log(`\nResume: tiny-ts --session ${session.id}`);
     const rl = createInterface({ input: process.stdin, output: process.stdout }),
@@ -56,7 +47,7 @@ async function main() {
         resume();
     };
     console.log(
-        `\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: ${MODEL}\nsandbox: ${sandbox ? "fence" : "off"}\nsession: ${session.id}\npath: ${session.path}${sessionId ? "\nrestored: yes" : ""}`,
+        `\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: ${MODEL}\nsession: ${session.id}\npath: ${session.path}${sessionId ? "\nrestored: yes" : ""}`,
     );
     if (oneShot) {
         console.log(`\n${await agent.runAgentLoop(oneShot)}`);

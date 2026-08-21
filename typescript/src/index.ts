@@ -1,13 +1,11 @@
-import { exec, execFile, type ExecException } from "node:child_process";
+import { exec, type ExecException } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, dirname, resolve } from "node:path";
+import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 
 export const MODEL = process.env.TINY_MODEL || "deepseek/deepseek-v4-flash-0731";
 const run = promisify(exec),
-    runFile = promisify(execFile),
     root = process.cwd(),
     MAX_TOOL_OUTPUT = 50 * 1024;
 type Message = {
@@ -212,63 +210,7 @@ function readLines(text: string, offset = 1, limit = 2_000) {
     return `${selected.join("\n")}${end < lines.length ? `\n\n[Showing lines ${offset}-${end} of ${lines.length}. Use offset=${end + 1} to continue.]` : ""}`;
 }
 
-async function runBash(command: string, timeout: number, sandbox: boolean, signal?: AbortSignal) {
-    const options = {
-        cwd: root,
-        timeout: timeout * 1_000,
-        maxBuffer: 10_000_000,
-        signal,
-    };
-    if (!sandbox) return run(command, options);
-    const rustupHome = process.env.RUSTUP_HOME || resolve(homedir(), ".rustup");
-    const sandboxPath = (process.env.PATH ?? "")
-        .split(delimiter)
-        .filter((path) => path && !path.includes(`${delimiter}.pi${delimiter}`) && !path.includes("/.pi/"))
-        .filter((path, index, paths) => paths.indexOf(path) === index);
-    const dir = await mkdtemp(resolve(tmpdir(), "tiny-agent-fence-")),
-        sandboxHome = resolve(dir, "home"),
-        sandboxTmp = resolve(dir, "tmp"),
-        settings = resolve(dir, "fence.json");
-    try {
-        await mkdir(sandboxHome);
-        await mkdir(sandboxTmp);
-        await writeFile(
-            settings,
-            JSON.stringify({
-                network: { allowedDomains: [] },
-                filesystem: {
-                    defaultDenyRead: true,
-                    allowRead: [root, resolve(dirname(process.execPath), ".."), rustupHome, ...sandboxPath],
-                    allowWrite: [root, tmpdir()],
-                    denyWrite: [resolve(root, ".git")],
-                },
-                command: { deny: ["git commit", "git push", "npm publish"] },
-            }),
-        );
-        const env = Object.fromEntries(
-            Object.entries(process.env).filter(([key]) => !/(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)/i.test(key)),
-        );
-        env.CARGO_HOME = resolve(sandboxHome, ".cargo");
-        env.HOME = sandboxHome;
-        env.PATH = sandboxPath.join(delimiter);
-        env.RUSTUP_HOME = rustupHome;
-        env.TMPDIR = sandboxTmp;
-        return await runFile("fence", ["--settings", settings, "--", "/bin/sh", "-c", command], {
-            ...options,
-            env,
-        });
-    } catch (error) {
-        const commandError = error as NodeJS.ErrnoException;
-        if (commandError.code === "ENOENT") {
-            throw Error("Fence sandbox is required but was not found. Install: brew install fencesandbox/tap/fence.");
-        }
-        throw error;
-    } finally {
-        await rm(dir, { recursive: true, force: true });
-    }
-}
-
-export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal, sandbox = false) {
+export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal) {
     if (signal?.aborted) throw Error("Operation aborted");
     if (name === "bash") {
         if (!args.command) throw Error("command is required");
@@ -278,7 +220,12 @@ export async function executeTool(name: string, args: ToolArgs, signal?: AbortSi
         let stdout = "",
             stderr = "";
         try {
-            ({ stdout, stderr } = await runBash(args.command, timeout, sandbox, signal));
+            ({ stdout, stderr } = await run(args.command, {
+                cwd: root,
+                timeout: timeout * 1_000,
+                maxBuffer: 10_000_000,
+                signal,
+            }));
         } catch (error) {
             if (signal?.aborted) throw Error("Operation aborted");
             const commandError = error as ExecException & { stdout?: string; stderr?: string };
@@ -433,7 +380,6 @@ export class Agent {
         public session?: Session,
         public onTool: (event: ToolEvent) => void = () => {},
         instructions = "",
-        public sandbox = false,
     ) {
         const list =
             skills
@@ -583,12 +529,7 @@ ${list}
                     } else {
                         args = JSON.parse(c.function.arguments);
                         this.onTool({ phase: "start", name: c.function.name, args });
-                        content = await executeTool(
-                            c.function.name,
-                            args,
-                            this.beginOperation("tool", c.id),
-                            this.sandbox,
-                        );
+                        content = await executeTool(c.function.name, args, this.beginOperation("tool", c.id));
                     }
                 } catch (e) {
                     aborted = !!this.active?.controller.signal.aborted;
