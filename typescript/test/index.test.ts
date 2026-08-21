@@ -15,6 +15,9 @@ test("loads cwd AGENTS.md into the system prompt", async () => {
     assert.equal(instructions, "Always answer briefly.\n");
     const system = new Agent([], fetch, undefined, () => {}, instructions).messages[0].content!;
     assert.match(system, /<project_context>/);
+    assert.match(system, /inspect only what is needed, then make the changes and run focused tests/);
+    assert.match(system, /Use read to inspect files, write for new files, edit for existing files/);
+    assert.match(system, /If repeated experiments fail, reconsider the approach/);
     assert.match(system, /<project_instructions path=".*\/AGENTS\.md">\nAlways answer briefly\./);
     assert.equal(await loadProjectInstructions(resolve(dir, "missing")), "");
 });
@@ -412,5 +415,20 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
     await restored.resumeSession();
     assert.deepEqual(restored.messages, agent.messages);
     assert.equal(requests[0].model, MODEL);
+    assert.deepEqual(
+        requests[0].tools.map((tool: any) => [tool.function.name, tool.function.description]),
+        [
+            [
+                "bash",
+                "Run commands, builds, tests, and file discovery in the working directory. Use read, write, or edit for ordinary text file operations.",
+            ],
+            ["read", "Read a UTF-8 text file. Prefer this over cat or sed when inspecting source files."],
+            [
+                "write",
+                "Create a new UTF-8 text file or completely rewrite one. Parent directories are created automatically.",
+            ],
+            ["edit", "Make one precise replacement in an existing UTF-8 text file. oldText must match exactly once."],
+        ],
+    );
     assert.equal(requests[2].tools, undefined);
 });

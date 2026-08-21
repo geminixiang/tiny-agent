@@ -3,7 +3,7 @@
 - Prefer early returns and early continues. Keep the main path at the lowest indentation level.
 - Group related code together so the file reads in a clear top-to-bottom order.
 - Avoid meaningless `try/catch`. Catch only when converting an error, handling cancellation, or applying an intentional fallback.
-- Keep this a teaching project: prefer direct code, few files, few dependencies, and the smallest implementation that preserves behavior.
+- Keep this a teaching project: prefer direct code, few files, few dependencies, and the smallest implementation that preserves behavior. Use a small mature dependency when reimplementing the capability would distract from the agent loop.
 - Do not add speculative abstractions, framework layers, or defensive code for unlikely cases.
 - Use clear domain names such as `runAgentLoop`, `callModel`, `executeTool`, and `resumeSession`.
 - Keep non-core formatting helpers on one line when that reduces visual noise; keep agent, session, tool, and cancellation flows expanded for teaching.

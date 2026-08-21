@@ -88,12 +88,24 @@ export async function loadSkills(extra: string[] = []) {
 }
 
 const toolDefinitions = [
-    ["bash", "Run a shell command in the working directory", { command: { type: "string" } }],
-    ["read", "Read a UTF-8 text file", { path: { type: "string" } }],
-    ["write", "Create or overwrite a UTF-8 text file", { path: { type: "string" }, content: { type: "string" } }],
+    [
+        "bash",
+        "Run commands, builds, tests, and file discovery in the working directory. Use read, write, or edit for ordinary text file operations.",
+        { command: { type: "string" } },
+    ],
+    [
+        "read",
+        "Read a UTF-8 text file. Prefer this over cat or sed when inspecting source files.",
+        { path: { type: "string" } },
+    ],
+    [
+        "write",
+        "Create a new UTF-8 text file or completely rewrite one. Parent directories are created automatically.",
+        { path: { type: "string" }, content: { type: "string" } },
+    ],
     [
         "edit",
-        "Replace one unique exact string in a UTF-8 text file",
+        "Make one precise replacement in an existing UTF-8 text file. oldText must match exactly once.",
         { path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } },
     ],
 ].map(([name, description, properties]) => ({
@@ -224,7 +236,15 @@ export class Agent {
         this.messages = [
             {
                 role: "system",
-                content: `You are tiny-agent, a concise coding agent in ${root}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.${project}\n\n<available_skills>\n${list}\n</available_skills>`,
+                content: `You are tiny-agent, a concise coding agent in ${root}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.
+
+For implementation tasks, inspect only what is needed, then make the changes and run focused tests. Do not keep researching the same uncertainty when a mature dependency or direct implementation is available.
+Use read to inspect files, write for new files, edit for existing files, and bash for discovery, commands, builds, and tests.
+Prefer completing a small working implementation over exhaustively researching every option. If repeated experiments fail, reconsider the approach instead of making another similar attempt.${project}
+
+<available_skills>
+${list}
+</available_skills>`,
             },
         ];
     }
