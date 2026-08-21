@@ -1,4 +1,4 @@
-.PHONY: install install-ts install-go install-py install-rs test test-ts test-go test-py test-rs check check-ts check-go check-py check-rs build build-ts build-go build-py build-rs format format-ts format-go format-py format-rs
+.PHONY: install install-ts install-go install-py install-rs test test-ts test-go test-py test-rs check check-ts check-go check-py check-rs eval build build-ts build-go build-py build-rs format format-ts format-go format-py format-rs
 
 install: install-ts install-go install-py install-rs
 
@@ -44,6 +44,9 @@ check-py:
 
 check-rs:
 	cd rust && cargo clippy --all-targets --offline -- -D warnings
+
+eval:
+	cd typescript && node --import tsx ../eval/run.ts
 
 format: format-ts format-go format-py format-rs
 

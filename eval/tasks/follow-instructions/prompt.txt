@@ -1,0 +1,1 @@
+修正 `normalizeLabel(value)`，並執行測試。遵守這個 repository 的專案指示；完成後簡短說明結果。

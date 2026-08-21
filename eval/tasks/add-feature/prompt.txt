@@ -1,0 +1,9 @@
+在 `src/tasks.js` 新增並 export `completeTask(tasks, id)`。
+
+需求：
+- 回傳新的 tasks array，不修改原 array 或 task objects。
+- 指定 id 的 task 要改成 `completed: true`。
+- 找不到 id 時丟出 `Error("Unknown task: <id>")`。
+- 保持現有功能正常。
+
+完成後執行測試，並簡短說明結果。
