@@ -4,13 +4,13 @@
 
 <h1 align="center">tiny-agent</h1>
 
-用最少概念實作可用的 AI coding agent。這個教學專案會分別用 TypeScript、Python、Rust、Go 完成 POC；目前已完成 TypeScript、Go 與 Python 版。
+用最少概念實作可用的 AI coding agent。這個教學專案會分別用 TypeScript、Python、Rust、Go 完成 POC；目前四種語言版本皆已完成。
 
 ## 架構
 
 ```mermaid
 flowchart TD
-    CLI["tiny-ts / tiny-go / tiny-py CLI"] --> Context["載入 AGENTS.md、skills、session"]
+    CLI["tiny-ts / tiny-go / tiny-py / tiny-rs CLI"] --> Context["載入 AGENTS.md、skills、session"]
     Context --> User["User prompt"]
     User --> Model["OpenRouter / LLM"]
     Model --> Decision{"有 tool calls?"}
@@ -40,11 +40,11 @@ user prompt → model → tool calls → tool results → model → final answer
 - `Esc` 中斷 model、tool、compaction
 - Token、cache usage 與精簡 tool log
 
-核心實作：[`typescript/src/index.ts`](typescript/src/index.ts)、[`typescript/src/cli.ts`](typescript/src/cli.ts)、[`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)、[`python/tiny_agent/agent.py`](python/tiny_agent/agent.py)、[`python/tiny_agent/cli.py`](python/tiny_agent/cli.py)。共用的 skill、session schema 與文件留在 repo root。
+核心實作：[`typescript/src/index.ts`](typescript/src/index.ts)、[`typescript/src/cli.ts`](typescript/src/cli.ts)、[`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)、[`python/tiny_agent/agent.py`](python/tiny_agent/agent.py)、[`python/tiny_agent/cli.py`](python/tiny_agent/cli.py)、[`rust/src/lib.rs`](rust/src/lib.rs)、[`rust/src/terminal.rs`](rust/src/terminal.rs)。共用的 skill、session schema 與文件留在 repo root。
 
 ## 安裝
 
-需要 Node.js 22+、Go 1.24+、[uv](https://docs.astral.sh/uv/) 與 [OpenRouter API key](https://openrouter.ai/settings/keys)：
+需要 Node.js 22+、Go 1.24+、Rust 1.85+（`cargo`）、[uv](https://docs.astral.sh/uv/) 與 [OpenRouter API key](https://openrouter.ai/settings/keys)：
 
 ```bash
 git clone https://github.com/geminixiang/tiny-agent.git
@@ -53,12 +53,13 @@ make install
 export OPENROUTER_API_KEY=sk-or-...
 ```
 
-這會從 repo root 安裝三個 CLI：
+這會從 repo root 安裝三個 CLI（Rust 版可用 `make build-rust` 編譯）；四種 CLI 用法一致：
 
 ```bash
 tiny-ts
 tiny-go
 tiny-py
+cargo run --manifest-path rust/Cargo.toml --release
 ```
 
 使用 `nvm` 切換 Node.js 版本後需再次執行 `make install-ts`。若 shell 找不到 `tiny-go`，請將 `$(go env GOPATH)/bin` 加入 `PATH`。
@@ -75,11 +76,12 @@ TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 tiny-ts "讀取 README 並摘要"
 ```
 
-Go、Python 與 TypeScript 版共用 `TINY_MODEL`、`--skill`、`--session` 與 one-shot prompt：
+Go、Python、Rust 與 TypeScript 版共用 `TINY_MODEL`、`--skill`、`--session` 與 one-shot prompt：
 
 ```bash
 tiny-go "讀取 README 並摘要"
 tiny-py "讀取 README 並摘要"
+cargo run --manifest-path rust/Cargo.toml --release -- "讀取 README 並摘要"
 ```
 
 ## 使用
@@ -162,14 +164,16 @@ make format
 make build
 ```
 
-個別實作也可使用 `make test-ts`、`make test-go`、`make test-py` 等對應 target。測試使用 mock OpenRouter，不消耗 API 額度。
+個別實作也可使用 `make test-ts`、`make test-go`、`make test-py`、`make test-rust` 等對應 target。測試使用 mock OpenRouter，不消耗 API 額度。
 
 ## 四語言路線
 
 1. TypeScript：目前版本
 2. Go：目前版本
 3. Python：目前版本
-4. Rust：待完成
+4. Rust：目前版本
+
+Rust 版使用 `ureq`（blocking HTTP）、`libc` + `unicode-width`（raw terminal 與 CJK 顯示寬度）、`serde`（session/JSON）。由於 Rust std 沒有非同步 HTTP 中斷機制，model request 在子執行緒執行並輪詢取消旗標，bash 工具以 process group 清除背景子行程；Esc/Ctrl+C 語意與 Go/Python 版一致。
 
 ## License
 

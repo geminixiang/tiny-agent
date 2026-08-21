@@ -7,6 +7,7 @@ dist/
 .env
 *.log
 go/tiny-go
+rust/target/
 __pycache__/
 *.py[cod]
 .venv/

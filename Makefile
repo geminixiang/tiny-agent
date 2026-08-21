@@ -1,4 +1,4 @@
-.PHONY: install install-ts install-go install-py test test-ts test-go test-py check check-ts check-go check-py format format-ts format-go format-py build build-ts build-go build-py
+.PHONY: install install-ts install-go install-py test test-ts test-go test-py test-rust check check-ts check-go check-py build build-ts build-go build-py build-rust format format-ts format-go format-py format-rust
 
 install: install-ts install-go install-py
 
@@ -12,7 +12,10 @@ install-go:
 install-py:
 	uv tool install --force ./python
 
-test: test-ts test-go test-py
+test: test-ts test-go test-py test-rust
+
+test-rust:
+	cd rust && cargo test --offline
 
 test-ts:
 	npm --prefix typescript test
@@ -36,7 +39,10 @@ check-go:
 check-py:
 	uv run --project python python -m compileall -q python/tiny_agent python/tests
 
-format: format-ts format-go format-py
+format: format-ts format-go format-py format-rust
+
+format-rust:
+	cd rust && cargo fmt
 
 format-ts:
 	npm --prefix typescript run format
@@ -47,7 +53,10 @@ format-go:
 format-py:
 	@true
 
-build: build-ts build-go build-py
+build: build-ts build-go build-py build-rust
+
+build-rust:
+	cd rust && cargo build --release --offline
 
 build-ts:
 	npm --prefix typescript run build
