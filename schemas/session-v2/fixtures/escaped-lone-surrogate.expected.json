@@ -1,0 +1,7 @@
+{
+    "ok": false,
+    "error": {
+        "code": "MALFORMED_JSON",
+        "line": 1
+    }
+}

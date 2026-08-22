@@ -54,10 +54,10 @@
             "additionalProperties": false,
             "required": ["input", "output", "cacheRead", "cacheWrite"],
             "properties": {
-                "input": { "type": "integer", "minimum": 0 },
-                "output": { "type": "integer", "minimum": 0 },
-                "cacheRead": { "type": "integer", "minimum": 0 },
-                "cacheWrite": { "type": "integer", "minimum": 0 }
+                "input": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+                "output": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+                "cacheRead": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+                "cacheWrite": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
             }
         },
         "toolCall": {
@@ -89,7 +89,7 @@
         "step": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["operationId", "stepId", "attemptId", "attempt", "stepKind", "status", "configurationSnapshot", "configurationDigest"],
+            "required": ["operationId", "stepId", "attemptId", "attempt", "stepKind", "status", "contextThroughEntryId", "configurationSnapshot", "configurationDigest"],
             "properties": {
                 "operationId": { "type": "string" },
                 "stepId": { "type": "string" },
@@ -97,6 +97,7 @@
                 "attempt": { "type": "integer" },
                 "stepKind": { "enum": ["assistant", "compaction"] },
                 "status": { "enum": ["attempting", "settled", "failed"] },
+                "contextThroughEntryId": { "type": "string" },
                 "configurationSnapshot": { "type": "object" },
                 "configurationDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
             }

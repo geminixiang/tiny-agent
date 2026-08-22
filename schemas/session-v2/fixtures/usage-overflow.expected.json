@@ -1,0 +1,8 @@
+{
+    "ok": false,
+    "error": {
+        "code": "INVALID_FACT",
+        "line": 5,
+        "seq": 5
+    }
+}

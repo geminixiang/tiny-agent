@@ -26,6 +26,7 @@ export type StepState = {
     attempt: number;
     stepKind: "assistant" | "compaction";
     status: "attempting" | "settled" | "failed";
+    contextThroughEntryId: string;
     configurationSnapshot: ConfigurationSnapshot;
     configurationDigest: string;
 };
@@ -105,6 +106,7 @@ type AttemptInfo = {
     attemptId: string;
     attempt: number;
     kind: "assistant" | "compaction";
+    contextThroughEntryId: string;
     closed: boolean;
     failed: boolean;
     settledEntryId?: string;
@@ -129,6 +131,7 @@ type InternalState = SessionV2State & {
     steps: Map<string, AttemptInfo[]>;
     tools: Map<string, ToolCallState & { operationId: string }>;
     toolPairs: Set<string>;
+    activeContextThroughEntryId?: string;
     compactedThrough?: string;
 };
 
@@ -286,6 +289,139 @@ function configurationDigest(snapshot: ConfigurationSnapshot) {
     return `sha256:${createHash("sha256").update(canonicalConfiguration(snapshot)).digest("hex")}`;
 }
 
+function structurallyEqual(left: unknown, right: unknown): boolean {
+    if (left === right) return true;
+    if (Array.isArray(left) || Array.isArray(right))
+        return (
+            Array.isArray(left) &&
+            Array.isArray(right) &&
+            left.length === right.length &&
+            left.every((item, index) => structurallyEqual(item, right[index]))
+        );
+    if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+    const leftObject = left as JsonObject;
+    const rightObject = right as JsonObject;
+    const keys = Object.keys(leftObject);
+    return (
+        keys.length === Object.keys(rightObject).length &&
+        keys.every((key) => Object.hasOwn(rightObject, key) && structurallyEqual(leftObject[key], rightObject[key]))
+    );
+}
+
+function scanJson(source: string, line: number) {
+    let index = 0;
+    const whitespace = () => {
+        while ([" ", "\t", "\n", "\r"].includes(source[index] ?? "")) index++;
+    };
+    const jsonString = () => {
+        if (source[index++] !== '"') fail("MALFORMED_JSON", line);
+        let decoded = "";
+        while (index < source.length && source[index] !== '"') {
+            const character = source[index++];
+            if (character === "\\") {
+                const escape = source[index++];
+                if (escape === "u") {
+                    const hex = source.slice(index, index + 4);
+                    if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail("MALFORMED_JSON", line);
+                    index += 4;
+                    const code = Number.parseInt(hex, 16);
+                    if (code >= 0xd800 && code <= 0xdbff) {
+                        if (source.slice(index, index + 2) !== "\\u") fail("MALFORMED_JSON", line);
+                        const lowHex = source.slice(index + 2, index + 6);
+                        if (!/^[dD][c-fC-F][0-9a-fA-F]{2}$/.test(lowHex)) fail("MALFORMED_JSON", line);
+                        index += 6;
+                        decoded += String.fromCodePoint(
+                            0x10000 + ((code - 0xd800) << 10) + (Number.parseInt(lowHex, 16) - 0xdc00),
+                        );
+                    } else {
+                        if (code >= 0xdc00 && code <= 0xdfff) fail("MALFORMED_JSON", line);
+                        decoded += String.fromCharCode(code);
+                    }
+                    continue;
+                }
+                const escapes: Record<string, string> = {
+                    '"': '"',
+                    "\\": "\\",
+                    "/": "/",
+                    b: "\b",
+                    f: "\f",
+                    n: "\n",
+                    r: "\r",
+                    t: "\t",
+                };
+                if (!Object.hasOwn(escapes, escape)) fail("MALFORMED_JSON", line);
+                decoded += escapes[escape];
+                continue;
+            }
+            const code = character.charCodeAt(0);
+            if (code < 0x20 || (code >= 0xdc00 && code <= 0xdfff)) fail("MALFORMED_JSON", line);
+            if (code >= 0xd800 && code <= 0xdbff) {
+                const low = source[index++];
+                if (!low || low.charCodeAt(0) < 0xdc00 || low.charCodeAt(0) > 0xdfff) fail("MALFORMED_JSON", line);
+                decoded += character + low;
+            } else decoded += character;
+        }
+        if (source[index++] !== '"') fail("MALFORMED_JSON", line);
+        return decoded;
+    };
+    const value = (): void => {
+        whitespace();
+        if (source[index] === "{") {
+            index++;
+            whitespace();
+            const keys = new Set<string>();
+            if (source[index] === "}") {
+                index++;
+                return;
+            }
+            for (;;) {
+                whitespace();
+                const key = jsonString();
+                if (keys.has(key)) fail("MALFORMED_JSON", line);
+                keys.add(key);
+                whitespace();
+                if (source[index++] !== ":") fail("MALFORMED_JSON", line);
+                value();
+                whitespace();
+                if (source[index] === "}") {
+                    index++;
+                    return;
+                }
+                if (source[index++] !== ",") fail("MALFORMED_JSON", line);
+            }
+        }
+        if (source[index] === "[") {
+            index++;
+            whitespace();
+            if (source[index] === "]") {
+                index++;
+                return;
+            }
+            for (;;) {
+                value();
+                whitespace();
+                if (source[index] === "]") {
+                    index++;
+                    return;
+                }
+                if (source[index++] !== ",") fail("MALFORMED_JSON", line);
+            }
+        }
+        if (source[index] === '"') {
+            jsonString();
+            return;
+        }
+        const token = source
+            .slice(index)
+            .match(/^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/)?.[0];
+        if (!token) fail("MALFORMED_JSON", line);
+        index += token.length;
+    };
+    value();
+    whitespace();
+    if (index !== source.length) fail("MALFORMED_JSON", line);
+}
+
 function operation(state: InternalState, operationId: unknown, line: number, seq: number) {
     const key = id(operationId, "INVALID_FACT", line, seq);
     const found = state.operations.get(key);
@@ -348,6 +484,7 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
         }
         state.transcript.push(message);
         state.activeContext.push(message);
+        state.activeContextThroughEntryId = fact.id;
         if (message.role === "user") state.entries.set(fact.id, { entry });
         else if (message.role === "assistant") {
             const attempt = state.attempts.get(String(entry.attemptId))!;
@@ -401,12 +538,14 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
         const message = parseMessage(item.message, line, fact.seq);
         if (sourceId !== expectedIds[retainedIndex] || source?.type !== "message")
             fail("INVALID_REFERENCE", line, fact.seq);
-        if (JSON.stringify(source.message) !== JSON.stringify(message)) fail("INVALID_REFERENCE", line, fact.seq);
+        if (!structurallyEqual(parseMessage(source.message, line, fact.seq), message))
+            fail("INVALID_REFERENCE", line, fact.seq);
         return message;
     });
     if (entry.retainedTail.length !== expectedIds.length) fail("INVALID_REFERENCE", line, fact.seq);
     validateTranscript(retained, line, fact.seq);
     state.activeContext = [{ role: "user", content: `[Compacted history]\n${summary}` }, ...retained];
+    state.activeContextThroughEntryId = state.operation.inputThroughEntryId;
     state.compactedThrough = through;
     const currentAttempt = state.operation.step && state.attempts.get(state.operation.step.attemptId);
     if (!currentAttempt || currentAttempt.closed || currentAttempt.kind !== "compaction")
@@ -505,6 +644,8 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         if (record.stepKind !== found.kind.replace("run", "assistant")) fail("INVALID_TRANSITION", line, fact.seq);
         const contextId = id(record.contextThroughEntryId, "INVALID_FACT", line, fact.seq);
         if (!state.entries.has(contextId)) fail("INVALID_REFERENCE", line, fact.seq);
+        if (attempt === 1 && contextId !== state.activeContextThroughEntryId)
+            fail("INVALID_TRANSITION", line, fact.seq);
         const snapshot = configuration(record.configurationSnapshot, line, fact.seq);
         const digest = String(record.configurationDigest);
         if (!DIGEST.test(digest) || configurationDigest(snapshot) !== digest) fail("INVALID_FACT", line, fact.seq);
@@ -535,6 +676,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
                 first.failed ||
                 first.kind !== record.stepKind ||
                 first.operationId !== key ||
+                first.contextThroughEntryId !== contextId ||
                 first.configurationDigest !== digest
             )
                 fail("INVALID_TRANSITION", line, fact.seq);
@@ -546,6 +688,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
             attemptId,
             attempt,
             kind: record.stepKind as "assistant" | "compaction",
+            contextThroughEntryId: contextId,
             closed: false,
             failed: false,
             configurationSnapshot: snapshot,
@@ -561,6 +704,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
             attempt,
             stepKind: record.stepKind as "assistant" | "compaction",
             status: "attempting",
+            contextThroughEntryId: contextId,
             configurationSnapshot: snapshot,
             configurationDigest: digest,
         };
@@ -710,6 +854,12 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
             if (!attempt || attempt.stepId !== found.latestStepId || attempt.settledEntryId !== finalId)
                 fail("INVALID_REFERENCE", line, fact.seq);
         }
+    } else if (record.outcome === "aborted") {
+        const pendingTools =
+            state.operation.kind === "run" && state.operation.toolCalls.some((tool) => tool.status === "pending");
+        const openAttempt = state.operation.step?.status === "attempting";
+        if (record.finalEntryId !== undefined || !state.operation.abortRequested || pendingTools || openAttempt)
+            fail("INVALID_TRANSITION", line, fact.seq);
     } else if (record.finalEntryId !== undefined) fail("INVALID_FACT", line, fact.seq);
     if (record.outcome === "failed") {
         const error = object(record.error, "INVALID_FACT", line, fact.seq);
@@ -747,8 +897,11 @@ function applyUsage(state: InternalState, fact: Fact, line: number) {
     }
     const usage = object(fact.usage, "INVALID_FACT", line, fact.seq);
     exact(usage, ["input", "output", "cacheRead", "cacheWrite"], "INVALID_FACT", line, fact.seq);
-    for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const)
-        state.usage[key] += safeInteger(usage[key], "INVALID_FACT", line, fact.seq);
+    for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+        const amount = safeInteger(usage[key], "INVALID_FACT", line, fact.seq);
+        if (state.usage[key] > Number.MAX_SAFE_INTEGER - amount) fail("INVALID_FACT", line, fact.seq);
+        state.usage[key] += amount;
+    }
 }
 
 function applyFact(state: InternalState, value: unknown, line: number) {
@@ -807,6 +960,17 @@ export function reduceSessionV2(bytes: Uint8Array): SessionV2State {
     }
     if (lastLf < 0) fail("MISSING_HEADER", 1);
     const committed = bytes.subarray(0, lastLf + 1);
+    let rawLine = 1;
+    for (let index = 0; index + 2 < committed.length; index++) {
+        if (committed[index] === 0x0a) rawLine++;
+        if (
+            committed[index] === 0xed &&
+            committed[index + 1] >= 0xa0 &&
+            committed[index + 1] <= 0xbf &&
+            (committed[index + 2] & 0xc0) === 0x80
+        )
+            fail("MALFORMED_JSON", rawLine);
+    }
     let text: string;
     try {
         text = new TextDecoder("utf-8", { fatal: true }).decode(committed);
@@ -818,6 +982,7 @@ export function reduceSessionV2(bytes: Uint8Array): SessionV2State {
     const parse = (source: string, line: number) => {
         if (!source) fail("BLANK_LINE", line);
         if (source.endsWith("\r")) fail("CRLF_NOT_ALLOWED", line);
+        scanJson(source, line);
         try {
             return JSON.parse(source) as unknown;
         } catch {
@@ -842,6 +1007,7 @@ export function reduceSessionV2(bytes: Uint8Array): SessionV2State {
         steps: new Map(),
         tools: new Map(),
         toolPairs: new Set(),
+        activeContextThroughEntryId: undefined,
     };
     for (let index = 1; index < lines.length; index++) {
         const line = index + 1;

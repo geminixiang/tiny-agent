@@ -96,6 +96,7 @@ test("session v2 fixture metadata matches its JSON schemas", async () => {
         const expected = JSON.parse(await readFile(resolve(fixtures, fixture.expected), "utf8"));
         assertSchema(expected, expectedSchema);
         if (!fixture.schemaValid) continue;
+        // Lexically invalid fixtures bypass JSON.parse here so duplicate keys and lone surrogates reach the reducer as bytes.
         for (const value of committedValues(await readFile(resolve(fixtures, fixture.file))))
             assertSchema(value, sessionSchema);
     }

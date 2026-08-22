@@ -144,6 +144,54 @@
             "file": "cross-operation-usage.jsonl",
             "expected": "cross-operation-usage.expected.json",
             "schemaValid": true
+        },
+        {
+            "name": "wrong-context-boundary",
+            "file": "wrong-context-boundary.jsonl",
+            "expected": "wrong-context-boundary.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "abort-with-pending-never-tool",
+            "file": "abort-with-pending-never-tool.jsonl",
+            "expected": "abort-with-pending-never-tool.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "aborted-open-attempt-reconciled",
+            "file": "aborted-open-attempt-reconciled.jsonl",
+            "expected": "aborted-open-attempt-reconciled.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "duplicate-json-key",
+            "file": "duplicate-json-key.jsonl",
+            "expected": "duplicate-json-key.expected.json",
+            "schemaValid": false
+        },
+        {
+            "name": "escaped-lone-surrogate",
+            "file": "escaped-lone-surrogate.jsonl",
+            "expected": "escaped-lone-surrogate.expected.json",
+            "schemaValid": false
+        },
+        {
+            "name": "raw-lone-surrogate",
+            "file": "raw-lone-surrogate.jsonl",
+            "expected": "raw-lone-surrogate.expected.json",
+            "schemaValid": false
+        },
+        {
+            "name": "compaction-property-order-equivalent",
+            "file": "compaction-property-order-equivalent.jsonl",
+            "expected": "compaction-property-order-equivalent.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "usage-overflow",
+            "file": "usage-overflow.jsonl",
+            "expected": "usage-overflow.expected.json",
+            "schemaValid": true
         }
     ]
 }

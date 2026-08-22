@@ -57,6 +57,8 @@ Each later line is one transaction: either one fact or a non-empty array of fact
 Byte-level framing is normative:
 
 - The file is strict UTF-8.
+- JSON object keys are unique at every nesting level; duplicate keys are malformed JSON even if a host parser would keep the last value.
+- JSON strings contain only Unicode scalar values. Escaped or raw lone surrogates are malformed JSON and are rejected before materialization.
 - A committed line is a non-empty JSON value terminated by byte `0x0A` (LF).
 - CRLF and blank lines are invalid.
 - Every byte after the final LF is an uncommitted torn tail, even if those bytes parse as JSON.
@@ -208,6 +210,8 @@ Every physical provider request gets a new immutable `stepAttempt`; an attempt r
 }
 ```
 
+`contextThroughEntryId` is the durable source boundary represented by `activeContext` when the request is admitted. Before compaction, it is the latest model-visible message entry ID. After compaction, it is the `compactionStarted.inputThroughEntryId`: the latest source entry materialized by the compaction checkpoint, not the compaction entry ID itself. Attempt 1 must equal the reducer's current boundary. Attempt 2 must equal attempt 1's boundary and configuration digest; retrying against a newer or older context is corruption.
+
 The digest is SHA-256 over RFC 8785 JSON Canonicalization Scheme (JCS) bytes of `configurationSnapshot`. Cross-language golden fixtures contain the canonical bytes and expected digest; native object insertion order is never the digest definition. Credentials, tokens, cwd, timestamps, and volatile connection state are excluded.
 
 The configuration snapshot intentionally has a smaller canonical domain than arbitrary JSON. Its closed shape permits only objects, arrays, and Unicode scalar strings; numbers, booleans, and `null` are not valid snapshot values. Canonical bytes are UTF-8 encoded from recursively sorted object keys, preserved array order, and JSON string escaping with lone surrogates rejected. This is the exact cross-language subset required by the closed schema; native serializer insertion order is never used.
@@ -329,6 +333,8 @@ Replace the v1 standalone `interruption` event with operation records:
 }
 ```
 
+Abort closure is also reconciled durably. `operationFinished(outcome=aborted)` requires a prior `abortRequested`, no pending tool call, and no open attempting step. An open model attempt is first closed with `stepFailed(error.code=aborted)`. Pending never-replay tools first receive their provisioned synthetic interrupted tool results; only then may the aborted terminal record be appended. Directly appending an aborted terminal while either state remains open is corruption.
+
 Every operation ends with at most one terminal record; exactly one exists only after it finishes:
 
 ```json
@@ -377,7 +383,7 @@ Usage is an independent additive fact:
 }
 ```
 
-Do not use the latest message's usage as session totals. Model usage references the exact physical `attemptId`; nested tool usage references the exact `toolStartedId`. In both cases the referenced owner must belong to the same `operationId`. Reduction sums usage facts exactly once by unique ID.
+Do not use the latest message's usage as session totals. Model usage references the exact physical `attemptId`; nested tool usage references the exact `toolStartedId`. In both cases the referenced owner must belong to the same `operationId`. Reduction sums usage facts exactly once by unique ID. Every individual counter and every checked cumulative sum must remain within `0..9007199254740991`; overflow is corruption rather than rounded arithmetic.
 
 ## Pure reducer and recovery planner
 
@@ -431,6 +437,7 @@ Reducer invariants:
 
 - At most one unfinished operation (`run` or `compaction`) exists.
 - `runStarted.inputEntryId` references the user entry committed in the same or an earlier transaction.
+- A `stepAttempt(attempt=1)` records exactly the current active-context source boundary; attempt 2 repeats attempt 1's boundary and configuration.
 - One run has at most one open assistant step.
 - A settled assistant entry references its step and has a non-pending `stopReason`.
 - `toolStarted.assistantEntryId` and `toolIndex` identify a matching call in that settled assistant entry.
@@ -439,6 +446,7 @@ Reducer invariants:
 - A tool result ID equals its provisioned `resultEntryId` and references the `toolStarted` record ID.
 - Tool usage references the `toolStarted` record ID.
 - Every assistant tool call has exactly one result before another model step starts or the run closes.
+- An aborted terminal requires prior `abortRequested`, no pending tool calls, and no open attempting step.
 - At most one terminal outcome exists per operation; exactly one exists only when that operation is finished.
 - Compaction boundaries and retained messages form a valid provider transcript.
 
@@ -456,6 +464,7 @@ The same golden JSONL prefixes must reduce to equivalent state in TypeScript, Go
 | `toolStarted`; persisted/current replay policy, replayKey, and configuration all match safe; no result | replay with persisted effective arguments |
 | `toolStarted`; declaration/configuration mismatch; no result | block recovery without executing or appending a terminal outcome |
 | `toolStarted(replay=never)`; no result | append synthetic interrupted tool result |
+| abort requested; open model attempt | append `stepFailed(aborted)` before closure |
 | abort requested; missing tool results | append synthetic results, then aborted closure |
 | terminal assistant entry (`stopReason=stop`, non-empty final content, no unresolved calls); no terminal record | append completed terminal record without repeating effects |
 | `stepFailed`; no terminal record | append failed terminal record |

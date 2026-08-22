@@ -84,6 +84,7 @@
                 "attempt": 1,
                 "stepKind": "assistant",
                 "status": "settled",
+                "contextThroughEntryId": "018f0000-0000-7000-8000-000000000002",
                 "configurationSnapshot": {
                     "model": "test/model",
                     "systemPromptDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
