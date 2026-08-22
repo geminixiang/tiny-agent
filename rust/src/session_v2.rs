@@ -52,6 +52,7 @@ pub struct StepState {
     pub attempt: u64,
     pub step_kind: String,
     pub status: String,
+    pub context_through_entry_id: String,
     pub configuration_snapshot: ConfigurationSnapshot,
     pub configuration_digest: String,
 }
@@ -185,6 +186,7 @@ struct AttemptInfo {
     attempt_id: String,
     attempt: u64,
     kind: String,
+    context_through_entry_id: String,
     closed: bool,
     failed: bool,
     settled_entry_id: Option<String>,
@@ -213,6 +215,7 @@ struct InternalState {
     steps: HashMap<String, Vec<AttemptInfo>>,
     tools: HashMap<String, ToolCallState>,
     tool_pairs: HashSet<String>,
+    active_context_through_entry_id: Option<String>,
 }
 
 fn fail<T>(code: CorruptionCode, line: usize, seq: Option<u64>) -> Result<T> {
@@ -798,6 +801,7 @@ fn apply_message_entry(
     }
     state.public.transcript.push(message.clone());
     state.public.active_context.push(message);
+    state.active_context_through_entry_id = Some(fact_id.to_string());
     state.entries.insert(fact_id.to_string(), info);
     state.entry_order.push(fact_id.to_string());
     Ok(())
@@ -925,6 +929,7 @@ fn apply_compaction_entry(
         serde_json::json!({"role":"user","content":format!("[Compacted history]\n{summary}")}),
     ];
     state.public.active_context.extend(messages);
+    state.active_context_through_entry_id = Some(input_id);
     let current_attempt = match &state.public.operation {
         OperationState::Compaction {
             step: Some(step), ..
@@ -1171,6 +1176,9 @@ fn apply_step_attempt(
     if !state.entries.contains_key(&context_id) {
         return fail(CorruptionCode::InvalidReference, line, Some(seq));
     }
+    if attempt == 1 && state.active_context_through_entry_id.as_deref() != Some(&context_id) {
+        return fail(CorruptionCode::InvalidTransition, line, Some(seq));
+    }
     let snapshot = configuration(
         record.get("configurationSnapshot").unwrap_or(&Value::Null),
         line,
@@ -1223,6 +1231,7 @@ fn apply_step_attempt(
             || prior[0].failed
             || prior[0].kind != step_kind
             || prior[0].operation_id != key
+            || prior[0].context_through_entry_id != context_id
             || prior[0].configuration_digest != digest
         {
             return fail(CorruptionCode::InvalidTransition, line, Some(seq));
@@ -1235,6 +1244,7 @@ fn apply_step_attempt(
         attempt_id: attempt_id.clone(),
         attempt,
         kind: step_kind.clone(),
+        context_through_entry_id: context_id.clone(),
         closed: false,
         failed: false,
         settled_entry_id: None,
@@ -1253,6 +1263,7 @@ fn apply_step_attempt(
         attempt,
         step_kind,
         status: "attempting".into(),
+        context_through_entry_id: context_id,
         configuration_snapshot: snapshot,
         configuration_digest: digest,
     });
@@ -1549,6 +1560,23 @@ fn apply_operation_finished(
     }
     if outcome == "completed" {
         validate_completed_operation(state, record, line, seq, &key, &found)?;
+    } else if outcome == "aborted" {
+        let pending_tools = matches!(&state.public.operation, OperationState::Run { tool_calls, .. } if tool_calls.iter().any(|tool| tool.status == "pending"));
+        let open_attempt = matches!(&state.public.operation, OperationState::Run { step: Some(step), .. } | OperationState::Compaction { step: Some(step), .. } if step.status == "attempting");
+        let abort_requested = matches!(
+            &state.public.operation,
+            OperationState::Run {
+                abort_requested: true,
+                ..
+            } | OperationState::Compaction {
+                abort_requested: true,
+                ..
+            }
+        );
+        if record.contains_key("finalEntryId") || !abort_requested || pending_tools || open_attempt
+        {
+            return fail(CorruptionCode::InvalidTransition, line, Some(seq));
+        }
     } else if record.contains_key("finalEntryId") {
         return fail(CorruptionCode::InvalidFact, line, Some(seq));
     }
@@ -1724,34 +1752,30 @@ fn apply_usage(state: &mut InternalState, fact: &JsonObject, line: usize, seq: u
         line,
         Some(seq),
     )?;
-    state.public.usage.input += safe_integer(
-        usage.get("input"),
-        CorruptionCode::InvalidFact,
-        line,
-        Some(seq),
-        0,
-    )?;
-    state.public.usage.output += safe_integer(
-        usage.get("output"),
-        CorruptionCode::InvalidFact,
-        line,
-        Some(seq),
-        0,
-    )?;
-    state.public.usage.cache_read += safe_integer(
-        usage.get("cacheRead"),
-        CorruptionCode::InvalidFact,
-        line,
-        Some(seq),
-        0,
-    )?;
-    state.public.usage.cache_write += safe_integer(
-        usage.get("cacheWrite"),
-        CorruptionCode::InvalidFact,
-        line,
-        Some(seq),
-        0,
-    )?;
+    for key in ["input", "output", "cacheRead", "cacheWrite"] {
+        let amount = safe_integer(
+            usage.get(key),
+            CorruptionCode::InvalidFact,
+            line,
+            Some(seq),
+            0,
+        )?;
+        let total = match key {
+            "input" => &mut state.public.usage.input,
+            "output" => &mut state.public.usage.output,
+            "cacheRead" => &mut state.public.usage.cache_read,
+            "cacheWrite" => &mut state.public.usage.cache_write,
+            _ => unreachable!(),
+        };
+        *total = total
+            .checked_add(amount)
+            .filter(|value| *value <= 9_007_199_254_740_991)
+            .ok_or(SessionV2Corruption {
+                code: CorruptionCode::InvalidFact,
+                line,
+                seq: Some(seq),
+            })?;
+    }
     Ok(())
 }
 
@@ -1875,6 +1899,207 @@ fn validate_header(value: &Value, line: usize) -> Result<SessionHeader> {
     })
 }
 
+struct JsonScanner<'a> {
+    source: &'a str,
+    index: usize,
+    line: usize,
+}
+
+impl JsonScanner<'_> {
+    fn malformed<T>(&self) -> Result<T> {
+        fail(CorruptionCode::MalformedJson, self.line, None)
+    }
+
+    fn whitespace(&mut self) {
+        while self
+            .source
+            .as_bytes()
+            .get(self.index)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.index += 1;
+        }
+    }
+
+    fn string(&mut self) -> Result<String> {
+        let start = self.index;
+        if self.source.as_bytes().get(self.index) != Some(&b'"') {
+            return self.malformed();
+        }
+        self.index += 1;
+        while let Some(byte) = self.source.as_bytes().get(self.index).copied() {
+            match byte {
+                b'"' => {
+                    self.index += 1;
+                    return serde_json::from_str(&self.source[start..self.index]).map_err(|_| {
+                        SessionV2Corruption {
+                            code: CorruptionCode::MalformedJson,
+                            line: self.line,
+                            seq: None,
+                        }
+                    });
+                }
+                b'\\' => {
+                    self.index += 1;
+                    let Some(escape) = self.source.as_bytes().get(self.index).copied() else {
+                        return self.malformed();
+                    };
+                    self.index += 1;
+                    if escape != b'u' {
+                        if !matches!(
+                            escape,
+                            b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't'
+                        ) {
+                            return self.malformed();
+                        }
+                        continue;
+                    }
+                    let high = self.hex_quad()?;
+                    if (0xd800..=0xdbff).contains(&high) {
+                        if self.source.as_bytes().get(self.index..self.index + 2) != Some(b"\\u") {
+                            return self.malformed();
+                        }
+                        self.index += 2;
+                        let low = self.hex_quad()?;
+                        if !(0xdc00..=0xdfff).contains(&low) {
+                            return self.malformed();
+                        }
+                    } else if (0xdc00..=0xdfff).contains(&high) {
+                        return self.malformed();
+                    }
+                }
+                0x00..=0x1f => return self.malformed(),
+                0x20..=0x7f => self.index += 1,
+                _ => {
+                    let character =
+                        self.source[self.index..]
+                            .chars()
+                            .next()
+                            .ok_or(SessionV2Corruption {
+                                code: CorruptionCode::MalformedJson,
+                                line: self.line,
+                                seq: None,
+                            })?;
+                    self.index += character.len_utf8();
+                }
+            }
+        }
+        self.malformed()
+    }
+
+    fn hex_quad(&mut self) -> Result<u16> {
+        let end = self.index + 4;
+        let Some(value) = self.source.get(self.index..end) else {
+            return self.malformed();
+        };
+        if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return self.malformed();
+        }
+        self.index = end;
+        u16::from_str_radix(value, 16).map_err(|_| SessionV2Corruption {
+            code: CorruptionCode::MalformedJson,
+            line: self.line,
+            seq: None,
+        })
+    }
+
+    fn value(&mut self) -> Result<()> {
+        self.whitespace();
+        match self.source.as_bytes().get(self.index).copied() {
+            Some(b'{') => self.object(),
+            Some(b'[') => self.array(),
+            Some(b'"') => self.string().map(|_| ()),
+            Some(_) => self.primitive(),
+            None => self.malformed(),
+        }
+    }
+
+    fn object(&mut self) -> Result<()> {
+        self.index += 1;
+        self.whitespace();
+        let mut keys = HashSet::new();
+        if self.source.as_bytes().get(self.index) == Some(&b'}') {
+            self.index += 1;
+            return Ok(());
+        }
+        loop {
+            self.whitespace();
+            if !keys.insert(self.string()?) {
+                return self.malformed();
+            }
+            self.whitespace();
+            if self.source.as_bytes().get(self.index) != Some(&b':') {
+                return self.malformed();
+            }
+            self.index += 1;
+            self.value()?;
+            self.whitespace();
+            match self.source.as_bytes().get(self.index) {
+                Some(b'}') => {
+                    self.index += 1;
+                    return Ok(());
+                }
+                Some(b',') => self.index += 1,
+                _ => return self.malformed(),
+            }
+        }
+    }
+
+    fn array(&mut self) -> Result<()> {
+        self.index += 1;
+        self.whitespace();
+        if self.source.as_bytes().get(self.index) == Some(&b']') {
+            self.index += 1;
+            return Ok(());
+        }
+        loop {
+            self.value()?;
+            self.whitespace();
+            match self.source.as_bytes().get(self.index) {
+                Some(b']') => {
+                    self.index += 1;
+                    return Ok(());
+                }
+                Some(b',') => self.index += 1,
+                _ => return self.malformed(),
+            }
+        }
+    }
+
+    fn primitive(&mut self) -> Result<()> {
+        let start = self.index;
+        while self
+            .source
+            .as_bytes()
+            .get(self.index)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b',' | b']' | b'}'))
+        {
+            self.index += 1;
+        }
+        serde_json::from_str::<Value>(&self.source[start..self.index])
+            .map(|_| ())
+            .map_err(|_| SessionV2Corruption {
+                code: CorruptionCode::MalformedJson,
+                line: self.line,
+                seq: None,
+            })
+    }
+}
+
+fn scan_json(source: &str, line: usize) -> Result<()> {
+    let mut scanner = JsonScanner {
+        source,
+        index: 0,
+        line,
+    };
+    scanner.value()?;
+    scanner.whitespace();
+    if scanner.index != source.len() {
+        return scanner.malformed();
+    }
+    Ok(())
+}
+
 fn parse_line(source: &[u8], line: usize) -> Result<Value> {
     if source.is_empty() {
         return fail(CorruptionCode::BlankLine, line, None);
@@ -1882,7 +2107,13 @@ fn parse_line(source: &[u8], line: usize) -> Result<Value> {
     if source.ends_with(b"\r") {
         return fail(CorruptionCode::CrlfNotAllowed, line, None);
     }
-    serde_json::from_slice(source).map_err(|_| SessionV2Corruption {
+    let source = std::str::from_utf8(source).map_err(|_| SessionV2Corruption {
+        code: CorruptionCode::MalformedJson,
+        line,
+        seq: None,
+    })?;
+    scan_json(source, line)?;
+    serde_json::from_str(source).map_err(|_| SessionV2Corruption {
         code: CorruptionCode::MalformedJson,
         line,
         seq: None,
@@ -1894,6 +2125,19 @@ pub fn reduce_session_v2(bytes: &[u8]) -> Result<SessionV2State> {
         return fail(CorruptionCode::MissingHeader, 1, None);
     };
     let committed = &bytes[..=last_lf];
+    if let Some(index) = committed.windows(3).position(|bytes| {
+        bytes[0] == 0xed && (0xa0..=0xbf).contains(&bytes[1]) && (0x80..=0xbf).contains(&bytes[2])
+    }) {
+        return fail(
+            CorruptionCode::MalformedJson,
+            committed[..index]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count()
+                + 1,
+            None,
+        );
+    }
     if std::str::from_utf8(committed).is_err() {
         return fail(CorruptionCode::InvalidUtf8, 1, None);
     }
@@ -1928,6 +2172,7 @@ pub fn reduce_session_v2(bytes: &[u8]) -> Result<SessionV2State> {
         steps: HashMap::new(),
         tools: HashMap::new(),
         tool_pairs: HashSet::new(),
+        active_context_through_entry_id: None,
     };
     for (index, source) in lines.iter().enumerate().skip(1) {
         let line = index + 1;

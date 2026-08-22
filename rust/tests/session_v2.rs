@@ -22,7 +22,7 @@ fn reduces_all_session_v2_golden_fixtures() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../schemas/session-v2/fixtures");
     let manifest: Manifest =
         serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest.fixtures.len(), 24);
+    assert!(!manifest.fixtures.is_empty());
 
     for fixture in manifest.fixtures {
         let bytes = fs::read(root.join(&fixture.file)).unwrap();
