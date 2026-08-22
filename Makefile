@@ -3,7 +3,7 @@
 install: install-ts install-go install-py install-rs
 
 install-ts:
-	npm install --prefix typescript
+	npm ci --prefix typescript
 	cd typescript && npm link
 
 install-go:
