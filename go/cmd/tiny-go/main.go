@@ -500,11 +500,18 @@ func newAgent(skills []Skill, session *Session, instructions string) *Agent {
 	return &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: openRouterURL, OnTool: func(ToolEvent) {}, Tools: localTools()}
 }
 
-func localTools() []Tool {
+func localTools(names ...string) []Tool {
+	selected := map[string]bool{}
+	for _, name := range names {
+		selected[name] = true
+	}
 	tools := make([]Tool, 0, len(toolDefinitions))
 	for _, definition := range toolDefinitions {
 		function := definition["function"].(map[string]any)
 		name := function["name"].(string)
+		if len(selected) > 0 && !selected[name] {
+			continue
+		}
 		description := function["description"].(string)
 		parameters := function["parameters"].(map[string]any)
 		toolName := name
@@ -1061,32 +1068,44 @@ func (t *terminal) run(agent *Agent, operation func() (string, error)) (string, 
 	}
 }
 
-func parseArgs(args []string) (sessionID string, extras, mcp []string, prompt string, err error) {
+func parseArgs(args []string) (sessionID string, extras, plugins, mcp []string, prompt string, err error) {
 	words := []string{}
 	for i := 0; i < len(args); i++ {
-		if args[i] != "--session" && args[i] != "--skill" && args[i] != "--mcp" {
+		if args[i] != "--session" && args[i] != "--skill" && args[i] != "--plugin" && args[i] != "--mcp" {
 			words = append(words, args[i])
 			continue
 		}
 		if i+1 == len(args) {
-			return "", nil, nil, "", fmt.Errorf("%s requires a value", args[i])
+			return "", nil, nil, nil, "", fmt.Errorf("%s requires a value", args[i])
 		}
 		if args[i] == "--session" {
 			sessionID = args[i+1]
 		} else if args[i] == "--skill" {
 			extras = append(extras, args[i+1])
+		} else if args[i] == "--plugin" {
+			plugins = append(plugins, args[i+1])
 		} else {
 			mcp = append(mcp, args[i+1])
 		}
 		i++
 	}
-	return sessionID, extras, splitList(mcp), strings.Join(words, " "), nil
+	return sessionID, extras, splitList(plugins), splitList(mcp), strings.Join(words, " "), nil
 }
 
 func runCLI(args []string) error {
-	sessionID, extras, mcpAliases, oneShot, err := parseArgs(args)
+	sessionID, extras, plugins, mcpAliases, oneShot, err := parseArgs(args)
 	if err != nil {
 		return err
+	}
+	selectedPlugins := plugins
+	if len(selectedPlugins) == 0 {
+		selectedPlugins = []string{"bash", "read", "write", "edit"}
+	}
+	available := map[string]bool{"bash": true, "read": true, "write": true, "edit": true}
+	for _, plugin := range selectedPlugins {
+		if !available[plugin] {
+			return fmt.Errorf("Unknown plugin: %s. Available plugins: bash, read, write, edit", plugin)
+		}
 	}
 	home, _ := os.UserHomeDir()
 	configs, err := loadMCPConfigs(mcpAliases, currentEnvironment(), home)
@@ -1107,6 +1126,7 @@ func runCLI(args []string) error {
 		return err
 	}
 	agent := newAgent(skills, session, loadProjectInstructions())
+	agent.Tools = localTools(selectedPlugins...)
 	loadedMCP := []*MCPClient{}
 	defer func() {
 		for i := len(loadedMCP) - 1; i >= 0; i-- {

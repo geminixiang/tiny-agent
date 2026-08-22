@@ -22,7 +22,10 @@ import (
 )
 
 const (
+	modernMCPVersion  = "2026-07-28"
+	legacyMCPVersion  = "2025-11-25"
 	maxMCPTools       = 64
+	maxMCPHTTPBytes   = 10 * 1024 * 1024
 	maxMCPSchemaBytes = 50 * 1024
 	maxMCPDescription = 8 * 1024
 	maxMCPSchemaDepth = 20
@@ -48,11 +51,57 @@ type MCPClient struct {
 	config          MCPConfig
 	httpClient      *http.Client
 	sessionID       string
+	protocolEra     string
 	protocolVersion string
 	tools           []Tool
 	mu              sync.Mutex
 	nextID          int
 	closed          bool
+}
+
+type mcpHTTPError struct {
+	status int
+	body   []byte
+}
+
+func (e *mcpHTTPError) Error() string {
+	class := "request failed"
+	if e.status >= 500 {
+		class = "server error"
+	} else if e.status == http.StatusUnauthorized || e.status == http.StatusForbidden {
+		class = "authentication failed"
+	} else if e.status >= 400 {
+		class = "client error"
+	}
+	return fmt.Sprintf("MCP HTTP %d (%s)", e.status, class)
+}
+
+type mcpRPCError struct {
+	code int
+	data json.RawMessage
+}
+
+func (e *mcpRPCError) Error() string { return fmt.Sprintf("MCP JSON-RPC error %d", e.code) }
+
+func protocolRPCError(err error) *mcpRPCError {
+	var rpcError *mcpRPCError
+	if errors.As(err, &rpcError) {
+		return rpcError
+	}
+	var httpError *mcpHTTPError
+	if !errors.As(err, &httpError) {
+		return nil
+	}
+	var envelope struct {
+		Error *struct {
+			Code int             `json:"code"`
+			Data json.RawMessage `json:"data"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(httpError.body, &envelope) != nil || envelope.Error == nil {
+		return nil
+	}
+	return &mcpRPCError{code: envelope.Error.Code, data: envelope.Error.Data}
 }
 
 func splitList(values []string) []string {
@@ -213,17 +262,7 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	if mcp.httpClient == nil {
 		mcp.httpClient = http.DefaultClient
 	}
-	var initialized struct {
-		ProtocolVersion string `json:"protocolVersion"`
-	}
-	if err := mcp.request(ctx, "initialize", map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "tiny-agent", "version": "0.1.0"}}, &initialized); err != nil {
-		return nil, err
-	}
-	if initialized.ProtocolVersion == "" {
-		return nil, errors.New("MCP server did not negotiate a protocol version")
-	}
-	mcp.protocolVersion = initialized.ProtocolVersion
-	if err := mcp.notify(ctx, "notifications/initialized", map[string]any{}); err != nil {
+	if err := mcp.negotiate(ctx); err != nil {
 		return nil, err
 	}
 	var listed struct {
@@ -265,6 +304,9 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 		if jsonDepth(inputSchema) > maxMCPSchemaDepth {
 			return nil, fmt.Errorf("MCP tool schema exceeds depth %d: %s", maxMCPSchemaDepth, remote.Name)
 		}
+		if containsXMCPHeader(inputSchema) {
+			return nil, fmt.Errorf("MCP tool x-mcp-header declarations are not supported: %s", remote.Name)
+		}
 		if len([]byte(remote.Description)) > maxMCPDescription {
 			return nil, fmt.Errorf("MCP tool description exceeds 8KB: %s", remote.Name)
 		}
@@ -298,7 +340,129 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	return mcp, nil
 }
 
+func (m *MCPClient) negotiate(ctx context.Context) error {
+	var discovered struct {
+		SupportedVersions []string       `json:"supportedVersions"`
+		Capabilities      map[string]any `json:"capabilities"`
+	}
+	meta := modernMetadata()
+	err := m.requestWithMeta(ctx, "server/discover", map[string]any{}, meta, &discovered)
+	if err == nil {
+		supported := false
+		for _, version := range discovered.SupportedVersions {
+			supported = supported || version == modernMCPVersion
+		}
+		if supported && discovered.Capabilities != nil {
+			m.protocolEra, m.protocolVersion = "modern", modernMCPVersion
+			return nil
+		}
+		return m.negotiateLegacy(ctx)
+	}
+	rpcError := protocolRPCError(err)
+	if rpcError != nil && rpcError.code == -32022 {
+		versions, valid := supportedVersions(rpcError.data)
+		if valid {
+			hasModern := false
+			for _, version := range versions {
+				hasModern = hasModern || version == modernMCPVersion
+			}
+			if hasModern {
+				return errors.New("MCP modern negotiation failed after a supported-version response")
+			}
+			for _, version := range versions {
+				if strings.HasPrefix(version, "2026-") {
+					return errors.New("MCP server supports no compatible modern protocol version")
+				}
+			}
+		}
+	}
+	if !isLegacyEvidence(err) {
+		return err
+	}
+	return m.negotiateLegacy(ctx)
+}
+
+func (m *MCPClient) negotiateLegacy(ctx context.Context) error {
+	m.mu.Lock()
+	m.nextID = 0
+	m.mu.Unlock()
+
+	var initialized struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if err := m.request(ctx, "initialize", map[string]any{"protocolVersion": legacyMCPVersion, "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "tiny-agent", "version": "0.1.0"}}, &initialized); err != nil {
+		return err
+	}
+	if !supportedLegacyVersion(initialized.ProtocolVersion) {
+		return errors.New("MCP server returned an unsupported legacy protocol version")
+	}
+	m.protocolEra, m.protocolVersion = "legacy", initialized.ProtocolVersion
+	return m.notify(ctx, "notifications/initialized", map[string]any{})
+}
+
+func isLegacyEvidence(err error) bool {
+	var httpError *mcpHTTPError
+	if errors.As(err, &httpError) && (httpError.status == http.StatusUnauthorized || httpError.status == http.StatusForbidden || httpError.status >= 500) {
+		return false
+	}
+	rpcError := protocolRPCError(err)
+	if rpcError == nil {
+		return true
+	}
+	if rpcError.code == -32022 {
+		versions, valid := supportedVersions(rpcError.data)
+		if !valid {
+			return true
+		}
+		for _, version := range versions {
+			if strings.HasPrefix(version, "2026-") {
+				return false
+			}
+		}
+		return true
+	}
+	return true
+}
+
+func supportedVersions(data json.RawMessage) ([]string, bool) {
+	if len(data) == 0 {
+		return nil, false
+	}
+	var value struct {
+		Supported []string `json:"supported"`
+	}
+	if json.Unmarshal(data, &value) != nil || len(value.Supported) == 0 {
+		return nil, false
+	}
+	return value.Supported, true
+}
+
+func supportedLegacyVersion(version string) bool {
+	switch version {
+	case "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07":
+		return true
+	default:
+		return false
+	}
+}
+
+func modernMetadata() map[string]any {
+	return map[string]any{
+		"io.modelcontextprotocol/protocolVersion":    modernMCPVersion,
+		"io.modelcontextprotocol/clientInfo":         map[string]string{"name": "tiny-agent", "version": "0.1.0"},
+		"io.modelcontextprotocol/clientCapabilities": map[string]any{},
+	}
+}
+
 func (m *MCPClient) request(ctx context.Context, method string, params any, target any) error {
+	var meta map[string]any
+	if m.protocolEra == "modern" {
+		meta = modernMetadata()
+	}
+	return m.requestWithMeta(ctx, method, params, meta, target)
+}
+
+func (m *MCPClient) requestWithMeta(ctx context.Context, method string, params any, meta map[string]any, target any) error {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -307,32 +471,45 @@ func (m *MCPClient) request(ctx context.Context, method string, params any, targ
 	m.nextID++
 	id := m.nextID
 	m.mu.Unlock()
+	requestParams := params
+	if meta != nil {
+		object, ok := params.(map[string]any)
+		if !ok {
+			return errors.New("MCP modern request params must be an object")
+		}
+		requestParams = make(map[string]any, len(object)+1)
+		for key, value := range object {
+			requestParams.(map[string]any)[key] = value
+		}
+		requestParams.(map[string]any)["_meta"] = meta
+	}
 	var response struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      int             `json:"id"`
 		Result  json.RawMessage `json:"result"`
 		Error   *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
+			Code    int             `json:"code"`
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data"`
 		} `json:"error"`
 	}
-	if err := m.send(ctx, map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}, &response); err != nil {
+	if err := m.send(ctx, map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": requestParams}, &response, method, meta); err != nil {
 		return err
 	}
 	if response.JSONRPC != "2.0" || response.ID != id {
 		return fmt.Errorf("MCP %s returned a mismatched JSON-RPC response", method)
 	}
 	if response.Error != nil {
-		return fmt.Errorf("MCP %s error %d: %s", method, response.Error.Code, response.Error.Message)
+		return &mcpRPCError{code: response.Error.Code, data: response.Error.Data}
 	}
 	return json.Unmarshal(response.Result, target)
 }
 
 func (m *MCPClient) notify(ctx context.Context, method string, params any) error {
-	return m.send(ctx, map[string]any{"jsonrpc": "2.0", "method": method, "params": params}, nil)
+	return m.send(ctx, map[string]any{"jsonrpc": "2.0", "method": method, "params": params}, nil, method, nil)
 }
 
-func (m *MCPClient) send(ctx context.Context, body any, target any) error {
+func (m *MCPClient) send(ctx context.Context, body any, target any, method string, meta map[string]any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -343,13 +520,28 @@ func (m *MCPClient) send(ctx context.Context, body any, target any) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	if meta != nil {
+		req.Header.Set("Mcp-Protocol-Version", modernMCPVersion)
+		req.Header.Set("Mcp-Method", method)
+		if method == "tools/call" {
+			if envelope, ok := body.(map[string]any); ok {
+				if params, ok := envelope["params"].(map[string]any); ok {
+					if name, ok := params["name"].(string); ok {
+						req.Header.Set("Mcp-Name", encodeMCPHeaderValue(name))
+					}
+				}
+			}
+		}
+	} else if m.protocolEra == "legacy" && method != "initialize" {
+		req.Header.Set("Mcp-Protocol-Version", m.protocolVersion)
+	}
 	if m.config.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+m.config.Token)
 	}
 	m.mu.Lock()
 	sessionID := m.sessionID
 	m.mu.Unlock()
-	if sessionID != "" {
+	if sessionID != "" && m.protocolEra == "legacy" && method != "initialize" {
 		req.Header.Set("Mcp-Session-Id", sessionID)
 	}
 	response, err := m.httpClient.Do(req)
@@ -357,11 +549,18 @@ func (m *MCPClient) send(ctx context.Context, body any, target any) error {
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("MCP HTTP %d: %s", response.StatusCode, data)
+	limited := &io.LimitedReader{R: response.Body, N: maxMCPHTTPBytes + 1}
+	data, readErr := io.ReadAll(limited)
+	if readErr != nil {
+		return readErr
 	}
-	if id := response.Header.Get("Mcp-Session-Id"); id != "" {
+	if int64(len(data)) > maxMCPHTTPBytes {
+		return errors.New("MCP response exceeds 10MB")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return &mcpHTTPError{status: response.StatusCode, body: data}
+	}
+	if id := response.Header.Get("Mcp-Session-Id"); id != "" && m.protocolEra != "modern" && method == "initialize" {
 		m.mu.Lock()
 		m.sessionID = id
 		m.mu.Unlock()
@@ -370,8 +569,8 @@ func (m *MCPClient) send(ctx context.Context, body any, target any) error {
 		return nil
 	}
 	if strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
-		scanner := bufio.NewScanner(response.Body)
-		scanner.Buffer(make([]byte, 64*1024), maxMCPTools*maxMCPSchemaBytes+1024*1024)
+		scanner := bufio.NewScanner(bytes.NewReader(data))
+		scanner.Buffer(make([]byte, 64*1024), maxMCPHTTPBytes)
 		data := []string{}
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -401,7 +600,7 @@ func (m *MCPClient) send(ctx context.Context, body any, target any) error {
 		}
 		return errors.New("MCP SSE response contained no data event")
 	}
-	return json.NewDecoder(response.Body).Decode(target)
+	return json.Unmarshal(data, target)
 }
 
 func (m *MCPClient) callTool(ctx context.Context, name string, args map[string]any) (string, error) {
@@ -479,6 +678,19 @@ func (m *MCPClient) Close() error {
 	return nil
 }
 
+func encodeMCPHeaderValue(value string) string {
+	safe := value != "" && value == strings.TrimSpace(value) && !(strings.HasPrefix(value, "=?base64?") && strings.HasSuffix(value, "?="))
+	for _, char := range value {
+		if char != '\t' && (char < 32 || char > 126) {
+			safe = false
+		}
+	}
+	if safe {
+		return value
+	}
+	return "=?base64?" + base64.StdEncoding.EncodeToString([]byte(value)) + "?="
+}
+
 func mapMCPToolName(alias, remote string) (string, error) {
 	encode := func(value string) string { return base64.RawURLEncoding.EncodeToString([]byte(value)) }
 	name := "mcp__" + encode(alias) + "__" + encode(remote)
@@ -499,6 +711,27 @@ func displayToolName(name string) string {
 		return name
 	}
 	return "mcp:" + string(alias) + "/" + string(remote)
+}
+
+func containsXMCPHeader(value any) bool {
+	switch item := value.(type) {
+	case map[string]any:
+		if _, exists := item["x-mcp-header"]; exists {
+			return true
+		}
+		for _, child := range item {
+			if containsXMCPHeader(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range item {
+			if containsXMCPHeader(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func jsonDepth(value any) int {
