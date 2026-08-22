@@ -1,6 +1,7 @@
-import { randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
 import { builtInTools, toolDefinitions, type Tool, type ToolArgs, type ToolEvent } from "./tools.js";
 
 export { loadMcpConfigs, type McpServerCatalog } from "./mcp-config.js";
@@ -12,6 +13,7 @@ export {
     type CurrentTool,
     type RecoveryPlan,
 } from "./session-recovery.js";
+export { SessionStore as Session, environmentIdentity } from "./session.js";
 export { reduceSession, SessionCorruption, type SessionCorruptionCode, type SessionState } from "./session-reducer.js";
 export {
     builtInPlugins,
@@ -41,10 +43,7 @@ export type Usage = {
     cacheWrite: number;
     cacheHitRate?: number;
 };
-type SessionRecord = {
-    type: "session" | "message" | "compaction" | "interruption";
-    [key: string]: unknown;
-};
+
 export type RunResult = {
     status: "succeeded" | "failed" | "cancelled";
     answer?: string;
@@ -74,6 +73,66 @@ export type RunEvent =
           durationMs: number;
       }
     | { type: "mcp.failed"; timestamp: string; server: string; stage: "connect"; cause: string };
+
+type ConfigurationSnapshot = {
+    model: string;
+    systemPromptDigest: string;
+    tools: { name: string; definitionDigest: string }[];
+    adapterIdentity: string;
+    routingIdentity: string;
+    outputOptionsDigest: string;
+};
+
+function canonical(value: unknown): string {
+    if (value === null || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
+    if (typeof value === "string") return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+    if (!value || typeof value !== "object") throw Error("unsupported canonical value");
+    const item = value as Record<string, unknown>;
+    return `{${Object.keys(item)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${canonical(item[key])}`)
+        .join(",")}}`;
+}
+
+function digest(value: unknown) {
+    return `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}`;
+}
+
+export function buildConfiguration(systemPrompt: string, tools: Tool[]) {
+    const configurationSnapshot: ConfigurationSnapshot = {
+        model: MODEL,
+        systemPromptDigest: digest(systemPrompt),
+        tools: tools.map((tool) => ({
+            name: tool.name,
+            definitionDigest: digest({
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+            }),
+        })),
+        adapterIdentity: "openrouter:chat-completions:v1",
+        routingIdentity: `openrouter:${MODEL}`,
+        outputOptionsDigest: digest({}),
+    };
+    return { configurationSnapshot, configurationDigest: digest(configurationSnapshot) };
+}
+
+export function runFacts(session: SessionStore, content: string) {
+    const inputEntryId = session.allocateId();
+    const operationId = session.allocateId();
+    return {
+        inputEntryId,
+        operationId,
+        facts: [
+            { kind: "entry", id: inputEntryId, entry: { type: "message", message: { role: "user", content } } },
+            {
+                kind: "record",
+                record: { type: "runStarted", operationId, operationKind: "run", inputEntryId },
+            },
+        ] satisfies SessionFactInput[],
+    };
+}
 
 // prettier-ignore
 function formatTokens(n: number) { return n < 1e3 ? `${n}` : n < 1e4 ? `${(n / 1e3).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1e3)}k` : n < 1e7 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e6)}M`; }
@@ -115,52 +174,6 @@ export async function loadSkills(extra: string[] = []) {
     );
 }
 
-// prettier-ignore
-function uuid7(now = Date.now()) { const b = randomBytes(16); let t = BigInt(now); for (let i = 5; i >= 0; i--) { b[i] = Number(t & 0xffn); t >>= 8n; } b[6] = (b[6] & 15) | 0x70; b[8] = (b[8] & 63) | 0x80; const h = b.toString("hex"); return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`; }
-
-export class Session {
-    private constructor(
-        public id: string,
-        public path: string,
-    ) {}
-    static async create(cwd = root, now = new Date()) {
-        const id = uuid7(now.getTime()),
-            dir = resolve(cwd, ".tiny-agent/sessions");
-        const path = resolve(dir, `${now.toISOString().replace(/[:.]/g, "-")}_${id}.jsonl`);
-        await mkdir(dir, { recursive: true });
-        const session = new Session(id, path);
-        await session.append({
-            type: "session",
-            version: 1,
-            id,
-            createdAt: now.toISOString(),
-            cwd,
-            provider: "openrouter",
-            model: MODEL,
-        });
-        return session;
-    }
-    static async open(id: string, cwd = root) {
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))
-            throw Error(`Invalid session ID: ${id}`);
-        const dir = resolve(cwd, ".tiny-agent/sessions"),
-            matches = (await readdir(dir).catch(() => [])).filter((f) => f.endsWith(`_${id}.jsonl`));
-        if (matches.length !== 1)
-            throw Error(matches.length ? `Duplicate session ID: ${id}` : `Session not found: ${id}`);
-        return new Session(id, resolve(dir, matches[0]));
-    }
-    async records() {
-        return (await readFile(this.path, "utf8"))
-            .trim()
-            .split("\n")
-            .filter(Boolean)
-            .map((line) => JSON.parse(line) as any);
-    }
-    async append(record: SessionRecord) {
-        await appendFile(this.path, JSON.stringify({ ...record, timestamp: new Date().toISOString() }) + "\n");
-    }
-}
-
 type StopReason = "stop" | "length" | "toolUse";
 
 function stopReason(finishReason: string | null | undefined, message: Message): StopReason {
@@ -183,6 +196,7 @@ function parseToolArgs(value: string): ToolArgs {
 export class Agent {
     messages: Message[];
     usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    public readonly systemPrompt: string;
     private active?: {
         controller: AbortController;
         phase: "model" | "tool" | "compact";
@@ -191,7 +205,7 @@ export class Agent {
     constructor(
         public skills: Skill[] = [],
         public fetcher: typeof fetch = fetch,
-        public session?: Session,
+        public session?: SessionStore,
         public onTool: (event: ToolEvent) => void = () => {},
         instructions = "",
         public onEvent: (event: RunEvent) => void = () => {},
@@ -211,10 +225,7 @@ export class Agent {
         const project = instructions
             ? `\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="${resolve(root, "AGENTS.md")}">\n${instructions}\n</project_instructions>\n\n</project_context>`
             : "";
-        this.messages = [
-            {
-                role: "system",
-                content: `You are tiny-agent, a concise coding agent in ${root}. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.
+        this.systemPrompt = `You are tiny-agent, a concise coding agent in ${root}. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.
 
 For implementation tasks, inspect only what is needed, then make the changes and run focused tests. Do not keep researching the same uncertainty when a mature dependency or direct implementation is available.
 Use the provided tool descriptions to choose the right capability. Not every run enables file access, shell access, or file modification.
@@ -222,9 +233,8 @@ Prefer completing a small working implementation over exhaustively researching e
 
 <available_skills>
 ${list}
-</available_skills>`,
-            },
-        ];
+</available_skills>`;
+        this.messages = [{ role: "system", content: this.systemPrompt }];
     }
     get busy() {
         return !!this.active;
@@ -240,10 +250,27 @@ ${list}
     private endOperation() {
         this.active = undefined;
     }
-    private async recordInterruption(phase: "model" | "tool" | "compact", toolCallId?: string) {
-        await this.session?.append({ type: "interruption", phase, toolCallId, reason: "escape" });
+    private async recordAbort(operationId: string, phase: "model" | "tool" | "compact", toolCallId?: string) {
+        await this.session?.append({
+            kind: "record",
+            record: {
+                type: "abortRequested",
+                operationId,
+                operationKind: phase === "compact" ? "compaction" : "run",
+                phase,
+                ...(toolCallId ? { toolCallId } : {}),
+                reason: "escape",
+            },
+        });
     }
-    private async runModelRequest(messages: Message[], tools: unknown, phase: "model" | "compact") {
+    private async runModelRequest(
+        messages: Message[],
+        tools: unknown,
+        phase: "model" | "compact",
+        operationId: string,
+        stepId: string,
+        attemptId: string,
+    ) {
         const signal = this.beginOperation(phase),
             started = performance.now();
         try {
@@ -260,32 +287,27 @@ ${list}
             return response;
         } catch (error) {
             if (!signal.aborted) throw error;
-            await this.recordInterruption(phase);
+            await this.recordAbort(operationId, phase);
+            await this.session?.append({
+                kind: "record",
+                record: {
+                    type: "stepFailed",
+                    operationId,
+                    stepId,
+                    attemptId,
+                    error: { code: "aborted", message: "Operation aborted" },
+                },
+            });
         } finally {
             this.endOperation();
         }
     }
     async resumeSession() {
         if (!this.session) return;
-        for (const r of (await this.session.records()).slice(1)) {
-            if (r.type === "message") {
-                this.messages.push(r.message);
-                if (!r.usage) continue;
-                for (const k of ["input", "output", "cacheRead", "cacheWrite"] as const)
-                    this.usage[k] += r.usage[k] ?? 0;
-                continue;
-            }
-            if (r.type === "compaction") {
-                const recent = r.keptMessages > 0 ? this.messages.slice(-r.keptMessages) : [];
-                this.messages = [
-                    this.messages[0],
-                    { role: "user", content: `[Compacted history]\n${r.summary}` },
-                    ...recent,
-                ];
-                for (const k of ["input", "output", "cacheRead", "cacheWrite"] as const)
-                    this.usage[k] += r.usage[k] ?? 0;
-            }
-        }
+        const state = await this.session.load();
+        if (state.operation.kind !== "idle") throw Error("Session recovery required");
+        this.messages = [this.messages[0], ...state.activeContext];
+        this.usage = { ...state.usage };
         const totalPrompt = this.usage.input + this.usage.cacheRead + this.usage.cacheWrite;
         if (totalPrompt > 0) this.usage.cacheHitRate = (this.usage.cacheRead / totalPrompt) * 100;
     }
@@ -328,111 +350,224 @@ ${list}
         };
     }
     async runAgentLoop(text: string) {
+        if (!this.session) throw Error("Session is required");
+        const accepted = runFacts(this.session, text);
+        await this.session.append(accepted.facts);
         const user: Message = { role: "user", content: text };
         this.messages.push(user);
-        await this.session?.append({ type: "message", message: user });
+        const operationId = accepted.operationId;
+        let contextThroughEntryId = accepted.inputEntryId;
+        const configuration = buildConfiguration(this.systemPrompt, this.tools);
+        const finish = (outcome: "completed" | "aborted" | "failed", extra: Record<string, unknown> = {}) =>
+            this.session!.append({
+                kind: "record",
+                record: { type: "operationFinished", operationId, operationKind: "run", outcome, ...extra },
+            });
         for (;;) {
-            const response = await this.runModelRequest(this.messages, toolDefinitions(this.tools), "model");
-            if (!response) return "Operation aborted.";
+            const stepId = this.session.allocateId();
+            const attemptId = this.session.allocateId();
+            await this.session.append({
+                kind: "record",
+                record: {
+                    type: "stepAttempt",
+                    operationId,
+                    stepId,
+                    attemptId,
+                    stepKind: "assistant",
+                    attempt: 1,
+                    contextThroughEntryId,
+                    ...configuration,
+                },
+            });
+            let response: Awaited<ReturnType<Agent["callModel"]>> | undefined;
+            try {
+                response = await this.runModelRequest(
+                    this.messages,
+                    toolDefinitions(this.tools),
+                    "model",
+                    operationId,
+                    stepId,
+                    attemptId,
+                );
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                await this.session.append([
+                    {
+                        kind: "record",
+                        record: {
+                            type: "stepFailed",
+                            operationId,
+                            stepId,
+                            attemptId,
+                            error: { code: "model_error", message },
+                        },
+                    },
+                    {
+                        kind: "record",
+                        record: {
+                            type: "operationFinished",
+                            operationId,
+                            operationKind: "run",
+                            outcome: "failed",
+                            error: { code: "model_error", message },
+                        },
+                    },
+                ]);
+                throw error;
+            }
+            if (!response) {
+                await finish("aborted");
+                return "Operation aborted.";
+            }
             const { message: answer, usage, stopReason } = response;
+            const assistantEntryId = this.session.allocateId();
+            await this.session.append([
+                {
+                    kind: "entry",
+                    id: assistantEntryId,
+                    entry: { type: "message", stepId, attemptId, stopReason, message: answer },
+                },
+                { kind: "usage", operationId, attemptId, usage },
+            ]);
             this.messages.push(answer);
-            await this.session?.append({ type: "message", message: answer, usage });
+            contextThroughEntryId = assistantEntryId;
             if (!answer.tool_calls?.length) {
-                if (answer.content?.trim()) return answer.content;
-                throw Error(`Model returned an empty response (finish_reason: ${stopReason}).`);
+                if (!answer.content?.trim()) {
+                    const message = `Model returned an empty response (finish_reason: ${stopReason}).`;
+                    await finish("failed", { error: { code: "empty_response", message } });
+                    throw Error(message);
+                }
+                await finish("completed", {
+                    completion: "normal",
+                    finalEntryId: assistantEntryId,
+                });
+                return answer.content;
             }
             for (let i = 0; i < answer.tool_calls.length; i++) {
-                const c = answer.tool_calls[i];
+                const call = answer.tool_calls[i];
+                let args: ToolArgs = {};
+                const tool = this.tools.find((candidate) => candidate.name === call.function.name);
+                const synthetic = async (reason: "invalidArguments" | "unknownTool" | "truncated" | "aborted") => {
+                    const contents = {
+                        invalidArguments: "Error: Tool arguments were invalid; the tool was not executed.",
+                        unknownTool: "Error: Unknown tool; the tool was not executed.",
+                        truncated:
+                            "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.",
+                        aborted: "Operation aborted before execution.",
+                    };
+                    const result: Message = { role: "tool", tool_call_id: call.id, content: contents[reason] };
+                    const id = this.session!.allocateId();
+                    await this.session!.append({
+                        kind: "entry",
+                        id,
+                        entry: {
+                            type: "message",
+                            stepId,
+                            assistantEntryId,
+                            toolIndex: i,
+                            message: result,
+                            toolName: call.function.name,
+                            result: { type: "synthetic", reason },
+                        },
+                    });
+                    this.messages.push(result);
+                    contextThroughEntryId = id;
+                };
+                if (stopReason === "length") {
+                    await synthetic("truncated");
+                    continue;
+                }
+                try {
+                    args = parseToolArgs(call.function.arguments);
+                } catch {
+                    await synthetic("invalidArguments");
+                    continue;
+                }
+                if (!tool) {
+                    await synthetic("unknownTool");
+                    continue;
+                }
+                const toolStartedId = this.session.allocateId();
+                const resultEntryId = this.session.allocateId();
+                const environment = (await this.session.load()).header.environmentIdentity;
+                await this.session.append({
+                    kind: "record",
+                    id: toolStartedId,
+                    record: {
+                        type: "toolStarted",
+                        operationId,
+                        stepId,
+                        assistantEntryId,
+                        toolIndex: i,
+                        toolCallId: call.id,
+                        toolName: tool.name,
+                        arguments: args,
+                        replay: tool.replay ?? "never",
+                        replayKey: tool.replayKey ?? `tool:${tool.name}:v1`,
+                        environmentIdentity: environment,
+                        resultEntryId,
+                    },
+                });
+                const started = performance.now();
                 let content: string,
-                    args: ToolArgs = {},
                     aborted = false,
                     ok = false;
-                const toolStarted = performance.now();
                 this.onEvent({
                     type: "tool.started",
                     timestamp: new Date().toISOString(),
-                    toolCallId: c.id,
-                    tool: c.function.name,
+                    toolCallId: call.id,
+                    tool: tool.name,
                 });
+                this.onTool({ phase: "start", name: tool.name, args });
                 try {
-                    if (stopReason === "length") {
-                        content =
-                            "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.";
-                    } else {
-                        args = parseToolArgs(c.function.arguments);
-                        this.onTool({ phase: "start", name: c.function.name, args });
-                        const tool = this.tools.find((candidate) => candidate.name === c.function.name);
-                        if (!tool) throw Error(`unknown tool: ${c.function.name}`);
-                        content = await tool.execute(args, this.beginOperation("tool", c.id));
-                        ok = true;
-                    }
-                } catch (e) {
+                    content = await tool.execute(args, this.beginOperation("tool", call.id));
+                    ok = true;
+                } catch (error) {
                     aborted = !!this.active?.controller.signal.aborted;
-                    content = aborted ? "Operation aborted" : `Error: ${e instanceof Error ? e.message : e}`;
+                    content = aborted ? "Operation interrupted after execution status became unknown; the tool was not replayed." : `Error: ${error instanceof Error ? error.message : error}`;
                 }
                 this.endOperation();
-                this.onTool({ phase: "end", name: c.function.name, args, result: content });
+                this.onTool({ phase: "end", name: tool.name, args, result: content });
                 this.onEvent({
                     type: "tool.completed",
                     timestamp: new Date().toISOString(),
-                    toolCallId: c.id,
-                    tool: c.function.name,
-                    durationMs: performance.now() - toolStarted,
+                    toolCallId: call.id,
+                    tool: tool.name,
+                    durationMs: performance.now() - started,
                     ok,
                 });
-                const result: Message = { role: "tool", tool_call_id: c.id, content };
-                this.messages.push(result);
-                await this.session?.append({ type: "message", message: result, toolName: c.function.name });
-                if (!aborted) continue;
-                for (const pending of answer.tool_calls.slice(i + 1)) {
-                    const skipped: Message = {
-                        role: "tool",
-                        tool_call_id: pending.id,
-                        content: "Operation aborted before execution",
-                    };
-                    this.messages.push(skipped);
-                    await this.session?.append({
+                if (aborted) await this.recordAbort(operationId, "tool", call.id);
+                const result: Message = { role: "tool", tool_call_id: call.id, content };
+                await this.session.append({
+                    kind: "entry",
+                    id: resultEntryId,
+                    entry: {
                         type: "message",
-                        message: skipped,
-                        toolName: pending.function.name,
-                    });
+                        stepId,
+                        message: result,
+                        toolName: tool.name,
+                        toolStartedId,
+                        result: aborted
+                            ? { type: "synthetic", reason: "interrupted" }
+                            : { type: ok ? "success" : "error" },
+                    },
+                });
+                this.messages.push(result);
+                contextThroughEntryId = resultEntryId;
+                if (!aborted) continue;
+                for (let pendingIndex = i + 1; pendingIndex < answer.tool_calls.length; pendingIndex++) {
+                    i = pendingIndex;
+                    await synthetic("aborted");
                 }
-                await this.recordInterruption("tool", c.id);
+                await finish("aborted");
                 return "Operation aborted.";
             }
+            if (stopReason !== "length") continue;
+            await finish("completed", { completion: "truncated", finalEntryId: assistantEntryId });
+            return answer.content?.trim() || "Model output was truncated.";
         }
     }
     async compact() {
-        const keep = 6;
-        if (this.messages.length <= 1) return "Nothing to compact.";
-        let cut = Math.max(this.messages.length - keep, 1);
-        while (cut > 1 && this.messages[cut].role !== "user") cut--;
-        const recent = this.messages.slice(cut),
-            old = this.messages.slice(1, cut);
-        if (!old.length) return "Nothing to compact.";
-        const response = await this.runModelRequest(
-            [
-                {
-                    role: "system",
-                    content:
-                        "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps.",
-                },
-                { role: "user", content: JSON.stringify(old) },
-            ],
-            null,
-            "compact",
-        );
-        if (!response) return "Compaction aborted.";
-        const { message: summary, usage } = response;
-        const compacted: Message = { role: "user", content: `[Compacted history]\n${summary.content}` };
-        this.messages = [this.messages[0], compacted, ...recent];
-        await this.session?.append({
-            type: "compaction",
-            summary: summary.content,
-            compactedMessages: old.length,
-            keptMessages: recent.length,
-            usage,
-        });
-        return `Compacted ${old.length} messages (kept last ${recent.length}).`;
+        throw Error("Compaction requires Phase 2b durable integration");
     }
 }

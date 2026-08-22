@@ -49,6 +49,8 @@ export type Tool = {
     name: string;
     description: string;
     parameters: Record<string, unknown>;
+    replay?: "safe" | "never";
+    replayKey?: string;
     execute(args: ToolArgs, signal?: AbortSignal): Promise<string>;
 };
 export type Plugin = {
@@ -103,6 +105,8 @@ async function limitBashOutput(output: string, complete = true) {
 
 const bashTool: Tool = {
     name: "bash",
+    replay: "never",
+    replayKey: "builtin:bash:v1",
     description:
         "Run commands, builds, tests, and file discovery in the working directory. Use read, write, or edit for ordinary text file operations. Output is limited to the last 2,000 lines or 50KB; truncated output includes a full-output path.",
     parameters: {
@@ -181,6 +185,8 @@ function readLines(text: string, offset = 1, limit = 2_000) {
 
 const readTool: Tool = {
     name: "read",
+    replay: "safe",
+    replayKey: "builtin:read:v1",
     description:
         "Read a UTF-8 text file. Prefer this over cat or sed. Returns at most 2,000 complete lines or 50KB and includes an offset hint when more lines remain.",
     parameters: {
@@ -204,6 +210,8 @@ const readTool: Tool = {
 
 const writeTool: Tool = {
     name: "write",
+    replay: "never",
+    replayKey: "builtin:write:v1",
     description:
         "Create a new UTF-8 text file or completely rewrite an existing file. Parent directories are created automatically. Use edit for partial changes.",
     parameters: {
@@ -228,6 +236,8 @@ const writeTool: Tool = {
 
 const editTool: Tool = {
     name: "edit",
+    replay: "never",
+    replayKey: "builtin:edit:v1",
     description:
         "Make precise replacements in an existing UTF-8 text file. Every oldText must match exactly once in the original file, and edits must not overlap. All edits are validated before writing.",
     parameters: {

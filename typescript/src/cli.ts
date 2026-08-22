@@ -74,7 +74,7 @@ async function main() {
     const configs = await loadMcpConfigs(mcp);
     const skills = await loadSkills(extras),
         instructions = await loadProjectInstructions();
-    const session = sessionId ? await Session.open(sessionId) : await Session.create();
+    const session = sessionId ? await Session.open(sessionId, process.cwd()) : await Session.create(process.cwd(), MODEL);
     const runStarted = performance.now();
     if (json) {
         emit({
@@ -161,10 +161,11 @@ async function main() {
     };
     rl.on("SIGINT", onInterrupt);
     process.stdin.on("keypress", onKeypress);
-    const close = () => {
+    const close = async () => {
         rl.off("SIGINT", onInterrupt);
         process.stdin.off("keypress", onKeypress);
         rl.close();
+        await session.close();
         resume();
     };
     if (!json) {
@@ -203,11 +204,13 @@ async function main() {
                 });
                 process.exitCode = 1;
             }
-            return close();
+            await close();
+            return;
         }
         console.log(`\n${await agent.runAgentLoop(oneShot)}`);
         console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
-        return close();
+        await close();
+        return;
     }
     console.log("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit");
     while (true) {
@@ -238,7 +241,7 @@ async function main() {
         console.log(`\x1b[36m${answer}\x1b[0m`);
         console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
     }
-    close();
+    await close();
 }
 
 async function closeMcp(loaded: LoadedMcpTools[]) {

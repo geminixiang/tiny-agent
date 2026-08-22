@@ -10,13 +10,31 @@ const {
     Agent,
     MODEL,
     Session,
+    SessionStore,
     loadProjectInstructions,
     loadSkills,
     executeTool,
     formatToolEvent,
     formatUsage,
-    builtInTools,
+    buildConfiguration,
+    runFacts,
 } = await import("../src/index.js");
+
+async function openStore(now = new Date()) {
+    return SessionStore.create(dir, MODEL, now);
+}
+
+async function facts(store: SessionStore) {
+    const text = await readFile(store.path, "utf8");
+    return text
+        .trim()
+        .split("\n")
+        .slice(1)
+        .flatMap((line) => {
+            const value = JSON.parse(line);
+            return Array.isArray(value) ? value : [value];
+        });
+}
 
 test("loads cwd AGENTS.md into the system prompt", async () => {
     await writeFile("AGENTS.md", "Always answer briefly.\n");
@@ -44,197 +62,105 @@ test("formats concise TUI tool events", () => {
     );
 });
 
-test("creates versioned UUIDv7 JSONL sessions", async () => {
-    const now = new Date("2026-08-03T03:55:50.062Z"),
-        session = await Session.create(dir, now);
-    assert.match(session.path, /\.tiny-agent\/sessions\/2026-08-03T03-55-50-062Z_[0-9a-f-]+\.jsonl$/);
-    assert.match(session.id, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    await session.append({ type: "message", message: { role: "user", content: "hi" } });
-    assert.equal((await Session.open(session.id, dir)).path, session.path);
-    const lines = (await readFile(session.path, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-    assert.deepEqual(lines[0], {
-        type: "session",
-        version: 1,
-        id: session.id,
-        createdAt: now.toISOString(),
-        cwd: dir,
-        provider: "openrouter",
-        model: MODEL,
-        timestamp: lines[0].timestamp,
-    });
-    assert.equal(lines[1].message.content, "hi");
-});
-
-test("restores messages, compaction, and cumulative usage", async () => {
-    const session = await Session.create(dir, new Date("2026-08-04T00:00:00Z"));
-    await session.append({ type: "message", message: { role: "user", content: "old" } });
-    await session.append({
-        type: "message",
-        message: { role: "assistant", content: "answer" },
-        usage: { input: 80, output: 5, cacheRead: 20, cacheWrite: 0 },
-    });
-    await session.append({
-        type: "compaction",
-        summary: "summary",
-        compactedMessages: 2,
-        keptMessages: 0,
-        usage: { input: 40, output: 4, cacheRead: 0, cacheWrite: 0 },
-    });
-    await session.append({ type: "message", message: { role: "user", content: "new" } });
-    const agent = new Agent([], fetch, session);
-    await agent.resumeSession();
-    assert.deepEqual(agent.messages.slice(1), [
-        { role: "user", content: "[Compacted history]\nsummary" },
-        { role: "user", content: "new" },
-    ]);
-    assert.deepEqual(agent.usage, {
-        input: 120,
-        output: 9,
-        cacheRead: 20,
+test("persists durable run/model lifecycle and restores an idle session", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const now = new Date("2026-08-03T03:55:50.062Z");
+    const session = await openStore(now);
+    const agent = new Agent(
+        [],
+        (async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }],
+                    usage: { prompt_tokens: 10, completion_tokens: 2 },
+                }),
+                { status: 200 },
+            )) as typeof fetch,
+        session,
+    );
+    assert.equal(await agent.runAgentLoop("hello"), "ok");
+    const records = await facts(session);
+    assert.deepEqual(
+        records.filter((fact) => fact.kind === "record").map((fact) => fact.record.type),
+        ["runStarted", "stepAttempt", "operationFinished"],
+    );
+    assert.equal(records.find((fact) => fact.kind === "entry" && fact.entry.message.role === "assistant").entry.stopReason, "stop");
+    assert.deepEqual(records.find((fact) => fact.kind === "usage").usage, {
+        input: 10,
+        output: 2,
+        cacheRead: 0,
         cacheWrite: 0,
-        cacheHitRate: 14.285714285714285,
     });
+    await session.close();
+    const reopened = await SessionStore.open(session.id, dir);
+    const restored = new Agent([], fetch, reopened);
+    await restored.resumeSession();
+    assert.deepEqual(restored.messages.slice(1), [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "ok" },
+    ]);
+    assert.equal(restored.usage.input, 10);
+    await reopened.close();
 });
 
-test("Esc aborts a model request and persists an interruption", async () => {
+test("persists failed and truncated model outcomes", async () => {
     process.env.OPENROUTER_API_KEY = "test";
-    const session = await Session.create(dir, new Date("2026-08-05T00:00:00Z"));
-    const hangingFetch = async (_url: unknown, init: any) =>
-        new Promise<Response>((_, reject) =>
-            init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))),
-        );
-    const agent = new Agent([], hangingFetch as typeof fetch, session),
-        pending = agent.runAgentLoop("wait");
-    while (!agent.busy) await new Promise((ok) => setImmediate(ok));
-    assert.equal(agent.busy, true);
-    agent.abort();
-    assert.equal(await pending, "Operation aborted.");
-    assert.equal(agent.busy, false);
-    const records = await session.records();
-    assert.equal(records.at(-1).type, "interruption");
-    assert.equal(records.at(-1).phase, "model");
-    assert.deepEqual(agent.messages.slice(1), [{ role: "user", content: "wait" }]);
-});
-
-test("Esc during a tool records legal results for every call", async () => {
-    process.env.OPENROUTER_API_KEY = "test";
-    const session = await Session.create(dir, new Date("2026-08-06T00:00:00Z"));
-    const reply = {
-        choices: [
-            {
-                message: {
-                    role: "assistant",
-                    content: null,
-                    tool_calls: [
-                        {
-                            id: "slow",
-                            type: "function",
-                            function: { name: "bash", arguments: '{"command":"sleep 30"}' },
-                        },
-                        {
-                            id: "later",
-                            type: "function",
-                            function: { name: "write", arguments: '{"path":"never.txt","content":"no"}' },
-                        },
-                    ],
-                },
-            },
-        ],
-        usage: { prompt_tokens: 10, completion_tokens: 2 },
-    };
-    const agent = new Agent(
-        [],
-        (async () => new Response(JSON.stringify(reply), { status: 200 })) as typeof fetch,
-        session,
-    );
-    const pending = agent.runAgentLoop("run");
-    while (!agent.busy) await new Promise((ok) => setImmediate(ok));
-    await new Promise((ok) => setTimeout(ok, 20));
-    agent.abort();
-    assert.equal(await pending, "Operation aborted.");
-    const tools = agent.messages.filter((m) => m.role === "tool");
+    const failedSession = await openStore(new Date("2026-08-04T00:00:00Z"));
+    const failed = new Agent([], (async () => { throw Error("provider down"); }) as typeof fetch, failedSession);
+    await assert.rejects(() => failed.runAgentLoop("fail"), /provider down/);
+    const failedRecords = await facts(failedSession);
     assert.deepEqual(
-        tools.map((m) => [m.tool_call_id, m.content]),
-        [
-            ["slow", "Operation aborted"],
-            ["later", "Operation aborted before execution"],
-        ],
+        failedRecords.filter((fact) => fact.kind === "record").map((fact) => fact.record.type),
+        ["runStarted", "stepAttempt", "stepFailed", "operationFinished"],
     );
-    const records = await session.records();
-    assert.equal(records.at(-1).type, "interruption");
-    assert.equal(records.at(-1).phase, "tool");
-});
+    assert.equal(failedRecords.at(-1).record.outcome, "failed");
+    await failedSession.close();
 
-test("Esc aborts compaction without changing context", async () => {
-    process.env.OPENROUTER_API_KEY = "test";
-    const session = await Session.create(dir, new Date("2026-08-07T00:00:00Z"));
-    const hangingFetch = async (_url: unknown, init: any) =>
-        new Promise<Response>((_, reject) =>
-            init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))),
-        );
-    const agent = new Agent([], hangingFetch as typeof fetch, session);
-    agent.messages.push(
-        ...Array.from({ length: 8 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `${i}` }) as const),
-    );
-    const before = structuredClone(agent.messages),
-        pending = agent.compact();
-    while (!agent.busy) await new Promise((ok) => setImmediate(ok));
-    agent.abort();
-    assert.equal(await pending, "Compaction aborted.");
-    assert.deepEqual(agent.messages, before);
-    assert.equal((await session.records()).find((r) => r.type === "interruption")?.phase, "compact");
-});
-
-test("compact records the actual number retained at a user boundary", async () => {
-    process.env.OPENROUTER_API_KEY = "test";
-    const summary = { choices: [{ message: { role: "assistant", content: "summary" } }], usage: {} };
-    const session = await Session.create(dir, new Date("2026-08-07T12:00:00Z"));
-    const agent = new Agent(
+    const truncatedSession = await openStore(new Date("2026-08-05T00:00:00Z"));
+    const truncated = new Agent(
         [],
-        (async () => new Response(JSON.stringify(summary), { status: 200 })) as typeof fetch,
-        session,
+        (async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [{
+                        finish_reason: "length",
+                        message: {
+                            role: "assistant",
+                            content: null,
+                            tool_calls: [{ id: "cut", type: "function", function: { name: "read", arguments: "{}" } }],
+                        },
+                    }],
+                    usage: {},
+                }),
+                { status: 200 },
+            )) as typeof fetch,
+        truncatedSession,
     );
-    agent.messages.push(
-        { role: "user", content: "old" },
-        { role: "assistant", content: "old answer" },
-        { role: "user", content: "keep" },
-        ...Array.from({ length: 6 }, (_, i) => ({ role: "assistant", content: `${i}` }) as const),
-    );
-    assert.equal(await agent.compact(), "Compacted 2 messages (kept last 7).");
-    const record = (await session.records()).at(-1);
-    assert.equal(record.keptMessages, 7);
+    assert.equal(await truncated.runAgentLoop("truncate"), "Model output was truncated.");
+    const truncatedRecords = await facts(truncatedSession);
+    assert.equal(truncatedRecords.find((fact) => fact.kind === "entry" && fact.entry.stopReason === "length").entry.stopReason, "length");
+    assert.deepEqual(truncatedRecords.at(-1).record, {
+        type: "operationFinished",
+        operationId: truncatedRecords[1].record.operationId,
+        operationKind: "run",
+        outcome: "completed",
+        completion: "truncated",
+        finalEntryId: truncatedRecords.find((fact) => fact.kind === "entry" && fact.entry.stopReason === "length").id,
+    });
+    await truncatedSession.close();
 });
 
-test("compact keeps assistant tool calls with their results", async () => {
-    process.env.OPENROUTER_API_KEY = "test";
-    const summary = { choices: [{ message: { role: "assistant", content: "summary" } }], usage: {} };
-    const agent = new Agent([], (async () => new Response(JSON.stringify(summary), { status: 200 })) as typeof fetch);
-    agent.messages.push(
-        { role: "user", content: "old" },
-        { role: "assistant", content: "old answer" },
-        { role: "user", content: "run" },
-        {
-            role: "assistant",
-            content: null,
-            tool_calls: [{ id: "1", type: "function", function: { name: "read", arguments: '{"path":"a.txt"}' } }],
-        },
-        { role: "tool", tool_call_id: "1", content: "data" },
-        { role: "assistant", content: "done" },
-        { role: "user", content: "next" },
-        { role: "assistant", content: "answer" },
-    );
-    assert.equal(await agent.compact(), "Compacted 2 messages (kept last 6).");
-    assert.equal(agent.messages[2].content, "run");
-    assert.deepEqual(
-        agent.messages.slice(3, 5).map((m) => [m.role, m.tool_call_id]),
-        [
-            ["assistant", undefined],
-            ["tool", "1"],
-        ],
-    );
+test("rejects resume when durable recovery is required", async () => {
+    const session = await openStore(new Date("2026-08-06T00:00:00Z"));
+    await session.append(runFacts(session, "accepted").facts);
+    await assert.rejects(() => new Agent([], fetch, session).resumeSession(), /Session recovery required/);
+    await session.close();
+});
+
+test("compaction is disabled until durable Phase 2b integration", async () => {
+    const session = await openStore(new Date("2026-08-07T00:00:00Z"));
+    await assert.rejects(() => new Agent([], fetch, session).compact(), /Phase 2b/);
+    await session.close();
 });
 
 test("formats pi-style token usage and cache ratio", () => {
@@ -580,7 +506,7 @@ test("runs an injected tool without changing the agent loop", async () => {
     const requests: any[] = [],
         queries: unknown[] = [],
         events: any[] = [],
-        session = await Session.create(dir, new Date("2026-08-09T00:00:00Z"));
+        session = await openStore(new Date("2026-08-09T00:00:00Z"));
     const agent = new Agent(
         [],
         (async (_url: unknown, init: any) => {
@@ -632,7 +558,7 @@ test("runs an injected tool without changing the agent loop", async () => {
             { type: "tool.completed", tool: "lookup" },
         ],
     );
-    const toolRecord = (await session.records()).find((record) => record.toolName === "lookup");
+    const toolRecord = (await facts(session)).find((record) => record.toolName === "lookup");
     assert.equal(toolRecord.message.content, "42");
 });
 
@@ -679,7 +605,7 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         },
     ];
     const requests: any[] = [],
-        session = await Session.create(dir, new Date("2026-08-08T00:00:00Z"));
+        session = await openStore(new Date("2026-08-08T00:00:00Z"));
     const fakeFetch = async (_url: unknown, init: any) => {
         requests.push(JSON.parse(init.body));
         return new Response(JSON.stringify(replies.shift()), { status: 200 });
@@ -743,7 +669,7 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         cacheHitRate: 38.63636363636363,
     });
     assert.equal(await executeTool("read", { path: "made.txt" }), "yes");
-    const persisted = await session.records();
+    const persisted = await facts(session);
     assert.equal(
         persisted.some((r) => r.type === "tool_log" || ("phase" in r && ["start", "end"].includes(r.phase))),
         false,
@@ -775,7 +701,7 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         cacheWrite: 0,
         cacheHitRate: 35,
     });
-    const compact = (await session.records()).find((r) => r.type === "compaction");
+    const compact = (await facts(session)).find((r) => r.type === "compaction");
     assert.deepEqual(
         {
             summary: compact.summary,
