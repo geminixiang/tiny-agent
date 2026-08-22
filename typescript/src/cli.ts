@@ -2,27 +2,53 @@
 import { readFile } from "node:fs/promises";
 import { createInterface, emitKeypressEvents } from "node:readline";
 import { parseArgs } from "node:util";
-import { Agent, MODEL, Session, loadProjectInstructions, loadSkills, formatToolEvent, formatUsage } from "./index.js";
+import {
+    Agent,
+    MODEL,
+    Session,
+    loadProjectInstructions,
+    loadSkills,
+    formatToolEvent,
+    formatUsage,
+    type RunEvent,
+    type RunResult,
+} from "./index.js";
 
 function parseCLIArgs(args = process.argv.slice(2)) {
     const { values, positionals } = parseArgs({
         args,
-        options: { session: { type: "string" }, skill: { type: "string", multiple: true } },
+        options: {
+            session: { type: "string" },
+            skill: { type: "string", multiple: true },
+            json: { type: "boolean" },
+        },
         allowPositionals: true,
     });
-    return { sessionId: values.session, extras: values.skill ?? [], oneShot: positionals.join(" ") };
+    return {
+        sessionId: values.session,
+        extras: values.skill ?? [],
+        json: values.json ?? false,
+        oneShot: positionals.join(" "),
+    };
 }
 
 async function main() {
-    const { sessionId, extras, oneShot } = parseCLIArgs();
+    const { sessionId, extras, json, oneShot } = parseCLIArgs();
+    if (json && !oneShot) throw Error("--json requires a one-shot prompt.");
     const skills = await loadSkills(extras),
         instructions = await loadProjectInstructions();
     const session = sessionId ? await Session.open(sessionId) : await Session.create();
-    const showTool = (event: Parameters<typeof formatToolEvent>[0]) =>
-        console.log(`\x1b[${event.phase === "start" ? "33" : "2"}m${formatToolEvent(event)}\x1b[0m`);
-    const agent = new Agent(skills, fetch, session, showTool, instructions);
+    const showTool = (event: Parameters<typeof formatToolEvent>[0]) => {
+        if (!json) console.log(`\x1b[${event.phase === "start" ? "33" : "2"}m${formatToolEvent(event)}\x1b[0m`);
+    };
+    const emit = (event: RunEvent | Record<string, unknown>) => {
+        if (json) process.stdout.write(`${JSON.stringify(event)}\n`);
+    };
+    const agent = new Agent(skills, fetch, session, showTool, instructions, emit);
     if (sessionId) await agent.resumeSession();
-    const resume = () => console.log(`\nResume: tiny-ts --session ${session.id}`);
+    const resume = () => {
+        if (!json) console.log(`\nResume: tiny-ts --session ${session.id}`);
+    };
     const rl = createInterface({ input: process.stdin, output: process.stdout }),
         ask = (q: string) => new Promise<string>((ok) => rl.question(q, ok));
     emitKeypressEvents(process.stdin, rl);
@@ -46,10 +72,51 @@ async function main() {
         rl.close();
         resume();
     };
-    console.log(
-        `\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: ${MODEL}\nsession: ${session.id}\npath: ${session.path}${sessionId ? "\nrestored: yes" : ""}`,
-    );
+    if (!json) {
+        console.log(
+            `\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: ${MODEL}\nsession: ${session.id}\npath: ${session.path}${sessionId ? "\nrestored: yes" : ""}`,
+        );
+    }
     if (oneShot) {
+        if (json) {
+            const started = performance.now();
+            emit({
+                type: "run.started",
+                timestamp: new Date().toISOString(),
+                sessionId: session.id,
+                model: MODEL,
+            });
+            try {
+                const answer = await agent.runAgentLoop(oneShot);
+                emit({
+                    type: "run.completed",
+                    timestamp: new Date().toISOString(),
+                    durationMs: performance.now() - started,
+                    result: {
+                        status: answer === "Operation aborted." ? "cancelled" : "succeeded",
+                        answer,
+                        sessionId: session.id,
+                        usage: agent.usage,
+                    } satisfies RunResult,
+                });
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                emit({
+                    type: "run.completed",
+                    timestamp: new Date().toISOString(),
+                    durationMs: performance.now() - started,
+                    result: {
+                        status: "failed",
+                        cause: "agent_error",
+                        message,
+                        sessionId: session.id,
+                        usage: agent.usage,
+                    } satisfies RunResult,
+                });
+                process.exitCode = 1;
+            }
+            return close();
+        }
         console.log(`\n${await agent.runAgentLoop(oneShot)}`);
         console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
         return close();

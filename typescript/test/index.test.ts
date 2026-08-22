@@ -86,7 +86,7 @@ test("restores messages, compaction, and cumulative usage", async () => {
         output: 9,
         cacheRead: 20,
         cacheWrite: 0,
-        cacheHitRate: 20,
+        cacheHitRate: 14.285714285714285,
     });
 });
 
@@ -485,8 +485,49 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         return new Response(JSON.stringify(replies.shift()), { status: 200 });
     };
     const events: any[] = [],
-        agent = new Agent([], fakeFetch as typeof fetch, session, (event) => events.push(event));
+        runEvents: any[] = [],
+        agent = new Agent(
+            [],
+            fakeFetch as typeof fetch,
+            session,
+            (event) => events.push(event),
+            "",
+            (event) => runEvents.push(event),
+        );
     assert.equal(await agent.runAgentLoop("make it"), "done");
+    assert.deepEqual(
+        runEvents.map(({ type, tool, toolCallId, ok, usage }) => ({ type, tool, toolCallId, ok, usage })),
+        [
+            {
+                type: "model.completed",
+                tool: undefined,
+                toolCallId: undefined,
+                ok: undefined,
+                usage: { input: 75, output: 10, cacheRead: 25, cacheWrite: 0, cacheHitRate: 25 },
+            },
+            {
+                type: "tool.started",
+                tool: "write",
+                toolCallId: "1",
+                ok: undefined,
+                usage: undefined,
+            },
+            {
+                type: "tool.completed",
+                tool: "write",
+                toolCallId: "1",
+                ok: true,
+                usage: undefined,
+            },
+            {
+                type: "model.completed",
+                tool: undefined,
+                toolCallId: undefined,
+                ok: undefined,
+                usage: { input: 60, output: 5, cacheRead: 60, cacheWrite: 0, cacheHitRate: 50 },
+            },
+        ],
+    );
     assert.deepEqual(
         events.map(({ phase, name, result }) => ({ phase, name, result })),
         [
@@ -499,7 +540,7 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         output: 15,
         cacheRead: 85,
         cacheWrite: 0,
-        cacheHitRate: 50,
+        cacheHitRate: 38.63636363636363,
     });
     assert.equal(await executeTool("read", { path: "made.txt" }), "yes");
     const persisted = await session.records();
@@ -532,7 +573,7 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         output: 23,
         cacheRead: 105,
         cacheWrite: 0,
-        cacheHitRate: 50,
+        cacheHitRate: 35,
     });
     const compact = (await session.records()).find((r) => r.type === "compaction");
     assert.deepEqual(

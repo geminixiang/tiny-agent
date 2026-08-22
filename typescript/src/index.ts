@@ -16,7 +16,7 @@ type Message = {
 };
 type ToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
 type Skill = { name: string; description: string; path: string };
-type Usage = {
+export type Usage = {
     input: number;
     output: number;
     cacheRead: number;
@@ -37,12 +37,31 @@ type ToolArgs = {
     limit?: number;
     edits?: ToolEdit[];
 };
-type ToolEvent = {
+export type ToolEvent = {
     phase: "start" | "end";
     name: string;
     args: ToolArgs;
     result?: string;
 };
+export type RunResult = {
+    status: "succeeded" | "failed" | "cancelled";
+    answer?: string;
+    cause?: string;
+    message?: string;
+    sessionId: string;
+    usage: Usage;
+};
+export type RunEvent =
+    | { type: "model.completed"; timestamp: string; durationMs: number; usage: Usage }
+    | { type: "tool.started"; timestamp: string; toolCallId: string; tool: string }
+    | {
+          type: "tool.completed";
+          timestamp: string;
+          toolCallId: string;
+          tool: string;
+          durationMs: number;
+          ok: boolean;
+      };
 
 export function formatToolEvent({ phase, name, args, result }: ToolEvent) {
     if (phase === "end")
@@ -208,6 +227,16 @@ function readLines(text: string, offset = 1, limit = 2_000) {
         return `Line ${offset} exceeds 50KB. Use bash with a byte-oriented command to inspect this line.`;
     const end = offset + selected.length - 1;
     return `${selected.join("\n")}${end < lines.length ? `\n\n[Showing lines ${offset}-${end} of ${lines.length}. Use offset=${end + 1} to continue.]` : ""}`;
+}
+
+function toolResultOK(content: string) {
+    return ![
+        "Error:",
+        "Operation aborted",
+        "Command exited with code",
+        "Command timed out after",
+        "Bash output exceeded the 10MB safety cap",
+    ].some((marker) => content.includes(marker));
 }
 
 export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal) {
@@ -380,6 +409,7 @@ export class Agent {
         public session?: Session,
         public onTool: (event: ToolEvent) => void = () => {},
         instructions = "",
+        public onEvent: (event: RunEvent) => void = () => {},
     ) {
         const list =
             skills
@@ -423,15 +453,21 @@ ${list}
     private async recordInterruption(phase: "model" | "tool" | "compact", toolCallId?: string) {
         await this.session?.append({ type: "interruption", phase, toolCallId, reason: "escape" });
     }
-    private async runModelRequest(
-        messages: Message[],
-        tools: unknown,
-        phase: "model" | "compact",
-        updateCacheRate = true,
-    ) {
-        const signal = this.beginOperation(phase);
+    private async runModelRequest(messages: Message[], tools: unknown, phase: "model" | "compact") {
+        const signal = this.beginOperation(phase),
+            started = performance.now();
         try {
-            return await this.callModel(messages, tools, updateCacheRate, signal);
+            const response = await this.callModel(messages, tools, signal);
+            this.onEvent({
+                type: "model.completed",
+                timestamp: new Date().toISOString(),
+                durationMs: performance.now() - started,
+                usage: {
+                    ...response.usage,
+                    ...(response.cacheHitRate === undefined ? {} : { cacheHitRate: response.cacheHitRate }),
+                },
+            });
+            return response;
         } catch (error) {
             if (!signal.aborted) throw error;
             await this.recordInterruption(phase);
@@ -447,8 +483,6 @@ ${list}
                 if (!r.usage) continue;
                 for (const k of ["input", "output", "cacheRead", "cacheWrite"] as const)
                     this.usage[k] += r.usage[k] ?? 0;
-                const prompt = r.usage.input + r.usage.cacheRead + r.usage.cacheWrite;
-                if (prompt > 0) this.usage.cacheHitRate = (r.usage.cacheRead / prompt) * 100;
                 continue;
             }
             if (r.type === "compaction") {
@@ -462,13 +496,10 @@ ${list}
                     this.usage[k] += r.usage[k] ?? 0;
             }
         }
+        const totalPrompt = this.usage.input + this.usage.cacheRead + this.usage.cacheWrite;
+        if (totalPrompt > 0) this.usage.cacheHitRate = (this.usage.cacheRead / totalPrompt) * 100;
     }
-    async callModel(
-        messages = this.messages,
-        tools: unknown = toolDefinitions,
-        updateCacheRate = true,
-        signal?: AbortSignal,
-    ) {
+    async callModel(messages = this.messages, tools: unknown = toolDefinitions, signal?: AbortSignal) {
         const key = process.env.OPENROUTER_API_KEY;
         if (!key) throw Error("Set OPENROUTER_API_KEY");
         const body = { model: MODEL, messages, ...(tools ? { tools } : {}) };
@@ -493,14 +524,17 @@ ${list}
         this.usage.output += u.completion_tokens ?? 0;
         this.usage.cacheRead += cacheRead;
         this.usage.cacheWrite += cacheWrite;
-        const prompt = input + cacheRead + cacheWrite;
-        if (updateCacheRate && prompt > 0) this.usage.cacheHitRate = (cacheRead / prompt) * 100;
+        const prompt = input + cacheRead + cacheWrite,
+            cacheHitRate = prompt > 0 ? (cacheRead / prompt) * 100 : undefined;
+        const totalPrompt = this.usage.input + this.usage.cacheRead + this.usage.cacheWrite;
+        if (totalPrompt > 0) this.usage.cacheHitRate = (this.usage.cacheRead / totalPrompt) * 100;
         const choice = data.choices?.[0];
         if (!choice?.message) throw Error("OpenRouter returned no assistant message");
         return {
             message: choice.message as Message,
             stopReason: stopReason(choice.finish_reason, choice.message),
             usage: { input, output: u.completion_tokens ?? 0, cacheRead, cacheWrite },
+            cacheHitRate,
         };
     }
     async runAgentLoop(text: string) {
@@ -522,6 +556,13 @@ ${list}
                 let content: string,
                     args: ToolArgs = {},
                     aborted = false;
+                const toolStarted = performance.now();
+                this.onEvent({
+                    type: "tool.started",
+                    timestamp: new Date().toISOString(),
+                    toolCallId: c.id,
+                    tool: c.function.name,
+                });
                 try {
                     if (stopReason === "length") {
                         content =
@@ -537,6 +578,14 @@ ${list}
                 }
                 this.endOperation();
                 this.onTool({ phase: "end", name: c.function.name, args, result: content });
+                this.onEvent({
+                    type: "tool.completed",
+                    timestamp: new Date().toISOString(),
+                    toolCallId: c.id,
+                    tool: c.function.name,
+                    durationMs: performance.now() - toolStarted,
+                    ok: toolResultOK(content),
+                });
                 const result: Message = { role: "tool", tool_call_id: c.id, content };
                 this.messages.push(result);
                 await this.session?.append({ type: "message", message: result, toolName: c.function.name });
@@ -578,7 +627,6 @@ ${list}
             ],
             null,
             "compact",
-            false,
         );
         if (!response) return "Compaction aborted.";
         const { message: summary, usage } = response;
