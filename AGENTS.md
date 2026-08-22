@@ -16,3 +16,17 @@
 - Keep prompt editing separate from active-operation controls: the editor owns arrows, insertion, and deletion; the busy loop owns standalone `Esc` cancellation and `Ctrl+C` exit.
 - Reuse only the core algorithm learned from mature libraries. Check `x/term`, Node readline, or prompt-toolkit before hand-writing terminal behavior, but do not import history, completion, or framework features the project does not need.
 - Test terminal behavior with Chinese text, combining marks, insertion/deletion in the middle, ANSI-colored prompts, and wrapping at a fixed narrow width; asserting only the final string is not enough—also assert display row and column.
+
+## MCP Decisions
+
+- Keep MCP as a tool adapter inside the existing agent loop. Do not add a second loop, registry framework, dynamic package loader, or authorization layer.
+- Support trusted named Streamable HTTP servers. The CLI shape is `--mcp <alias>` alongside the independent local `--plugin` allowlist; repeated and comma-separated aliases are stable-deduplicated.
+- Load the user/server catalog from `~/.tiny-agent/mcp.json`, or from the trusted deployment override `TINY_MCP_CONFIG`. Never auto-load repository MCP config and never accept a URL, header, token, tenant, or credential from model arguments or CLI flags.
+- Catalog entries use `{ url, tokenEnv?, allowedTools?, callTimeoutMs? }`. `tokenEnv` resolves an environment variable and sends it as a Bearer token; the catalog never stores the token. Public servers may omit it. Multi-tenant deployments must use a trusted gateway and short-lived tenant/job-scoped capabilities; reusable upstream credentials and tenant authorization stay outside tiny-agent.
+- Use the official MCP SDK v2 with automatic modern/legacy negotiation. The first implementation supports Streamable HTTP, `tools/list`, and `tools/call`; defer stdio, deprecated HTTP+SSE, OAuth UI, resources, prompts, tasks, sampling, elicitation, and arbitrary headers.
+- Map remote names to reversible, collision-safe provider names internally. Show human-readable names such as `mcp:complex/analyze_data` only in the TUI; preserve encoded names in model calls, sessions, and JSONL events.
+- Treat MCP `isError` as a thrown tool failure. Support text and `structuredContent`, fail closed on unsupported content, and bound tool count, schema/description size, schema depth, result bytes, startup time, and call time.
+- MCP setup is all-or-nothing and sequential. Unknown aliases and invalid catalogs fail before session creation. In JSON mode, connection work uses `run.started → mcp.connected|mcp.failed → run.completed`, and run duration includes MCP startup.
+- Close connected MCP clients in reverse order on every exit path. Cleanup is best-effort: attempt every close and do not let cleanup errors replace the original run result.
+- Keep deterministic local MCP fixtures in normal CI. Public MCP servers are optional compatibility smoke tests, never the sole contract oracle or a release gate.
+- TypeScript is the reference behavior. Go, Python, and Rust should match its CLI, catalog, monitoring, validation, cancellation, cleanup, and TUI behavior unless a language-specific constraint is documented.
