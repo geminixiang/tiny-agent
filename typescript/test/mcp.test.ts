@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { loadMcpTools } from "../src/mcp.js";
+import { displayToolName, loadMcpTools } from "../src/mcp.js";
 import { startTestMcpServer } from "./support/mcp-server.js";
+
+test("displays encoded MCP tool names for humans", () => {
+    assert.equal(displayToolName("mcp__Y29tcGxleA__YW5hbHl6ZV9kYXRh"), "mcp:complex/analyze_data");
+    assert.equal(displayToolName("read"), "read");
+    assert.equal(displayToolName("mcp__invalid"), "mcp__invalid");
+});
 
 test("official MCP v2 client lists and calls local Streamable HTTP tools", async (t) => {
     const server = await startTestMcpServer();

@@ -6,14 +6,20 @@ import {
     Agent,
     MODEL,
     Session,
+    loadMcpConfigs,
+    loadMcpTools,
+    displayToolName,
     loadProjectInstructions,
     loadSkills,
     formatToolEvent,
     formatUsage,
+    type LoadedMcpTools,
     type RunEvent,
     type RunResult,
     builtInPlugins,
 } from "./index.js";
+
+const activeMcp: LoadedMcpTools[] = [];
 
 function parseCLIArgs(args = process.argv.slice(2)) {
     const { values, positionals } = parseArgs({
@@ -23,6 +29,7 @@ function parseCLIArgs(args = process.argv.slice(2)) {
             skill: { type: "string", multiple: true },
             json: { type: "boolean" },
             plugin: { type: "string", multiple: true },
+            mcp: { type: "string", multiple: true },
         },
         allowPositionals: true,
     });
@@ -30,21 +37,29 @@ function parseCLIArgs(args = process.argv.slice(2)) {
         sessionId: values.session,
         extras: values.skill ?? [],
         json: values.json ?? false,
-        plugins: [
-            ...new Set(
-                (values.plugin ?? [])
-                    .flatMap((value) => value.split(","))
-                    .map((value) => value.trim())
-                    .filter(Boolean),
-            ),
-        ],
+        plugins: splitList(values.plugin),
+        mcp: splitList(values.mcp),
         oneShot: positionals.join(" "),
     };
 }
 
+function splitList(values?: string[]) {
+    return [
+        ...new Set(
+            (values ?? [])
+                .flatMap((value) => value.split(","))
+                .map((value) => value.trim())
+                .filter(Boolean),
+        ),
+    ];
+}
+
 async function main() {
-    const { sessionId, extras, json, plugins, oneShot } = parseCLIArgs();
+    const { sessionId, extras, json, plugins, mcp, oneShot } = parseCLIArgs();
     if (json && !oneShot) throw Error("--json requires a one-shot prompt.");
+    const emit = (event: RunEvent | Record<string, unknown>) => {
+        if (json) process.stdout.write(`${JSON.stringify(event)}\n`);
+    };
     const selectedPlugins = plugins.length ? plugins : builtInPlugins.map((plugin) => plugin.name);
     const unknown = selectedPlugins.find((name) => !builtInPlugins.some((plugin) => plugin.name === name));
     if (unknown) {
@@ -52,15 +67,77 @@ async function main() {
             `Unknown plugin: ${unknown}. Available plugins: ${builtInPlugins.map((plugin) => plugin.name).join(", ")}`,
         );
     }
-    const tools = selectedPlugins.flatMap((name) => builtInPlugins.find((plugin) => plugin.name === name)?.tools ?? []);
+    const localTools = selectedPlugins.flatMap(
+        (name) => builtInPlugins.find((plugin) => plugin.name === name)?.tools ?? [],
+    );
+    const loadedMcp = activeMcp;
+    const configs = await loadMcpConfigs(mcp);
     const skills = await loadSkills(extras),
         instructions = await loadProjectInstructions();
     const session = sessionId ? await Session.open(sessionId) : await Session.create();
+    const runStarted = performance.now();
+    if (json) {
+        emit({
+            type: "run.started",
+            timestamp: new Date().toISOString(),
+            sessionId: session.id,
+            model: MODEL,
+            plugins: selectedPlugins,
+            mcp,
+        });
+    }
+    for (const config of configs) {
+        const started = performance.now();
+        try {
+            const loaded = await loadMcpTools(config, AbortSignal.timeout(10_000));
+            loadedMcp.push(loaded);
+            emit({
+                type: "mcp.connected",
+                timestamp: new Date().toISOString(),
+                server: config.alias,
+                protocolEra: loaded.protocolEra,
+                protocolVersion: loaded.protocolVersion,
+                toolCount: loaded.tools.length,
+                durationMs: performance.now() - started,
+            });
+            if (!json) {
+                console.log(`MCP ${config.alias}: connected (${loaded.protocolVersion}, ${loaded.tools.length} tools)`);
+            }
+        } catch (error) {
+            const cause = mcpFailureCause(error);
+            emit({
+                type: "mcp.failed",
+                timestamp: new Date().toISOString(),
+                server: config.alias,
+                stage: "connect",
+                cause,
+            });
+            if (json) {
+                emit({
+                    type: "run.completed",
+                    timestamp: new Date().toISOString(),
+                    durationMs: performance.now() - runStarted,
+                    result: {
+                        status: "failed",
+                        cause: "mcp_setup_error",
+                        message: `MCP ${config.alias} failed: ${cause}`,
+                        sessionId: session.id,
+                        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                    } satisfies RunResult,
+                });
+                process.exitCode = 1;
+                return;
+            }
+            throw Error(`MCP ${config.alias} failed: ${cause}`);
+        }
+    }
+    const tools = [...localTools, ...loadedMcp.flatMap((loaded) => loaded.tools)];
     const showTool = (event: Parameters<typeof formatToolEvent>[0]) => {
-        if (!json) console.log(`\x1b[${event.phase === "start" ? "33" : "2"}m${formatToolEvent(event)}\x1b[0m`);
-    };
-    const emit = (event: RunEvent | Record<string, unknown>) => {
-        if (json) process.stdout.write(`${JSON.stringify(event)}\n`);
+        if (!json) {
+            console.log(
+                `\x1b[${event.phase === "start" ? "33" : "2"}m${formatToolEvent({ ...event, name: displayToolName(event.name) })}\x1b[0m`,
+            );
+        }
     };
     const agent = new Agent(skills, fetch, session, showTool, instructions, emit, tools);
     if (sessionId) await agent.resumeSession();
@@ -92,25 +169,17 @@ async function main() {
     };
     if (!json) {
         console.log(
-            `\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: ${MODEL}\nsession: ${session.id}\npath: ${session.path}${sessionId ? "\nrestored: yes" : ""}`,
+            `\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: ${MODEL}\nsession: ${session.id}\npath: ${session.path}\ntools: ${tools.map((tool) => displayToolName(tool.name)).join(", ") || "(none)"}\nmcp: ${mcp.join(", ") || "(none)"}${sessionId ? "\nrestored: yes" : ""}`,
         );
     }
     if (oneShot) {
         if (json) {
-            const started = performance.now();
-            emit({
-                type: "run.started",
-                timestamp: new Date().toISOString(),
-                sessionId: session.id,
-                model: MODEL,
-                plugins: selectedPlugins,
-            });
             try {
                 const answer = await agent.runAgentLoop(oneShot);
                 emit({
                     type: "run.completed",
                     timestamp: new Date().toISOString(),
-                    durationMs: performance.now() - started,
+                    durationMs: performance.now() - runStarted,
                     result: {
                         status: answer === "Operation aborted." ? "cancelled" : "succeeded",
                         answer,
@@ -123,7 +192,7 @@ async function main() {
                 emit({
                     type: "run.completed",
                     timestamp: new Date().toISOString(),
-                    durationMs: performance.now() - started,
+                    durationMs: performance.now() - runStarted,
                     result: {
                         status: "failed",
                         cause: "agent_error",
@@ -172,7 +241,25 @@ async function main() {
     close();
 }
 
-main().catch((error) => {
-    console.error(error.message);
-    process.exitCode = 1;
-});
+async function closeMcp(loaded: LoadedMcpTools[]) {
+    for (const client of loaded.toReversed()) {
+        try {
+            await client.close();
+        } catch {
+            // Cleanup is best-effort; never hide the original run result.
+        }
+    }
+}
+
+function mcpFailureCause(error: unknown) {
+    if (error instanceof DOMException && error.name === "TimeoutError") return "timeout";
+    if (error instanceof Error && /abort|timeout/i.test(`${error.name} ${error.message}`)) return "timeout";
+    return "connection_failed";
+}
+
+main()
+    .finally(() => closeMcp(activeMcp))
+    .catch((error) => {
+        console.error(error.message);
+        process.exitCode = 1;
+    });

@@ -171,6 +171,16 @@ function jsonDepth(value: unknown): number {
     return 1 + Math.max(0, ...children.map(jsonDepth));
 }
 
+export function displayToolName(name: string) {
+    const match = name.match(/^mcp__([A-Za-z0-9_-]+)__([A-Za-z0-9_-]+)$/);
+    if (!match) return name;
+    try {
+        return `mcp:${Buffer.from(match[1], "base64url").toString()}/${Buffer.from(match[2], "base64url").toString()}`;
+    } catch {
+        return name;
+    }
+}
+
 function mapToolName(alias: string, remoteName: string) {
     if (!remoteName) throw Error("MCP tool name must not be empty");
     const name = `mcp__${Buffer.from(alias).toString("base64url")}__${Buffer.from(remoteName).toString("base64url")}`;

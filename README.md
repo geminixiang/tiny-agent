@@ -70,6 +70,36 @@ tiny-rs
 TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 ```
 
+### MCP（目前僅 TypeScript）
+
+`tiny-ts` 可從可信的 user/server catalog 載入 MCP tools。預設 catalog 位於：
+
+```text
+~/.tiny-agent/mcp.json
+```
+
+```json
+{
+    "servers": {
+        "sentry": {
+            "url": "https://mcp.internal.example/sentry",
+            "tokenEnv": "TINY_MCP_TOKEN_SENTRY",
+            "allowedTools": ["search_issues", "get_issue"],
+            "callTimeoutMs": 30000
+        }
+    }
+}
+```
+
+執行：
+
+```bash
+export TINY_MCP_TOKEN_SENTRY=...
+tiny-ts --mcp sentry --plugin read "調查 issue"
+```
+
+`--mcp` 可重複或以逗號分隔。設定檔只保存 token 的環境變數名稱，不保存 token；部署或測試可用 `TINY_MCP_CONFIG=/trusted/path/mcp.json` 指定可信 catalog。Tiny-agent 不會讀取 repository 內的 MCP 設定，也不接受 CLI 傳入 URL、header 或 token。多租戶環境應連到 trusted gateway，tenant ACL 與長效 credential 不應放進 agent job。
+
 單次執行：
 
 ```bash

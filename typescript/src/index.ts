@@ -3,7 +3,8 @@ import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { builtInTools, toolDefinitions, type Tool, type ToolArgs, type ToolEvent } from "./tools.js";
 
-export { loadMcpTools, type LoadedMcpTools, type McpConfig } from "./mcp.js";
+export { loadMcpConfigs, type McpServerCatalog } from "./mcp-config.js";
+export { displayToolName, loadMcpTools, type LoadedMcpTools, type McpConfig } from "./mcp.js";
 export {
     builtInPlugins,
     builtInTools,
@@ -54,7 +55,17 @@ export type RunEvent =
           tool: string;
           durationMs: number;
           ok: boolean;
-      };
+      }
+    | {
+          type: "mcp.connected";
+          timestamp: string;
+          server: string;
+          protocolEra: "modern" | "legacy";
+          protocolVersion: string;
+          toolCount: number;
+          durationMs: number;
+      }
+    | { type: "mcp.failed"; timestamp: string; server: string; stage: "connect"; cause: string };
 
 // prettier-ignore
 function formatTokens(n: number) { return n < 1e3 ? `${n}` : n < 1e4 ? `${(n / 1e3).toFixed(1)}k` : n < 1e6 ? `${Math.round(n / 1e3)}k` : n < 1e7 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e6)}M`; }
