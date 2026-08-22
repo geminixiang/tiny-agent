@@ -12,7 +12,8 @@ import unicodedata
 from pathlib import Path
 from typing import Callable
 
-from .agent import Agent, DEFAULT_MODEL, Session, format_tool_event, format_usage, load_project_instructions, load_skills
+from .agent import Agent, DEFAULT_MODEL, Session, TOOL_DEFINITIONS, format_tool_event, format_usage, load_project_instructions, load_skills
+from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases
 
 class Terminal:
     def __init__(self): self.fd = sys.stdin.fileno(); self.tty = sys.stdin.isatty(); self.old = termios.tcgetattr(self.fd) if self.tty else None
@@ -103,33 +104,50 @@ class Terminal:
 
 
 def run_cli(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(add_help=False); parser.add_argument("--session"); parser.add_argument("--skill", action="append", default=[]); parser.add_argument("prompt", nargs="*")
-    args = parser.parse_args(argv); skills = load_skills(args.skill); session = Session.open(args.session) if args.session else Session.create(); agent = Agent(skills, session, load_project_instructions())
-    if args.session: agent.resume_session()
-    def show_tool(event): print(f"\x1b[{'33' if event['phase'] == 'start' else '2'}m{format_tool_event(event)}\x1b[0m")
-    agent.on_tool = show_tool
-    restored = "\nrestored: yes" if args.session else ""
-    print(f"\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {os.getenv('TINY_MODEL') or DEFAULT_MODEL}\nsession: {session.id}\npath: {session.path}{restored}")
-    resume = lambda: print(f"\nResume: tiny-py --session {session.id}")
+    parser = argparse.ArgumentParser(add_help=False); parser.add_argument("--session"); parser.add_argument("--skill", action="append", default=[]); parser.add_argument("--mcp", action="append", default=[]); parser.add_argument("prompt", nargs="*")
+    args = parser.parse_args(argv); aliases = split_mcp_aliases(args.mcp); configs = load_mcp_configs(aliases)
+    loaded_mcp = []
     try:
-        with Terminal() as terminal:
-            if args.prompt:
-                print(f"\n{terminal.run(agent, lambda: agent.run_agent_loop(' '.join(args.prompt)))}\n\x1b[2m{format_usage(agent.usage)}\x1b[0m"); resume(); return 0
-            print("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit")
-            while True:
-                text = terminal.readline("\x1b[32m›\x1b[0m ")
-                if not text: continue
-                if text == "/exit": break
-                if text == "/compact": answer = terminal.run(agent, agent.compact)
-                elif text.startswith("/skill:"):
-                    name, _, request = text[7:].partition(" "); skill = next((item for item in skills if item["name"] == name), None)
-                    if not skill: print(f"Unknown skill: {name}"); continue
-                    answer = terminal.run(agent, lambda: agent.run_agent_loop(f"{Path(skill['path']).read_text(encoding='utf-8')}\n\nUser: {request}"))
-                else: answer = terminal.run(agent, lambda: agent.run_agent_loop(text))
-                print(f"\x1b[36m{answer}\x1b[0m\n\x1b[2m{format_usage(agent.usage)}\x1b[0m")
-    except KeyboardInterrupt:
-        pass
-    resume(); return 0
+        for config in configs:
+            try: loaded = load_mcp_tools(config)
+            except (ValueError, RuntimeError, OSError, TimeoutError) as error: raise RuntimeError(f"MCP {config.alias} failed: {error}") from error
+            loaded_mcp.append(loaded)
+            print(f"MCP {config.alias}: connected ({loaded.protocol_version}, {len(loaded.tools)} tools)")
+        skills = load_skills(args.skill); session = Session.open(args.session) if args.session else Session.create()
+        tools = [*TOOL_DEFINITIONS, *(tool for loaded in loaded_mcp for tool in loaded.tools)]
+        agent = Agent(skills, session, load_project_instructions(), tools=tools)
+        if args.session: agent.resume_session()
+        def show_tool(event):
+            shown = {**event, "name": display_tool_name(event["name"])}
+            print(f"\x1b[{'33' if event['phase'] == 'start' else '2'}m{format_tool_event(shown)}\x1b[0m")
+        agent.on_tool = show_tool
+        restored = "\nrestored: yes" if args.session else ""
+        names = ", ".join(display_tool_name(tool["function"]["name"]) for tool in tools) or "(none)"
+        print(f"\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {os.getenv('TINY_MODEL') or DEFAULT_MODEL}\nsession: {session.id}\npath: {session.path}\ntools: {names}\nmcp: {', '.join(aliases) or '(none)'}{restored}")
+        resume = lambda: print(f"\nResume: tiny-py --session {session.id}")
+        try:
+            with Terminal() as terminal:
+                if args.prompt:
+                    print(f"\n{terminal.run(agent, lambda: agent.run_agent_loop(' '.join(args.prompt)))}\n\x1b[2m{format_usage(agent.usage)}\x1b[0m"); resume(); return 0
+                print("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit")
+                while True:
+                    text = terminal.readline("\x1b[32m›\x1b[0m ")
+                    if not text: continue
+                    if text == "/exit": break
+                    if text == "/compact": answer = terminal.run(agent, agent.compact)
+                    elif text.startswith("/skill:"):
+                        name, _, request = text[7:].partition(" "); skill = next((item for item in skills if item["name"] == name), None)
+                        if not skill: print(f"Unknown skill: {name}"); continue
+                        answer = terminal.run(agent, lambda: agent.run_agent_loop(f"{Path(skill['path']).read_text(encoding='utf-8')}\n\nUser: {request}"))
+                    else: answer = terminal.run(agent, lambda: agent.run_agent_loop(text))
+                    print(f"\x1b[36m{answer}\x1b[0m\n\x1b[2m{format_usage(agent.usage)}\x1b[0m")
+        except KeyboardInterrupt:
+            pass
+        resume(); return 0
+    finally:
+        for loaded in reversed(loaded_mcp):
+            try: loaded.close()
+            except Exception: pass
 
 
 def main() -> None:

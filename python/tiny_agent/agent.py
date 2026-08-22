@@ -167,8 +167,9 @@ class Session:
 
 
 class Agent:
-    def __init__(self, skills: list[dict] | None = None, session: Session | None = None, instructions: str = "", requester: Callable | None = None, on_tool: Callable = lambda event: None):
+    def __init__(self, skills: list[dict] | None = None, session: Session | None = None, instructions: str = "", requester: Callable | None = None, on_tool: Callable = lambda event: None, tools: list[dict] | None = None):
         self.skills, self.session, self.requester, self.on_tool = skills or [], session, requester, on_tool
+        self.tools = tools if tools is not None else TOOL_DEFINITIONS
         self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
         self.cancelled: threading.Event | None = None; self.connection: http.client.HTTPConnection | None = None
         listing = "\n".join(f"<skill>\n<name>{s['name']}</name>\n<description>{s['description']}</description>\n<location>{s['path']}</location>\n</skill>" for s in self.skills) or "(none)"
@@ -239,8 +240,9 @@ class Agent:
     def run_agent_loop(self, text: str) -> str:
         user = {"role": "user", "content": text}; self.messages.append(user)
         if self.session: self.session.append({"type": "message", "message": user})
+        model_tools = [{"type": tool["type"], "function": tool["function"]} for tool in self.tools]
         while True:
-            response = self.model_request(self.messages, TOOL_DEFINITIONS, "model")
+            response = self.model_request(self.messages, model_tools, "model")
             if not response: return "Operation aborted."
             answer, usage = response; self.messages.append(answer)
             if self.session: self.session.append({"type": "message", "message": answer, "usage": usage})
@@ -250,7 +252,10 @@ class Agent:
                 args, aborted = {}, False; cancelled = self.begin()
                 try:
                     args = json.loads(call["function"]["arguments"]); self.on_tool({"phase": "start", "name": call["function"]["name"], "args": args})
-                    content = execute_tool(call["function"]["name"], args, cancelled)
+                    name = call["function"]["name"]
+                    tool = next((item for item in self.tools if item["function"]["name"] == name), None)
+                    if not tool: raise ValueError(f"unknown tool: {name}")
+                    content = tool["execute"](args, cancelled) if "execute" in tool else execute_tool(name, args, cancelled)
                 except BaseException as error:
                     aborted = cancelled.is_set(); content = "Operation aborted" if aborted else f"Error: {error}"
                 self.end(); self.on_tool({"phase": "end", "name": call["function"]["name"], "args": args, "result": content})
