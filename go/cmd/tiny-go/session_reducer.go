@@ -78,6 +78,8 @@ type sessionOperation struct {
 	Step                *sessionStep
 	ToolCalls           []sessionToolState
 	AbortRequested      bool
+	compactedEntryIDs   []string
+	retainedEntryIDs    []string
 }
 
 func (o sessionOperation) MarshalJSON() ([]byte, error) {
@@ -96,6 +98,11 @@ func (o sessionOperation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(value)
 }
 
+type sessionMessageFact struct {
+	ID      string
+	Message sessionMessage
+}
+
 type sessionState struct {
 	Header         sessionHeader    `json:"header"`
 	Transcript     []sessionMessage `json:"transcript"`
@@ -105,6 +112,7 @@ type sessionState struct {
 	RepairedLength int              `json:"repairedLength"`
 	entryIDs       []string
 	resultPairs    map[string]bool
+	messageFacts   []sessionMessageFact
 }
 
 type sessionCorruption struct {
@@ -507,6 +515,8 @@ func sessionClone(s *sessionInternal) *sessionInternal {
 		n.Operation.Step = &x
 	}
 	n.Operation.ToolCalls = append([]sessionToolState{}, s.Operation.ToolCalls...)
+	n.Operation.compactedEntryIDs = append([]string{}, s.Operation.compactedEntryIDs...)
+	n.Operation.retainedEntryIDs = append([]string{}, s.Operation.retainedEntryIDs...)
 	return &n
 }
 func copyBool(m map[string]bool) map[string]bool {
@@ -1068,6 +1078,46 @@ func sessionApplyRecord(s *sessionInternal, f map[string]any, line, seq int) err
 		if _, ok := s.Entries[input]; !ok {
 			return corrupt("INVALID_REFERENCE", line, seq)
 		}
+		compactedRaw, compactedOK := r["compactedEntryIds"].([]any)
+		retainedRaw, retainedOK := r["retainedEntryIds"].([]any)
+		if !compactedOK || len(compactedRaw) == 0 || !retainedOK {
+			return corrupt("INVALID_FACT", line, seq)
+		}
+		partition := append(append([]any{}, compactedRaw...), retainedRaw...)
+		expected := []string{}
+		ids := make([]string, 0, len(s.Entries))
+		for id := range s.Entries {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool {
+			return sessionSeqOfEntry(s.Entries[ids[i]].Entry) < sessionSeqOfEntry(s.Entries[ids[j]].Entry)
+		})
+		for _, id := range ids {
+			if s.Entries[id].Entry["type"] == "message" {
+				expected = append(expected, id)
+			}
+			if id == input {
+				break
+			}
+		}
+		if len(partition) != len(expected) {
+			return corrupt("INVALID_REFERENCE", line, seq)
+		}
+		compacted, retained := make([]string, len(compactedRaw)), make([]string, len(retainedRaw))
+		for index, raw := range partition {
+			id, ok := sessionID(raw)
+			if !ok {
+				return corrupt("INVALID_FACT", line, seq)
+			}
+			if id != expected[index] {
+				return corrupt("INVALID_REFERENCE", line, seq)
+			}
+			if index < len(compacted) {
+				compacted[index] = id
+			} else {
+				retained[index-len(compacted)] = id
+			}
+		}
 		digest, ok := sessionDigest(r["sourceDigest"])
 		if !ok {
 			return corrupt("INVALID_FACT", line, seq)
@@ -1077,7 +1127,7 @@ func sessionApplyRecord(s *sessionInternal, f map[string]any, line, seq int) err
 			return corrupt("INVALID_REFERENCE", line, seq)
 		}
 		s.Operations[op] = &sessionOperationInfo{Kind: "compaction", InputThroughEntryID: input, ResultEntryID: result}
-		s.Operation = sessionOperation{Kind: "compaction", OperationID: op, InputThroughEntryID: input, ResultEntryID: result}
+		s.Operation = sessionOperation{Kind: "compaction", OperationID: op, InputThroughEntryID: input, ResultEntryID: result, compactedEntryIDs: compacted, retainedEntryIDs: retained}
 		s.Records[fid] = r
 		return nil
 	}
@@ -1617,17 +1667,20 @@ func reduceSession(data []byte) (sessionState, error) {
 	})
 	entryIDs := make([]string, 0, len(s.Transcript))
 	resultPairs := map[string]bool{}
+	messageFacts := make([]sessionMessageFact, 0, len(s.Transcript))
 	for _, id := range ids {
 		entry := s.Entries[id].Entry
 		if entry["type"] != "message" {
 			continue
 		}
 		entryIDs = append(entryIDs, id)
+		message, _ := sessionParseMessage(entry["message"], 0, 0)
+		messageFacts = append(messageFacts, sessionMessageFact{ID: id, Message: message})
 		if assistantID, ok := entry["assistantEntryId"].(string); ok {
 			if index, ok := sessionInt(entry["toolIndex"], 0); ok {
 				resultPairs[fmt.Sprintf("%s:%d", assistantID, index)] = true
 			}
 		}
 	}
-	return sessionState{Header: s.Header, Transcript: clean(s.Transcript), ActiveContext: clean(s.ActiveContext), Usage: s.Usage, Operation: s.Operation, RepairedLength: s.RepairedLength, entryIDs: entryIDs, resultPairs: resultPairs}, nil
+	return sessionState{Header: s.Header, Transcript: clean(s.Transcript), ActiveContext: clean(s.ActiveContext), Usage: s.Usage, Operation: s.Operation, RepairedLength: s.RepairedLength, entryIDs: entryIDs, resultPairs: resultPairs, messageFacts: messageFacts}, nil
 }

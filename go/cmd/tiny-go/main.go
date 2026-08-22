@@ -618,7 +618,66 @@ func (a *Agent) runAgentLoop(input string) (string, error) {
 }
 
 func (a *Agent) compact() (string, error) {
-	return "", errors.New("Compaction requires the next durable-session phase")
+	if a.Session == nil {
+		return "", errors.New("Compaction requires a durable session")
+	}
+	state := a.Session.State()
+	if state.Operation.Kind != "idle" {
+		return "", errors.New("session operation is active")
+	}
+	const retain = 6
+	if len(state.messageFacts) <= retain {
+		return "Nothing to compact.", nil
+	}
+	cut := len(state.messageFacts) - retain
+	for cut > 0 && state.messageFacts[cut].Message["role"] != "user" {
+		cut--
+	}
+	if cut == 0 {
+		return "Nothing to compact.", nil
+	}
+	compacted := state.messageFacts[:cut]
+	retained := state.messageFacts[cut:]
+	compactedIDs, retainedIDs := make([]any, len(compacted)), make([]any, len(retained))
+	for index, item := range compacted {
+		compactedIDs[index] = item.ID
+	}
+	for index, item := range retained {
+		retainedIDs[index] = item.ID
+	}
+	inputID := state.messageFacts[len(state.messageFacts)-1].ID
+	operationID := a.Session.NewID(time.Now())
+	resultID := a.Session.NewID(time.Now().Add(time.Nanosecond))
+	if err := a.Session.Commit([]map[string]any{{"kind": "record", "record": map[string]any{
+		"type": "compactionStarted", "operationId": operationID, "operationKind": "compaction",
+		"inputThroughEntryId": inputID, "resultEntryId": resultID,
+		"compactedEntryIds": compactedIDs, "retainedEntryIds": retainedIDs,
+		"sourceDigest": digestSourceFacts(state.messageFacts),
+	}}}); err != nil {
+		return "", err
+	}
+	run := durableRun{OperationID: operationID, ContextEntryID: inputID, Attempt: 1}
+	if err := a.startAttempt(&run, "compaction", 1); err != nil {
+		return "", err
+	}
+	if err := a.executeCompaction(run); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return "Compaction aborted.", nil
+		}
+		return "", err
+	}
+	if err := a.projectSession(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Compacted %d messages (kept last %d).", len(compacted), len(retained)), nil
+}
+
+func digestSourceFacts(source []sessionMessageFact) string {
+	values := make([]any, len(source))
+	for index, item := range source {
+		values[index] = map[string]any{"sourceEntryId": item.ID, "message": item.Message}
+	}
+	return digestValue(values)
 }
 
 var errExit = errors.New("exit")

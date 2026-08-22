@@ -141,15 +141,19 @@ func (a *Agent) startAttempt(run *durableRun, kind string, attempt int) error {
 	}}})
 }
 
-func (a *Agent) failAttempt(run durableRun, code string, err error, finish bool) error {
+func (a *Agent) failOperationAttempt(run durableRun, operationKind, code string, err error, finish bool) error {
 	if a.Session == nil {
 		return err
 	}
 	facts := []map[string]any{{"kind": "record", "record": map[string]any{"type": "stepFailed", "operationId": run.OperationID, "stepId": run.StepID, "attemptId": run.AttemptID, "error": map[string]any{"code": code, "message": err.Error()}}}}
 	if finish {
-		facts = append(facts, map[string]any{"kind": "record", "record": map[string]any{"type": "operationFinished", "operationId": run.OperationID, "operationKind": "run", "outcome": "failed", "error": map[string]any{"code": code, "message": err.Error()}}})
+		facts = append(facts, map[string]any{"kind": "record", "record": map[string]any{"type": "operationFinished", "operationId": run.OperationID, "operationKind": operationKind, "outcome": "failed", "error": map[string]any{"code": code, "message": err.Error()}}})
 	}
 	return errors.Join(err, a.Session.Commit(facts))
+}
+
+func (a *Agent) failAttempt(run durableRun, code string, err error, finish bool) error {
+	return a.failOperationAttempt(run, "run", code, err, finish)
 }
 
 func (a *Agent) settleAssistant(run *durableRun, response ModelResponse, finish bool) (string, error) {
@@ -393,7 +397,7 @@ func (a *Agent) applyRecoveryPlan(plan recoveryPlan) error {
 		return a.Session.Commit([]map[string]any{{"kind": "record", "record": record}})
 	case "startStep":
 		if operation.Kind == "compaction" {
-			return errors.New("Compaction requires the next durable-session phase")
+			return a.recoverCompaction(plan, number(plan["attempt"]))
 		}
 		return a.recoverStep(plan, number(plan["attempt"]))
 	case "startTool":
@@ -428,6 +432,87 @@ func (a *Agent) recoverStep(plan recoveryPlan, attempt int) error {
 	finish := stop == "stop" && len(response.Message.ToolCalls) == 0 && strings.TrimSpace(value(response.Message.Content)) != ""
 	_, err = a.settleAssistant(&run, response, finish)
 	return err
+}
+
+func (a *Agent) compactionSource(operation sessionOperation) ([]sessionMessageFact, []sessionMessageFact, error) {
+	state := a.Session.State()
+	byID := map[string]sessionMessageFact{}
+	for _, item := range state.messageFacts {
+		byID[item.ID] = item
+	}
+	collect := func(ids []string) ([]sessionMessageFact, error) {
+		items := make([]sessionMessageFact, len(ids))
+		for index, id := range ids {
+			item, ok := byID[id]
+			if !ok {
+				return nil, errors.New("compaction source missing")
+			}
+			items[index] = item
+		}
+		return items, nil
+	}
+	compacted, err := collect(operation.compactedEntryIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	retained, err := collect(operation.retainedEntryIDs)
+	return compacted, retained, err
+}
+
+func (a *Agent) executeCompaction(run durableRun) error {
+	state := a.Session.State()
+	_, retained, err := a.compactionSource(state.Operation)
+	if err != nil {
+		return err
+	}
+	retainedCount := len(retained)
+	active := a.Messages[1:]
+	if retainedCount > len(active) {
+		return errors.New("compaction active context mismatch")
+	}
+	source := active[:len(active)-retainedCount]
+	encoded, _ := json.Marshal(source)
+	prompt := []Message{{Role: "system", Content: text("Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps.")}, {Role: "user", Content: text(string(encoded))}}
+	ctx := a.beginOperation(run.OperationID, "compaction", "compact", "")
+	response, requestErr := a.callModel(ctx, prompt, nil)
+	aborted := a.endOperation(ctx)
+	if aborted {
+		return a.reconcileAbort()
+	}
+	if requestErr != nil {
+		return a.failOperationAttempt(run, "compaction", "model_error", requestErr, true)
+	}
+	stop := response.StopReason
+	if stop == "tool_calls" || stop == "function_call" {
+		stop = "toolUse"
+	}
+	summary := value(response.Message.Content)
+	if stop != "stop" || len(response.Message.ToolCalls) != 0 || strings.TrimSpace(summary) == "" {
+		return a.failOperationAttempt(run, "compaction", "model_error", errors.New("Model returned an invalid compaction summary"), true)
+	}
+	retainedTail := make([]any, len(retained))
+	for index, item := range retained {
+		retainedTail[index] = map[string]any{"sourceEntryId": item.ID, "message": item.Message}
+	}
+	if err := a.Session.Commit([]map[string]any{
+		{"kind": "usage", "operationId": run.OperationID, "attemptId": run.AttemptID, "usage": map[string]any{"input": response.Usage.Input, "output": response.Usage.Output, "cacheRead": response.Usage.CacheRead, "cacheWrite": response.Usage.CacheWrite}},
+		{"kind": "entry", "id": state.Operation.ResultEntryID, "entry": map[string]any{"type": "compaction", "operationId": run.OperationID, "summary": summary, "compactedThroughEntryId": state.Operation.compactedEntryIDs[len(state.Operation.compactedEntryIDs)-1], "retainedTail": retainedTail}},
+	}); err != nil {
+		return err
+	}
+	return a.Session.Commit([]map[string]any{{"kind": "record", "record": map[string]any{"type": "operationFinished", "operationId": run.OperationID, "operationKind": "compaction", "outcome": "completed", "finalEntryId": state.Operation.ResultEntryID}}})
+}
+
+func (a *Agent) recoverCompaction(plan recoveryPlan, attempt int) error {
+	state := a.Session.State()
+	run := durableRun{OperationID: state.Operation.OperationID, ContextEntryID: plan["contextThroughEntryId"].(string), Attempt: attempt}
+	if state.Operation.Step != nil {
+		run.StepID = state.Operation.Step.StepID
+	}
+	if err := a.startAttempt(&run, "compaction", attempt); err != nil {
+		return err
+	}
+	return a.executeCompaction(run)
 }
 
 func (a *Agent) recoverTool(plan recoveryPlan) error {

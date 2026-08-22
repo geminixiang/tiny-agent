@@ -292,9 +292,9 @@ func TestSessionResumeIdleProjection(t *testing.T) {
 	}
 }
 
-func TestCompactIsUnavailableUntilDurableCompaction(t *testing.T) {
+func TestCompactRequiresDurableSession(t *testing.T) {
 	agent := newAgent(nil, nil, "")
-	if _, err := agent.compact(); err == nil || !strings.Contains(err.Error(), "next durable-session phase") {
+	if _, err := agent.compact(); err == nil || !strings.Contains(err.Error(), "durable session") {
 		t.Fatalf("compact: %v", err)
 	}
 }
