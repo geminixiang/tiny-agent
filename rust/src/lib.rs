@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod session;
 pub mod session_recovery;
 pub mod session_reducer;
+pub mod session_runtime;
 pub mod terminal;
 
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
