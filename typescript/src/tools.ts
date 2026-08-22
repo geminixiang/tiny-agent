@@ -55,7 +55,7 @@ export type Tool = {
 };
 export type Plugin = {
     name: string;
-    tools: Tool[];
+    tools: readonly Tool[];
 };
 export type ToolEvent = {
     phase: "start" | "end";
@@ -183,7 +183,16 @@ function readLines(text: string, offset = 1, limit = 2_000) {
     return `${selected.join("\n")}${end < lines.length ? `\n\n[Showing lines ${offset}-${end} of ${lines.length}. Use offset=${end + 1} to continue.]` : ""}`;
 }
 
-const readTool: Tool = {
+const trustedReadExecute: Tool["execute"] = async (args, signal) => {
+    if (signal?.aborted) throw Error("Operation aborted");
+    const path = requiredString(args.path, "path"),
+        offset = optionalPositiveInteger(args.offset, "offset"),
+        limit = optionalPositiveInteger(args.limit, "limit");
+    const text = await readFile(pathInRoot(path), { encoding: "utf8", signal });
+    return readLines(text, offset, limit);
+};
+
+const readTool: Tool = Object.freeze({
     name: "read",
     replay: "safe",
     replayKey: "builtin:read:v1",
@@ -198,15 +207,8 @@ const readTool: Tool = {
         },
         required: ["path"],
     },
-    async execute(args, signal) {
-        if (signal?.aborted) throw Error("Operation aborted");
-        const path = requiredString(args.path, "path"),
-            offset = optionalPositiveInteger(args.offset, "offset"),
-            limit = optionalPositiveInteger(args.limit, "limit");
-        const text = await readFile(pathInRoot(path), { encoding: "utf8", signal });
-        return readLines(text, offset, limit);
-    },
-};
+    execute: trustedReadExecute,
+});
 
 const writeTool: Tool = {
     name: "write",
@@ -321,10 +323,17 @@ export function durableToolReplay(tool: Tool) {
     return { replay: "never" as const, replayKey: tool.replayKey ?? `tool:${tool.name}:v1` };
 }
 
-export const builtInTools: Tool[] = [bashTool, readTool, writeTool, editTool];
-export const builtInPlugins: Plugin[] = builtInTools.map((tool) => ({ name: tool.name, tools: [tool] }));
+export function executeDurableTool(tool: Tool, args: ToolArgs, signal?: AbortSignal) {
+    if (tool === readTool) return trustedReadExecute(args, signal);
+    return tool.execute(args, signal);
+}
 
-export function toolDefinitions(tools: Tool[]) {
+export const builtInTools: readonly Tool[] = Object.freeze([bashTool, readTool, writeTool, editTool]);
+export const builtInPlugins: readonly Plugin[] = Object.freeze(
+    builtInTools.map((tool) => Object.freeze({ name: tool.name, tools: Object.freeze([tool]) })),
+);
+
+export function toolDefinitions(tools: readonly Tool[]) {
     return tools.map(({ name, description, parameters }) => ({
         type: "function",
         function: { name, description, parameters },
@@ -334,5 +343,5 @@ export function toolDefinitions(tools: Tool[]) {
 export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal) {
     const tool = builtInTools.find((candidate) => candidate.name === name);
     if (!tool) throw Error(`unknown tool: ${name}`);
-    return tool.execute(args, signal);
+    return executeDurableTool(tool, args, signal);
 }

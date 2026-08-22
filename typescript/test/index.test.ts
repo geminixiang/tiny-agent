@@ -367,6 +367,79 @@ test("resumes an open model attempt once as attempt 2 and is idempotent", async 
     await session.close();
 });
 
+test("persists malformed recovery-attempt usage atomically and restores its ledger", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const cases = [
+        {
+            name: "missing assistant",
+            response: { choices: [{ finish_reason: "stop" }], usage: { prompt_tokens: 19, completion_tokens: 6 } },
+            error: /no assistant message/,
+            usage: { input: 19, output: 6, cacheRead: 0, cacheWrite: 0 },
+        },
+        {
+            name: "invalid finish reason",
+            response: {
+                choices: [{ finish_reason: "content_filter", message: { role: "assistant", content: "blocked" } }],
+                usage: { prompt_tokens: 23, completion_tokens: 2 },
+            },
+            error: /Provider finish_reason: content_filter/,
+            usage: { input: 23, output: 2, cacheRead: 0, cacheWrite: 0 },
+        },
+    ];
+
+    for (const item of cases) {
+        const session = await openStore();
+        const accepted = runFacts(session, item.name);
+        await session.append(accepted.facts);
+        const agent = new Agent(
+            [],
+            (async () => new Response(JSON.stringify(item.response), { status: 200 })) as typeof fetch,
+            session,
+        );
+        await session.append({
+            kind: "record",
+            record: {
+                type: "stepAttempt",
+                operationId: accepted.operationId,
+                stepId: session.allocateId(),
+                attemptId: session.allocateId(),
+                stepKind: "assistant",
+                attempt: 1,
+                contextThroughEntryId: accepted.inputEntryId,
+                ...buildConfiguration(agent.systemPrompt, agent.tools),
+            },
+        });
+
+        await assert.rejects(() => agent.resumeSession(), item.error);
+
+        const persisted = await facts(session);
+        const usageFacts = persisted.filter((fact) => fact.kind === "usage");
+        assert.equal(usageFacts.length, 1);
+        assert.deepEqual(usageFacts[0].usage, item.usage);
+        const lines = (await readFile(session.path, "utf8")).trimEnd().split("\n").slice(1);
+        const failedTransaction = lines
+            .map((line) => JSON.parse(line))
+            .find(
+                (transaction) =>
+                    Array.isArray(transaction) && transaction.some((fact) => fact.record?.type === "stepFailed"),
+            );
+        assert.deepEqual(failedTransaction.map(factType), ["usage", "stepFailed"]);
+        assert.deepEqual((await session.load()).operation, { kind: "idle" });
+
+        await session.close();
+        const reopened = await SessionStore.open(session.id, dir);
+        try {
+            const restored = new Agent([], fetch, reopened);
+            await restored.resumeSession();
+            assert.deepEqual(restored.usage, { ...item.usage, cacheHitRate: 0 });
+            assert.deepEqual((await reopened.load()).usage, item.usage);
+            assert.equal((await facts(reopened)).filter((fact) => fact.kind === "usage").length, 1);
+        } finally {
+            await reopened.close();
+        }
+    }
+});
+
 test("an open attempt 2 exhausts into a canonical failed idle state without calling the provider", async () => {
     const session = await openStore(new Date("2026-08-06T00:30:00Z"));
     try {
@@ -476,13 +549,24 @@ test("blocks recovery after an environment change without changing session bytes
     }
 });
 
-test("replays the exact builtin read tool once and repeated resume is a no-op", async () => {
+test("replays the immutable builtin read implementation once and repeated resume is a no-op", async () => {
     process.env.OPENROUTER_API_KEY = "test";
     const session = await openStore(new Date("2026-08-06T02:00:00Z"));
     try {
         await writeFile("replay.txt", "replayed");
+        let injectedExecutions = 0;
         let requests = 0;
         const readTool = builtInTools.find((tool) => tool.name === "read")!;
+        const injectedExecute = async () => {
+            injectedExecutions++;
+            return "injected";
+        };
+        assert.equal(Reflect.set(readTool, "execute", injectedExecute), false);
+        assert.throws(() => Object.defineProperty(readTool, "execute", { value: injectedExecute }), TypeError);
+        assert.equal(
+            Reflect.set(builtInTools, builtInTools.indexOf(readTool), { ...readTool, execute: injectedExecute }),
+            false,
+        );
         const agent = new Agent(
             [],
             (async () => {
@@ -523,6 +607,7 @@ test("replays the exact builtin read tool once and repeated resume is a no-op", 
         await agent.resumeSession();
 
         assert.equal(requests, 1);
+        assert.equal(injectedExecutions, 0);
         assert.deepEqual(await readFile(session.path), afterFirstResume);
         assert.equal((await session.load()).operation.kind, "idle");
         const replayed = (await facts(session)).find((fact) => fact.id === resultEntryId);

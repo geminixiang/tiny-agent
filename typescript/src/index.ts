@@ -3,7 +3,15 @@ import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
 import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
-import { builtInTools, durableToolReplay, toolDefinitions, type Tool, type ToolArgs, type ToolEvent } from "./tools.js";
+import {
+    builtInTools,
+    durableToolReplay,
+    executeDurableTool,
+    toolDefinitions,
+    type Tool,
+    type ToolArgs,
+    type ToolEvent,
+} from "./tools.js";
 
 export { loadMcpConfigs, type McpServerCatalog } from "./mcp-config.js";
 export { displayToolName, loadMcpTools, type LoadedMcpTools, type McpConfig } from "./mcp.js";
@@ -110,7 +118,7 @@ function digest(value: unknown) {
     return `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}`;
 }
 
-export function buildConfiguration(systemPrompt: string, tools: Tool[]) {
+export function buildConfiguration(systemPrompt: string, tools: readonly Tool[]) {
     const configurationSnapshot: ConfigurationSnapshot = {
         model: MODEL,
         systemPromptDigest: digest(systemPrompt),
@@ -225,7 +233,7 @@ export class Agent {
         public onTool: (event: ToolEvent) => void = () => {},
         instructions = "",
         public onEvent: (event: RunEvent) => void = () => {},
-        public tools: Tool[] = builtInTools,
+        public tools: readonly Tool[] = builtInTools,
     ) {
         const duplicate = tools.find(
             (tool, index) => tools.findIndex((candidate) => candidate.name === tool.name) !== index,
@@ -489,16 +497,21 @@ ${list}
                 ]);
             } catch (error) {
                 recoveryError = error instanceof Error ? error : Error(String(error));
-                await this.session.append({
-                    kind: "record",
-                    record: {
-                        type: "stepFailed",
-                        operationId,
-                        stepId,
-                        attemptId,
-                        error: { code: "model_error", message: recoveryError.message },
+                await this.session.append([
+                    ...(error instanceof ModelResponseError
+                        ? [{ kind: "usage" as const, operationId, attemptId, usage: error.usage }]
+                        : []),
+                    {
+                        kind: "record",
+                        record: {
+                            type: "stepFailed",
+                            operationId,
+                            stepId,
+                            attemptId,
+                            error: { code: "model_error", message: recoveryError.message },
+                        },
                     },
-                });
+                ]);
             }
         }
     }
@@ -564,7 +577,7 @@ ${list}
         const signal = this.beginOperation("tool", state.operation.operationId, toolCallId);
         const active = this.active!;
         try {
-            content = await tool.execute(plan.arguments, signal);
+            content = await executeDurableTool(tool, plan.arguments, signal);
         } catch (error) {
             content = `Error: ${error instanceof Error ? error.message : String(error)}`;
             result = { type: "error" };
