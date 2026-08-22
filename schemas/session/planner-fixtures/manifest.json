@@ -1,0 +1,80 @@
+{
+    "version": 1,
+    "fixtures": [
+        {
+            "name": "start-run-step",
+            "input": "start-run-step.json",
+            "expected": "start-run-step.expected.json"
+        },
+        {
+            "name": "retry-attempt",
+            "input": "retry-attempt.json",
+            "expected": "retry-attempt.expected.json"
+        },
+        {
+            "name": "configuration-changed",
+            "input": "configuration-changed.json",
+            "expected": "configuration-changed.expected.json"
+        },
+        {
+            "name": "replay-safe-tool",
+            "input": "replay-safe-tool.json",
+            "expected": "replay-safe-tool.expected.json"
+        },
+        {
+            "name": "environment-changed",
+            "input": "environment-changed.json",
+            "expected": "environment-changed.expected.json"
+        },
+        {
+            "name": "replay-declaration-changed",
+            "input": "replay-declaration-changed.json",
+            "expected": "replay-declaration-changed.expected.json"
+        },
+        {
+            "name": "abort-close-attempt",
+            "input": "abort-close-attempt.json",
+            "expected": "abort-close-attempt.expected.json"
+        },
+        {
+            "name": "finish-idle",
+            "input": "finish-idle.json",
+            "expected": "finish-idle.expected.json"
+        },
+        {
+            "name": "attempts-exhausted",
+            "input": "attempts-exhausted.json",
+            "expected": "attempts-exhausted.expected.json"
+        },
+        {
+            "name": "unknown-tool",
+            "input": "unknown-tool.json",
+            "expected": "unknown-tool.expected.json"
+        },
+        {
+            "name": "invalid-arguments",
+            "input": "invalid-arguments.json",
+            "expected": "invalid-arguments.expected.json"
+        },
+        {
+            "name": "truncated-tool-call",
+            "input": "truncated-tool-call.json",
+            "expected": "truncated-tool-call.expected.json"
+        },
+        {
+            "name": "interrupted-never-tool",
+            "input": "interrupted-never-tool.json",
+            "expected": "interrupted-never-tool.expected.json"
+        },
+        {
+            "name": "start-tool",
+            "input": "start-tool.json",
+            "expected": "start-tool.expected.json"
+        },
+        {
+            "name": "abort-pending-tool",
+            "input": "abort-pending-tool.json",
+            "expected": "abort-pending-tool.expected.json"
+        }
+    ]
+}

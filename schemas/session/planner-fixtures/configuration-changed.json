@@ -1,0 +1,15 @@
+{
+    "fixture": "open-attempt.jsonl",
+    "current": {
+        "configurationDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "environmentIdentity": "fixture",
+        "tools": [
+            {
+                "name": "read",
+                "definitionDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "replay": "safe",
+                "replayKey": "builtin:read:v1"
+            }
+        ]
+    }
+}

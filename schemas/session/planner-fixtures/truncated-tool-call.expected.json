@@ -1,0 +1,11 @@
+{
+    "type": "appendSynthetic",
+    "results": [
+        {
+            "toolCallId": "call_1",
+            "toolName": "read",
+            "reason": "truncated",
+            "content": "Error: Tool call arguments were truncated by the model token limit; the tool was not executed."
+        }
+    ]
+}

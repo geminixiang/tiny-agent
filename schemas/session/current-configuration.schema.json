@@ -1,0 +1,26 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://tiny-agent.local/schemas/session/current-configuration.schema.json",
+    "$defs": { "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } },
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["configurationDigest", "environmentIdentity", "tools"],
+    "properties": {
+        "configurationDigest": { "$ref": "#/$defs/digest" },
+        "environmentIdentity": { "type": "string", "minLength": 1 },
+        "tools": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "definitionDigest", "replay", "replayKey"],
+                "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "definitionDigest": { "$ref": "#/$defs/digest" },
+                    "replay": { "enum": ["safe", "never"] },
+                    "replayKey": { "type": "string", "minLength": 1 }
+                }
+            }
+        }
+    }
+}

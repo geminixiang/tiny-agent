@@ -1,0 +1,13 @@
+{
+    "type": "appendSynthetic",
+    "results": [
+        {
+            "toolCallId": "call_1",
+            "toolName": "read",
+            "toolStartedId": "018f0000-0000-7000-8000-000000000009",
+            "resultEntryId": "018f0000-0000-7000-8000-00000000000a",
+            "reason": "interrupted",
+            "content": "Operation interrupted after execution status became unknown; the tool was not replayed."
+        }
+    ]
+}

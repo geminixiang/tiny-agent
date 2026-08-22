@@ -1,0 +1,7 @@
+{
+    "type": "closeAttempt",
+    "error": {
+        "code": "aborted",
+        "message": "Operation aborted"
+    }
+}

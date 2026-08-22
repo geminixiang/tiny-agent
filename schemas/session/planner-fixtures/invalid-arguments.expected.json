@@ -1,0 +1,11 @@
+{
+    "type": "appendSynthetic",
+    "results": [
+        {
+            "toolCallId": "call_1",
+            "toolName": "read",
+            "reason": "invalidArguments",
+            "content": "Error: Tool arguments were invalid; the tool was not executed."
+        }
+    ]
+}

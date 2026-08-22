@@ -1,0 +1,11 @@
+{
+    "type": "appendSynthetic",
+    "results": [
+        {
+            "toolCallId": "call_1",
+            "toolName": "missing",
+            "reason": "unknownTool",
+            "content": "Error: Unknown tool; the tool was not executed."
+        }
+    ]
+}

@@ -1,0 +1,7 @@
+{
+    "type": "startStep",
+    "stepKind": "assistant",
+    "attempt": 2,
+    "stepId": "018f0000-0000-7000-8000-000000000005",
+    "contextThroughEntryId": "018f0000-0000-7000-8000-000000000002"
+}

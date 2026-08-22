@@ -1,0 +1,62 @@
+{
+    "ok": true,
+    "state": {
+        "header": {
+            "id": "018f0000-0000-7000-8000-000000000001",
+            "createdAt": 1710000000000,
+            "cwd": "/workspace",
+            "provider": "openrouter",
+            "model": "test/model",
+            "environmentIdentity": "fixture"
+        },
+        "transcript": [
+            {
+                "role": "user",
+                "content": "inspect"
+            }
+        ],
+        "activeContext": [
+            {
+                "role": "user",
+                "content": "inspect"
+            }
+        ],
+        "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+        },
+        "operation": {
+            "kind": "run",
+            "operationId": "018f0000-0000-7000-8000-000000000004",
+            "inputEntryId": "018f0000-0000-7000-8000-000000000002",
+            "toolCalls": [],
+            "abortRequested": false,
+            "step": {
+                "operationId": "018f0000-0000-7000-8000-000000000004",
+                "stepId": "018f0000-0000-7000-8000-000000000005",
+                "attemptId": "018f0000-0000-7000-8000-000000000006",
+                "attempt": 1,
+                "stepKind": "assistant",
+                "status": "attempting",
+                "contextThroughEntryId": "018f0000-0000-7000-8000-000000000002",
+                "configurationSnapshot": {
+                    "model": "test/model",
+                    "systemPromptDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "tools": [
+                        {
+                            "name": "read",
+                            "definitionDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        }
+                    ],
+                    "adapterIdentity": "openrouter:chat-completions:v1",
+                    "routingIdentity": "openrouter:test/model",
+                    "outputOptionsDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "configurationDigest": "sha256:83d5da8892d877c5f94a6ff60ea8babcd1138107dcb80ed8f747372346bb5f75"
+            }
+        },
+        "repairedLength": 1546
+    }
+}

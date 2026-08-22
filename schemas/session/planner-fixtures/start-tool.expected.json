@@ -1,0 +1,8 @@
+{
+    "type": "startTool",
+    "mode": "start",
+    "assistantEntryId": "018f0000-0000-7000-8000-000000000008",
+    "toolIndex": 0,
+    "toolName": "missing",
+    "arguments": {}
+}

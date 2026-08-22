@@ -1,126 +1,1023 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://tiny-agent.local/schemas/session.schema.json",
-    "title": "tiny-agent JSONL session record",
-    "description": "Each line in .tiny-agent/sessions/*.jsonl MUST independently validate against this schema. The first line MUST be a session record; remaining lines are chronological message, compaction, or interruption records.",
-    "oneOf": [
-        { "$ref": "#/$defs/session" },
-        { "$ref": "#/$defs/messageRecord" },
-        { "$ref": "#/$defs/compaction" },
-        { "$ref": "#/$defs/interruption" }
-    ],
+    "title": "tiny-agent session JSONL values",
+    "description": "The first JSONL line validates as header. Every later line validates as transaction. Cross-line sequence, identity, reference, transition, and transcript invariants are enforced by the reducer.",
     "$defs": {
-        "timestamp": { "type": "string", "format": "date-time" },
-        "usage": {
+        "uuid7": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "safeInteger": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+        },
+        "positiveSafeInteger": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+        },
+        "digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "header": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["input", "output", "cacheRead", "cacheWrite"],
+            "required": [
+                "kind",
+                "version",
+                "id",
+                "createdAt",
+                "cwd",
+                "provider",
+                "model",
+                "environmentIdentity"
+            ],
             "properties": {
-                "input": { "type": "integer", "minimum": 0 },
-                "output": { "type": "integer", "minimum": 0 },
-                "cacheRead": { "type": "integer", "minimum": 0 },
-                "cacheWrite": { "type": "integer", "minimum": 0 }
+                "kind": {
+                    "const": "header"
+                },
+                "version": {
+                    "const": 2
+                },
+                "id": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "createdAt": {
+                    "$ref": "#/$defs/safeInteger"
+                },
+                "cwd": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "provider": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "model": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "environmentIdentity": {
+                    "type": "string",
+                    "minLength": 1
+                }
             }
         },
         "toolCall": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["id", "type", "function"],
+            "required": [
+                "id",
+                "type",
+                "function"
+            ],
             "properties": {
-                "id": { "type": "string" },
-                "type": { "const": "function" },
+                "id": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "type": {
+                    "const": "function"
+                },
                 "function": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["name", "arguments"],
+                    "required": [
+                        "name",
+                        "arguments"
+                    ],
                     "properties": {
-                        "name": { "type": "string", "minLength": 1 },
-                        "arguments": {
+                        "name": {
                             "type": "string",
-                            "description": "JSON-encoded tool arguments as returned by OpenRouter."
+                            "minLength": 1
+                        },
+                        "arguments": {
+                            "type": "string"
                         }
                     }
                 }
             }
         },
-        "message": {
+        "userMessage": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["role", "content"],
+            "required": [
+                "role",
+                "content"
+            ],
             "properties": {
-                "role": { "enum": ["user", "assistant", "tool"] },
-                "content": { "type": ["string", "null"] },
-                "tool_call_id": { "type": "string" },
-                "tool_calls": { "type": "array", "items": { "$ref": "#/$defs/toolCall" } }
-            },
-            "allOf": [
+                "role": {
+                    "const": "user"
+                },
+                "content": {
+                    "type": "string",
+                    "minLength": 1
+                }
+            }
+        },
+        "assistantMessage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "role",
+                "content"
+            ],
+            "properties": {
+                "role": {
+                    "const": "assistant"
+                },
+                "content": {
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "tool_calls": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "$ref": "#/$defs/toolCall"
+                    }
+                }
+            }
+        },
+        "toolMessage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "role",
+                "content",
+                "tool_call_id"
+            ],
+            "properties": {
+                "role": {
+                    "const": "tool"
+                },
+                "content": {
+                    "type": "string"
+                },
+                "tool_call_id": {
+                    "type": "string",
+                    "minLength": 1
+                }
+            }
+        },
+        "message": {
+            "oneOf": [
                 {
-                    "if": { "properties": { "role": { "const": "tool" } }, "required": ["role"] },
-                    "then": { "required": ["tool_call_id"] }
+                    "$ref": "#/$defs/userMessage"
+                },
+                {
+                    "$ref": "#/$defs/assistantMessage"
+                },
+                {
+                    "$ref": "#/$defs/toolMessage"
                 }
             ]
         },
-        "session": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["type", "version", "id", "createdAt", "timestamp", "cwd", "provider", "model"],
-            "properties": {
-                "type": { "const": "session" },
-                "version": { "const": 1 },
-                "id": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        "messageEntry": {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "type",
+                        "message"
+                    ],
+                    "properties": {
+                        "type": {
+                            "const": "message"
+                        },
+                        "message": {
+                            "$ref": "#/$defs/userMessage"
+                        }
+                    }
                 },
-                "createdAt": { "$ref": "#/$defs/timestamp" },
-                "timestamp": { "$ref": "#/$defs/timestamp" },
-                "cwd": { "type": "string" },
-                "provider": { "const": "openrouter" },
-                "model": { "type": "string" }
-            }
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "type",
+                        "stepId",
+                        "attemptId",
+                        "stopReason",
+                        "message"
+                    ],
+                    "properties": {
+                        "type": {
+                            "const": "message"
+                        },
+                        "stepId": {
+                            "$ref": "#/$defs/uuid7"
+                        },
+                        "attemptId": {
+                            "$ref": "#/$defs/uuid7"
+                        },
+                        "stopReason": {
+                            "enum": [
+                                "stop",
+                                "toolUse",
+                                "length"
+                            ]
+                        },
+                        "message": {
+                            "$ref": "#/$defs/assistantMessage"
+                        }
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "type",
+                        "stepId",
+                        "message",
+                        "toolName",
+                        "toolStartedId",
+                        "result"
+                    ],
+                    "properties": {
+                        "type": {
+                            "const": "message"
+                        },
+                        "stepId": {
+                            "$ref": "#/$defs/uuid7"
+                        },
+                        "message": {
+                            "$ref": "#/$defs/toolMessage"
+                        },
+                        "toolName": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "toolStartedId": {
+                            "$ref": "#/$defs/uuid7"
+                        },
+                        "result": {
+                            "$ref": "#/$defs/toolResult"
+                        }
+                    }
+                }
+            ]
         },
-        "messageRecord": {
+        "retainedMessage": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["type", "timestamp", "message"],
+            "required": [
+                "sourceEntryId",
+                "message"
+            ],
             "properties": {
-                "type": { "const": "message" },
-                "timestamp": { "$ref": "#/$defs/timestamp" },
-                "message": { "$ref": "#/$defs/message" },
-                "usage": { "$ref": "#/$defs/usage" },
-                "toolName": { "type": "string", "minLength": 1 }
+                "sourceEntryId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "message": {
+                    "$ref": "#/$defs/message"
+                }
             }
         },
-        "compaction": {
+        "compactionEntry": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["type", "timestamp", "summary", "compactedMessages", "keptMessages", "usage"],
+            "required": [
+                "type",
+                "operationId",
+                "summary",
+                "compactedThroughEntryId",
+                "retainedTail"
+            ],
             "properties": {
-                "type": { "const": "compaction" },
-                "timestamp": { "$ref": "#/$defs/timestamp" },
-                "summary": { "type": ["string", "null"] },
-                "compactedMessages": { "type": "integer", "minimum": 1 },
-                "keptMessages": { "type": "integer", "minimum": 0 },
-                "usage": { "$ref": "#/$defs/usage" }
+                "type": {
+                    "const": "compaction"
+                },
+                "operationId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "summary": {
+                    "type": "string"
+                },
+                "compactedThroughEntryId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "retainedTail": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/retainedMessage"
+                    }
+                }
             }
         },
-        "interruption": {
+        "configurationTool": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["type", "timestamp", "phase", "reason"],
+            "required": [
+                "name",
+                "definitionDigest"
+            ],
             "properties": {
-                "type": { "const": "interruption" },
-                "timestamp": { "$ref": "#/$defs/timestamp" },
-                "phase": { "enum": ["model", "tool", "compact"] },
-                "reason": { "const": "escape" },
-                "toolCallId": { "type": "string" }
+                "name": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "definitionDigest": {
+                    "$ref": "#/$defs/digest"
+                }
+            }
+        },
+        "configurationSnapshot": {
+            "type": "object",
+            "description": "Closed canonical domain: objects, arrays, and Unicode scalar strings only. Numbers, booleans, and null are forbidden by this shape.",
+            "additionalProperties": false,
+            "required": [
+                "model",
+                "systemPromptDigest",
+                "tools",
+                "adapterIdentity",
+                "routingIdentity",
+                "outputOptionsDigest"
+            ],
+            "properties": {
+                "model": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "systemPromptDigest": {
+                    "$ref": "#/$defs/digest"
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/configurationTool"
+                    }
+                },
+                "adapterIdentity": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "routingIdentity": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "outputOptionsDigest": {
+                    "$ref": "#/$defs/digest"
+                }
+            }
+        },
+        "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "code",
+                "message"
+            ],
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "message": {
+                    "type": "string",
+                    "minLength": 1
+                }
+            }
+        },
+        "runStarted": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "type",
+                "operationId",
+                "operationKind",
+                "inputEntryId"
+            ],
+            "properties": {
+                "type": {
+                    "const": "runStarted"
+                },
+                "operationId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "operationKind": {
+                    "const": "run"
+                },
+                "inputEntryId": {
+                    "$ref": "#/$defs/uuid7"
+                }
+            }
+        },
+        "compactionStarted": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "type",
+                "operationId",
+                "operationKind",
+                "inputThroughEntryId",
+                "resultEntryId",
+                "compactedEntryIds",
+                "retainedEntryIds",
+                "sourceDigest"
+            ],
+            "properties": {
+                "type": {
+                    "const": "compactionStarted"
+                },
+                "operationId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "operationKind": {
+                    "const": "compaction"
+                },
+                "inputThroughEntryId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "resultEntryId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "compactedEntryIds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "$ref": "#/$defs/uuid7"
+                    }
+                },
+                "retainedEntryIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/uuid7"
+                    }
+                },
+                "sourceDigest": {
+                    "$ref": "#/$defs/digest"
+                }
+            }
+        },
+        "stepAttempt": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "type",
+                "operationId",
+                "stepId",
+                "attemptId",
+                "stepKind",
+                "attempt",
+                "contextThroughEntryId",
+                "configurationSnapshot",
+                "configurationDigest"
+            ],
+            "properties": {
+                "type": {
+                    "const": "stepAttempt"
+                },
+                "operationId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "stepId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "attemptId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "stepKind": {
+                    "enum": [
+                        "assistant",
+                        "compaction"
+                    ]
+                },
+                "attempt": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2
+                },
+                "contextThroughEntryId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "configurationSnapshot": {
+                    "$ref": "#/$defs/configurationSnapshot"
+                },
+                "configurationDigest": {
+                    "$ref": "#/$defs/digest"
+                }
+            }
+        },
+        "stepFailed": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "type",
+                "operationId",
+                "stepId",
+                "attemptId",
+                "error"
+            ],
+            "properties": {
+                "type": {
+                    "const": "stepFailed"
+                },
+                "operationId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "stepId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "attemptId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "error": {
+                    "$ref": "#/$defs/error"
+                }
+            }
+        },
+        "toolStarted": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "type",
+                "operationId",
+                "stepId",
+                "assistantEntryId",
+                "toolIndex",
+                "toolCallId",
+                "toolName",
+                "arguments",
+                "replay",
+                "replayKey",
+                "resultEntryId",
+                "environmentIdentity"
+            ],
+            "properties": {
+                "type": {
+                    "const": "toolStarted"
+                },
+                "operationId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "stepId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "assistantEntryId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "toolIndex": {
+                    "$ref": "#/$defs/safeInteger"
+                },
+                "toolCallId": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "toolName": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "arguments": {
+                    "type": "object"
+                },
+                "replay": {
+                    "enum": [
+                        "safe",
+                        "never"
+                    ]
+                },
+                "replayKey": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "resultEntryId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "environmentIdentity": {
+                    "type": "string",
+                    "minLength": 1
+                }
+            }
+        },
+        "abortRequested": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "type",
+                "operationId",
+                "operationKind",
+                "phase",
+                "reason"
+            ],
+            "properties": {
+                "type": {
+                    "const": "abortRequested"
+                },
+                "operationId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "operationKind": {
+                    "enum": [
+                        "run",
+                        "compaction"
+                    ]
+                },
+                "phase": {
+                    "enum": [
+                        "model",
+                        "tool",
+                        "compact"
+                    ]
+                },
+                "toolCallId": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "reason": {
+                    "const": "escape"
+                }
             },
             "allOf": [
                 {
-                    "if": { "properties": { "phase": { "const": "tool" } }, "required": ["phase"] },
-                    "then": { "required": ["toolCallId"] }
+                    "if": {
+                        "properties": {
+                            "phase": {
+                                "const": "tool"
+                            }
+                        }
+                    },
+                    "then": {
+                        "required": [
+                            "toolCallId"
+                        ]
+                    }
+                }
+            ]
+        },
+        "operationFinished": {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {
+                            "const": "operationFinished"
+                        },
+                        "operationId": {
+                            "$ref": "#/$defs/uuid7"
+                        },
+                        "operationKind": {
+                            "const": "run"
+                        },
+                        "outcome": {
+                            "const": "completed"
+                        },
+                        "completion": {
+                            "enum": [
+                                "normal",
+                                "truncated"
+                            ]
+                        },
+                        "finalEntryId": {
+                            "$ref": "#/$defs/uuid7"
+                        }
+                    },
+                    "required": [
+                        "type",
+                        "operationId",
+                        "operationKind",
+                        "outcome",
+                        "completion",
+                        "finalEntryId"
+                    ]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {
+                            "const": "operationFinished"
+                        },
+                        "operationId": {
+                            "$ref": "#/$defs/uuid7"
+                        },
+                        "operationKind": {
+                            "const": "compaction"
+                        },
+                        "outcome": {
+                            "const": "completed"
+                        },
+                        "finalEntryId": {
+                            "$ref": "#/$defs/uuid7"
+                        }
+                    },
+                    "required": [
+                        "type",
+                        "operationId",
+                        "operationKind",
+                        "outcome",
+                        "finalEntryId"
+                    ]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {
+                            "const": "operationFinished"
+                        },
+                        "operationId": {
+                            "$ref": "#/$defs/uuid7"
+                        },
+                        "operationKind": {
+                            "enum": [
+                                "run",
+                                "compaction"
+                            ]
+                        },
+                        "outcome": {
+                            "const": "aborted"
+                        }
+                    },
+                    "required": [
+                        "type",
+                        "operationId",
+                        "operationKind",
+                        "outcome"
+                    ]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {
+                            "const": "operationFinished"
+                        },
+                        "operationId": {
+                            "$ref": "#/$defs/uuid7"
+                        },
+                        "operationKind": {
+                            "enum": [
+                                "run",
+                                "compaction"
+                            ]
+                        },
+                        "outcome": {
+                            "const": "failed"
+                        },
+                        "error": {
+                            "$ref": "#/$defs/error"
+                        }
+                    },
+                    "required": [
+                        "type",
+                        "operationId",
+                        "operationKind",
+                        "outcome",
+                        "error"
+                    ]
+                }
+            ]
+        },
+        "record": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/runStarted"
+                },
+                {
+                    "$ref": "#/$defs/compactionStarted"
+                },
+                {
+                    "$ref": "#/$defs/stepAttempt"
+                },
+                {
+                    "$ref": "#/$defs/stepFailed"
+                },
+                {
+                    "$ref": "#/$defs/toolStarted"
+                },
+                {
+                    "$ref": "#/$defs/abortRequested"
+                },
+                {
+                    "$ref": "#/$defs/operationFinished"
+                }
+            ]
+        },
+        "usageCounters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "input",
+                "output",
+                "cacheRead",
+                "cacheWrite"
+            ],
+            "properties": {
+                "input": {
+                    "$ref": "#/$defs/safeInteger"
+                },
+                "output": {
+                    "$ref": "#/$defs/safeInteger"
+                },
+                "cacheRead": {
+                    "$ref": "#/$defs/safeInteger"
+                },
+                "cacheWrite": {
+                    "$ref": "#/$defs/safeInteger"
+                }
+            }
+        },
+        "entryFact": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "kind",
+                "seq",
+                "id",
+                "timestamp",
+                "entry"
+            ],
+            "properties": {
+                "kind": {
+                    "const": "entry"
+                },
+                "seq": {
+                    "$ref": "#/$defs/positiveSafeInteger"
+                },
+                "id": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "timestamp": {
+                    "$ref": "#/$defs/safeInteger"
+                },
+                "entry": {
+                    "oneOf": [
+                        {
+                            "$ref": "#/$defs/messageEntry"
+                        },
+                        {
+                            "$ref": "#/$defs/compactionEntry"
+                        }
+                    ]
+                }
+            }
+        },
+        "recordFact": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "kind",
+                "seq",
+                "id",
+                "timestamp",
+                "record"
+            ],
+            "properties": {
+                "kind": {
+                    "const": "record"
+                },
+                "seq": {
+                    "$ref": "#/$defs/positiveSafeInteger"
+                },
+                "id": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "timestamp": {
+                    "$ref": "#/$defs/safeInteger"
+                },
+                "record": {
+                    "$ref": "#/$defs/record"
+                }
+            }
+        },
+        "usageFact": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "kind",
+                "seq",
+                "id",
+                "timestamp",
+                "operationId",
+                "usage"
+            ],
+            "properties": {
+                "kind": {
+                    "const": "usage"
+                },
+                "seq": {
+                    "$ref": "#/$defs/positiveSafeInteger"
+                },
+                "id": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "timestamp": {
+                    "$ref": "#/$defs/safeInteger"
+                },
+                "operationId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "attemptId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "toolStartedId": {
+                    "$ref": "#/$defs/uuid7"
+                },
+                "usage": {
+                    "$ref": "#/$defs/usageCounters"
+                }
+            }
+        },
+        "fact": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/entryFact"
+                },
+                {
+                    "$ref": "#/$defs/recordFact"
+                },
+                {
+                    "$ref": "#/$defs/usageFact"
+                }
+            ]
+        },
+        "transaction": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/fact"
+                },
+                {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "$ref": "#/$defs/fact"
+                    }
+                }
+            ]
+        },
+        "successResult": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "type"
+            ],
+            "properties": {
+                "type": {
+                    "const": "success"
+                }
+            }
+        },
+        "errorResult": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "type"
+            ],
+            "properties": {
+                "type": {
+                    "const": "error"
+                }
+            }
+        },
+        "syntheticResult": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "type",
+                "reason"
+            ],
+            "properties": {
+                "type": {
+                    "const": "synthetic"
+                },
+                "reason": {
+                    "enum": [
+                        "invalidArguments",
+                        "unknownTool",
+                        "truncated",
+                        "aborted",
+                        "interrupted"
+                    ]
+                }
+            }
+        },
+        "toolResult": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/successResult"
+                },
+                {
+                    "$ref": "#/$defs/errorResult"
+                },
+                {
+                    "$ref": "#/$defs/syntheticResult"
                 }
             ]
         }
-    }
+    },
+    "oneOf": [
+        {
+            "$ref": "#/$defs/header"
+        },
+        {
+            "$ref": "#/$defs/transaction"
+        }
+    ]
 }

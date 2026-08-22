@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 pub mod mcp;
-pub mod session_v2;
+pub mod session_reducer;
 pub mod terminal;
 
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";

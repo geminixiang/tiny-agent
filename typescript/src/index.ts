@@ -6,11 +6,13 @@ import { builtInTools, toolDefinitions, type Tool, type ToolArgs, type ToolEvent
 export { loadMcpConfigs, type McpServerCatalog } from "./mcp-config.js";
 export { displayToolName, loadMcpTools, type LoadedMcpTools, type McpConfig } from "./mcp.js";
 export {
-    reduceSessionV2,
-    SessionV2Corruption,
-    type SessionV2CorruptionCode,
-    type SessionV2State,
-} from "./session-v2.js";
+    planRecovery,
+    SYNTHETIC_CONTENT,
+    type CurrentConfiguration,
+    type CurrentTool,
+    type RecoveryPlan,
+} from "./session-recovery.js";
+export { reduceSession, SessionCorruption, type SessionCorruptionCode, type SessionState } from "./session-reducer.js";
 export {
     builtInPlugins,
     builtInTools,
