@@ -14,7 +14,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 pub use crate::session::Session;
-use crate::session_runtime::project_idle;
+use crate::session_runtime::{
+    RuntimeConfiguration, RuntimeTool, assistant_entry, operation_finished, project_idle,
+    runtime_configuration, start_run, step_attempt, step_failed, usage,
+};
 
 pub mod mcp;
 pub mod session;
@@ -411,15 +414,156 @@ fn api_key() -> String {
 }
 
 impl Agent {
-    fn session_append(
-        &self,
-        _map: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), String> {
+    fn record_interruption(&self, _phase: &str, _tool_call_id: &str) -> Result<(), String> {
         Ok(())
     }
 
-    fn record_interruption(&self, _phase: &str, _tool_call_id: &str) -> Result<(), String> {
-        Ok(())
+    fn runtime_configuration(&self) -> RuntimeConfiguration {
+        let mut definitions =
+            serde_json::from_str::<Vec<serde_json::Value>>(tool_definitions_json())
+                .unwrap_or_default();
+        definitions.retain(|definition| {
+            definition
+                .pointer("/function/name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| self.local_tools.iter().any(|selected| selected == name))
+        });
+        definitions.extend(self.mcp_tools.iter().map(|tool| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+            })
+        }));
+        let tools = definitions
+            .into_iter()
+            .map(|definition| RuntimeTool {
+                name: definition
+                    .pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                definition,
+                replay: "never".into(),
+                replay_key: String::new(),
+            })
+            .map(|mut tool| {
+                if tool.name == "read" {
+                    tool.replay = "safe".into();
+                    tool.replay_key = "builtin:read:v1".into();
+                }
+                tool
+            })
+            .collect();
+        runtime_configuration(
+            &model_name(),
+            self.messages[0].content.as_deref().unwrap_or_default(),
+            tools,
+            "openrouter:chat-completions:v1",
+            &format!("openrouter:{}", model_name()),
+        )
+    }
+
+    fn run_durable_model(&mut self, input: &str) -> Result<String, String> {
+        let user_entry_id = uuid7();
+        let operation_id = uuid7();
+        self.session.as_ref().unwrap().append(start_run(
+            &user_entry_id,
+            &uuid7(),
+            &operation_id,
+            input,
+        ))?;
+        self.messages.push(Message {
+            role: "user".into(),
+            content: Some(input.into()),
+            tool_call_id: String::new(),
+            tool_calls: Vec::new(),
+        });
+
+        let step_id = uuid7();
+        let attempt_id = uuid7();
+        self.session.as_ref().unwrap().append(vec![step_attempt(
+            &uuid7(),
+            &operation_id,
+            &step_id,
+            &attempt_id,
+            "assistant",
+            1,
+            &user_entry_id,
+            &self.runtime_configuration(),
+        )])?;
+
+        let messages = self.messages.clone();
+        let data = match self.call_model(&messages, true, true) {
+            Ok(data) => data,
+            Err(error) => {
+                let code = if self.cancel.load(Ordering::SeqCst) {
+                    "aborted"
+                } else {
+                    "model_error"
+                };
+                self.session.as_ref().unwrap().append(vec![
+                    step_failed(&uuid7(), &operation_id, &step_id, &attempt_id, code, &error),
+                    operation_finished(
+                        &uuid7(),
+                        &operation_id,
+                        "run",
+                        "failed",
+                        None,
+                        Some((code, &error)),
+                    ),
+                ])?;
+                if code == "aborted" {
+                    return Ok("Operation aborted.".into());
+                }
+                return Err(error);
+            }
+        };
+
+        let answer = data.message.clone();
+        let answer_id = uuid7();
+        let stop_reason = stop_reason_name(data.stop_reason);
+        let mut facts = vec![
+            assistant_entry(&answer_id, &step_id, &attempt_id, stop_reason, &answer),
+            usage(&uuid7(), &operation_id, Some(&attempt_id), None, data.usage),
+        ];
+        self.messages.push(answer.clone());
+
+        if !answer.tool_calls.is_empty() {
+            self.session.as_ref().unwrap().append(facts)?;
+            return Err("Durable tool integration required".into());
+        }
+        let content = answer.content.unwrap_or_default();
+        if data.stop_reason == StopReason::Stop && !content.trim().is_empty() {
+            facts.push(operation_finished(
+                &uuid7(),
+                &operation_id,
+                "run",
+                "completed",
+                Some(&answer_id),
+                None,
+            ));
+            self.session.as_ref().unwrap().append(facts)?;
+            return Ok(content);
+        }
+        let message = if content.trim().is_empty() {
+            format!("Model returned an empty response (finish_reason: {stop_reason}).")
+        } else {
+            "Model response was truncated by the token limit.".into()
+        };
+        facts.push(operation_finished(
+            &uuid7(),
+            &operation_id,
+            "run",
+            "failed",
+            None,
+            Some(("model_length", &message)),
+        ));
+        self.session.as_ref().unwrap().append(facts)?;
+        Err(message)
     }
 
     pub fn resume_session(&mut self) -> Result<(), String> {
@@ -518,6 +662,9 @@ impl Agent {
 
     pub fn run_agent_loop(&mut self, input: &str) -> Result<String, String> {
         self.cancel.store(false, Ordering::SeqCst);
+        if self.session.is_some() {
+            return self.run_durable_model(input);
+        }
         let user = Message {
             role: "user".to_string(),
             content: Some(input.to_string()),
@@ -525,7 +672,6 @@ impl Agent {
             tool_calls: Vec::new(),
         };
         self.messages.push(user.clone());
-        self.session_append(message_record(&user, None, None))?;
         loop {
             let messages = self.messages.clone();
             let response = self.model_request(&messages, true, true)?;
@@ -534,7 +680,6 @@ impl Agent {
             };
             let answer = data.message.clone();
             self.messages.push(answer.clone());
-            self.session_append(message_record(&answer, Some(data.usage), None))?;
             if answer.tool_calls.is_empty() {
                 let content = answer.content.unwrap_or_default();
                 if !content.trim().is_empty() {
@@ -612,7 +757,6 @@ impl Agent {
                     tool_calls: Vec::new(),
                 };
                 self.messages.push(tool_msg.clone());
-                self.session_append(message_record(&tool_msg, None, Some(&call.function.name)))?;
                 if !aborted {
                     continue;
                 }
@@ -624,13 +768,7 @@ impl Agent {
                         tool_calls: Vec::new(),
                     };
                     self.messages.push(skipped.clone());
-                    self.session_append(message_record(
-                        &skipped,
-                        None,
-                        Some(&pending.function.name),
-                    ))?;
                 }
-                self.record_interruption("tool", &call.id)?;
                 return Ok("Operation aborted.".to_string());
             }
         }
@@ -682,25 +820,6 @@ impl Agent {
         let mut new_messages = vec![self.messages[0].clone(), compacted.clone()];
         new_messages.extend(recent.iter().cloned());
         self.messages = new_messages;
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "type".into(),
-            serde_json::Value::String("compaction".into()),
-        );
-        map.insert("summary".into(), serde_json::Value::String(summary));
-        map.insert(
-            "compactedMessages".into(),
-            serde_json::Value::Number((old.len()).into()),
-        );
-        map.insert(
-            "keptMessages".into(),
-            serde_json::Value::Number((recent.len()).into()),
-        );
-        map.insert(
-            "usage".into(),
-            serde_json::to_value(data.usage).unwrap_or_default(),
-        );
-        self.session_append(map)?;
         Ok(format!(
             "Compacted {} messages (kept last {}).",
             old.len(),
@@ -756,32 +875,6 @@ impl Agent {
         }
         Err(format!("unknown tool: {}", name))
     }
-}
-
-fn message_record(
-    message: &Message,
-    usage: Option<UsageJSON>,
-    tool_name: Option<&str>,
-) -> serde_json::Map<String, serde_json::Value> {
-    let mut map = serde_json::Map::new();
-    map.insert("type".into(), serde_json::Value::String("message".into()));
-    map.insert(
-        "message".into(),
-        serde_json::to_value(message).unwrap_or_default(),
-    );
-    if let Some(usage) = usage {
-        map.insert(
-            "usage".into(),
-            serde_json::to_value(usage).unwrap_or_default(),
-        );
-    }
-    if let Some(tool_name) = tool_name {
-        map.insert(
-            "toolName".into(),
-            serde_json::Value::String(tool_name.to_string()),
-        );
-    }
-    map
 }
 
 fn json_messages(messages: &[Message]) -> Vec<serde_json::Value> {

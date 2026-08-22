@@ -179,6 +179,95 @@ fn handles_finish_reasons_and_empty_assistant() {
     }));
 }
 
+#[test]
+fn durable_model_runs_persist_normal_error_and_truncated_outcomes() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let server = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":3}}}"#.into(),
+    ]);
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    assert_eq!(agent.run_agent_loop("inspect").unwrap(), "done");
+    let state = agent.session.as_ref().unwrap().load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    assert_eq!(state.transcript.len(), 2);
+    assert_eq!(state.usage.input, 7);
+    assert_eq!(state.usage.output, 2);
+    assert_eq!(state.usage.cache_read, 3);
+
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let server = start_serving(vec![r#"{"choices":[],"usage":{}}"#.into()]);
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    assert!(
+        agent
+            .run_agent_loop("inspect")
+            .unwrap_err()
+            .contains("no choices")
+    );
+    let state = agent.session.as_ref().unwrap().load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    assert_eq!(state.transcript.len(), 1);
+
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let server = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"partial"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}"#.into(),
+    ]);
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    assert!(
+        agent
+            .run_agent_loop("inspect")
+            .unwrap_err()
+            .contains("truncated")
+    );
+    let state = agent.session.as_ref().unwrap().load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    assert_eq!(state.transcript.len(), 2);
+    assert_eq!(state.usage.input, 4);
+}
+
+#[test]
+fn durable_model_run_persists_attempt_before_request() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let path = session.path.clone();
+    let server = start_hanging();
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    let cancel = agent.cancel.clone();
+    let handle = thread::spawn(move || agent.run_agent_loop("wait"));
+    thread::sleep(Duration::from_millis(200));
+
+    let bytes = std::fs::read(path).unwrap();
+    let state = tiny_agent_rust::session_reducer::reduce_session(&bytes).unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Run {
+            step: Some(tiny_agent_rust::session_reducer::StepState {
+                status,
+                attempt: 1,
+                ..
+            }),
+            ..
+        } if status == "attempting"
+    ));
+
+    cancel.store(true, Ordering::SeqCst);
+    assert_eq!(handle.join().unwrap().unwrap(), "Operation aborted.");
+}
+
 // ---------------------------------------------------------------------------
 #[test]
 fn formats_tui_tool_events() {
@@ -355,7 +444,6 @@ fn esc_aborts_model_request_and_persists_interruption() {
 fn runs_tool_loop_and_compacts_through_mock() {
     unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
     let cwd = temp_dir();
-    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
     // 1. tool call -> write
     // 2. assistant "done"
     // 3. compact summary
@@ -365,7 +453,7 @@ fn runs_tool_loop_and_compacts_through_mock() {
         r#"{"choices":[{"message":{"role":"assistant","content":"summary"}}],"usage":{"prompt_tokens":80,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":20}}}"#.to_string(),
     ];
     let server = start_serving(replies);
-    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    let mut agent = test_agent(&cwd, &server.url, None);
     let events = Arc::new(Mutex::new(Vec::new()));
     let ev = events.clone();
     agent.on_tool = Arc::new(move |e| ev.lock().unwrap().push((e.phase, e.name, e.result)));
