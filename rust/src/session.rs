@@ -30,7 +30,7 @@ pub fn environment_identity(cwd: &Path) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-pub struct SessionStore {
+pub struct Session {
     pub id: String,
     pub path: PathBuf,
     inner: Mutex<StoreInner>,
@@ -44,7 +44,7 @@ struct StoreInner {
     closed: bool,
 }
 
-impl SessionStore {
+impl Session {
     pub fn create_new(cwd: &Path, model: &str) -> Result<Self, String> {
         Self::create_at(cwd, model, SystemTime::now())
     }
@@ -249,7 +249,7 @@ impl SessionStore {
     }
 }
 
-impl Drop for SessionStore {
+impl Drop for Session {
     fn drop(&mut self) {
         if let Ok(inner) = self.inner.get_mut()
             && !inner.closed

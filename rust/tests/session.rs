@@ -8,7 +8,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tiny_agent_rust::session::{SessionFact, SessionStore, environment_identity};
+use tiny_agent_rust::session::{Session, SessionFact, environment_identity};
 use tiny_agent_rust::session_recovery::{CurrentConfiguration, plan_recovery};
 use tiny_agent_rust::session_reducer::reduce_session;
 
@@ -43,11 +43,11 @@ fn accepted_run() -> Vec<SessionFact> {
 fn store_creates_exclusive_0600_file_and_closes_idempotently() {
     let root = workspace();
     let now = UNIX_EPOCH + Duration::from_millis(1_787_953_750_062);
-    let store = SessionStore::create_at(&root, "test/model", now).unwrap();
+    let store = Session::create_at(&root, "test/model", now).unwrap();
     let mode = fs::metadata(&store.path).unwrap().permissions();
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(mode.mode() & 0o777, 0o600);
-    let error = match SessionStore::open(&store.id, &root) {
+    let error = match Session::open(&store.id, &root) {
         Ok(_) => panic!("second writer opened"),
         Err(error) => error,
     };
@@ -60,7 +60,7 @@ fn store_creates_exclusive_0600_file_and_closes_idempotently() {
 #[test]
 fn store_rejects_identity_mismatch_and_symlink_and_repairs_permissions() {
     let root = workspace();
-    let store = SessionStore::create_new(&root, "test/model").unwrap();
+    let store = Session::create_new(&root, "test/model").unwrap();
     let id = store.id.clone();
     let path = store.path.clone();
     store.close().unwrap();
@@ -73,7 +73,7 @@ fn store_rejects_identity_mismatch_and_symlink_and_repairs_permissions() {
         format!("{}\n", serde_json::to_string(&header).unwrap()),
     )
     .unwrap();
-    let error = match SessionStore::open(&id, &root) {
+    let error = match Session::open(&id, &root) {
         Ok(_) => panic!("mismatched header opened"),
         Err(error) => error,
     };
@@ -85,7 +85,7 @@ fn store_rejects_identity_mismatch_and_symlink_and_repairs_permissions() {
     )
     .unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
-    let reopened = SessionStore::open(&id, &root).unwrap();
+    let reopened = Session::open(&id, &root).unwrap();
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
@@ -105,7 +105,7 @@ fn store_rejects_identity_mismatch_and_symlink_and_repairs_permissions() {
             .join(format!("only_{link_id}.jsonl")),
     )
     .unwrap();
-    let error = match SessionStore::open(&link_id, &root) {
+    let error = match Session::open(&link_id, &root) {
         Ok(_) => panic!("symlink session opened"),
         Err(error) => error,
     };
@@ -115,7 +115,7 @@ fn store_rejects_identity_mismatch_and_symlink_and_repairs_permissions() {
 #[test]
 fn store_validates_before_append_and_preserves_bytes() {
     let root = workspace();
-    let store = SessionStore::create_new(&root, "test/model").unwrap();
+    let store = Session::create_new(&root, "test/model").unwrap();
     let before = fs::read(&store.path).unwrap();
     assert!(
         store
@@ -145,7 +145,7 @@ fn store_validates_before_append_and_preserves_bytes() {
 #[test]
 fn store_repairs_torn_tail_before_append() {
     let root = workspace();
-    let store = SessionStore::create_new(&root, "test/model").unwrap();
+    let store = Session::create_new(&root, "test/model").unwrap();
     store.append(accepted_run()).unwrap();
     let id = store.id.clone();
     let path = store.path.clone();
@@ -156,7 +156,7 @@ fn store_repairs_torn_tail_before_append() {
         .unwrap()
         .write_all(b"{\"kind\":\"record\"")
         .unwrap();
-    let reopened = SessionStore::open(&id, &root).unwrap();
+    let reopened = Session::open(&id, &root).unwrap();
     assert!(fs::read(&path).unwrap().ends_with(b"\n"));
     reopened
         .append(vec![fact(json!({
@@ -170,7 +170,7 @@ fn store_repairs_torn_tail_before_append() {
 #[test]
 fn store_serializes_concurrent_candidate_validated_commits() {
     let root = workspace();
-    let store = Arc::new(SessionStore::create_new(&root, "test/model").unwrap());
+    let store = Arc::new(Session::create_new(&root, "test/model").unwrap());
     let mut threads = Vec::new();
     for index in 0..8 {
         let store = Arc::clone(&store);

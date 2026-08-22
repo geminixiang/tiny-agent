@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, json};
-use tiny_agent_rust::session::SessionStore;
+use tiny_agent_rust::session::Session;
 use tiny_agent_rust::session_reducer::OperationState;
 use tiny_agent_rust::session_runtime::{
     RuntimeTool, abort_requested, assistant_entry, operation_finished, project_idle,
@@ -48,13 +48,13 @@ fn configuration() -> tiny_agent_rust::session_runtime::RuntimeConfiguration {
     )
 }
 
-fn create() -> (PathBuf, SessionStore) {
+fn create() -> (PathBuf, Session) {
     let root = workspace();
-    let store = SessionStore::create_new(&root, "test/model").unwrap();
+    let store = Session::create_new(&root, "test/model").unwrap();
     (root, store)
 }
 
-fn begin(store: &SessionStore) {
+fn begin(store: &Session) {
     store
         .append(start_run(USER, RUN_RECORD, OPERATION, "inspect"))
         .unwrap();
@@ -72,10 +72,10 @@ fn begin(store: &SessionStore) {
         .unwrap();
 }
 
-fn reopen(root: &Path, store: SessionStore) -> SessionStore {
+fn reopen(root: &Path, store: Session) -> Session {
     let id = store.id.clone();
     store.close().unwrap();
-    SessionStore::open(&id, root).unwrap()
+    Session::open(&id, root).unwrap()
 }
 
 fn assistant(content: Option<&str>, calls: Vec<ToolCall>) -> Message {

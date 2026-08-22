@@ -122,12 +122,12 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
     let instructions = load_project_instructions(&cwd);
 
     let session = if parsed.session_id.is_empty() {
-        Session::create(&cwd)?
+        Session::create_new(std::path::Path::new(&cwd), &model_name())?
     } else {
-        Session::open(&parsed.session_id, &cwd)?
+        Session::open(&parsed.session_id, std::path::Path::new(&cwd))?
     };
     let session_id = session.id.clone();
-    let session_path = session.path.clone();
+    let session_path = session.path.to_string_lossy().into_owned();
     let is_restored = !parsed.session_id.is_empty();
 
     let mut agent = new_agent(skills, Some(session), instructions, &cwd);

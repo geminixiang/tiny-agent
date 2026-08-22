@@ -277,115 +277,55 @@ fn loads_cwd_instructions_and_skills() {
 
 // ---------------------------------------------------------------------------
 #[test]
-fn session_create_open_records() {
+fn session_create_open_and_idle_resume() {
     let cwd = temp_dir();
-    let session = Session::create(&cwd).unwrap();
-    assert!(session.id.len() == 36);
-    assert!(session.path.contains(".tiny-agent/sessions/"));
-    assert!(session.path.ends_with(&format!("_{}.jsonl", session.id)));
-    assert!(Session::open(&session.id, &cwd).unwrap().path == session.path);
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    assert_eq!(session.id.len(), 36);
+    assert!(
+        session
+            .path
+            .to_string_lossy()
+            .contains(".tiny-agent/sessions/")
+    );
+    assert!(
+        session
+            .path
+            .to_string_lossy()
+            .ends_with(&format!("_{}.jsonl", session.id))
+    );
+    let id = session.id.clone();
+    let path = session.path.clone();
+    session.close().unwrap();
+    let reopened = Session::open(&id, std::path::Path::new(&cwd)).unwrap();
+    assert_eq!(reopened.path, path);
+    let mut agent = test_agent(&cwd, "", Some(reopened));
+    agent.resume_session().unwrap();
+    assert_eq!(agent.messages.len(), 1);
+    assert_eq!(agent.usage.input, 0);
+    assert!(Session::open("bad", std::path::Path::new(&cwd)).is_err());
     let fixed = uuid7_at(0x019f_c5c3_79ae);
     assert_eq!(&fixed[..13], "019fc5c3-79ae");
     assert_eq!(fixed.as_bytes()[14], b'7');
     assert!(matches!(fixed.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
-    assert!(Session::open("bad", &cwd).is_err());
-    let mut map = serde_json::Map::new();
-    map.insert("type".into(), serde_json::Value::String("message".into()));
-    map.insert(
-        "message".into(),
-        serde_json::to_value(Message {
-            role: "user".into(),
-            content: Some("hi".into()),
-            tool_call_id: String::new(),
-            tool_calls: Vec::new(),
-        })
-        .unwrap(),
-    );
-    session.append_value(&map).unwrap();
-    let records = session.records().unwrap();
-    assert_eq!(records[0]["type"], "session");
-    assert_eq!(records[1]["type"], "message");
-    assert_eq!(records[1]["message"]["content"], "hi");
 }
 
-// ---------------------------------------------------------------------------
 #[test]
-fn resume_restores_messages_compact_and_usage() {
+fn non_idle_session_requires_recovery() {
     let cwd = temp_dir();
-    let session = Session::create(&cwd).unwrap();
-    let m = Message {
-        role: "user".into(),
-        content: Some("old".into()),
-        tool_call_id: String::new(),
-        tool_calls: Vec::new(),
-    };
-    let mut map = serde_json::Map::new();
-    map.insert("type".into(), serde_json::Value::String("message".into()));
-    map.insert("message".into(), serde_json::to_value(m).unwrap());
-    session.append_value(&map).unwrap();
-    let mut map = serde_json::Map::new();
-    map.insert("type".into(), serde_json::Value::String("message".into()));
-    map.insert(
-        "message".into(),
-        serde_json::to_value(Message {
-            role: "assistant".into(),
-            content: Some("answer".into()),
-            tool_call_id: String::new(),
-            tool_calls: Vec::new(),
-        })
-        .unwrap(),
-    );
-    map.insert(
-        "usage".into(),
-        serde_json::json!({"input":80,"output":5,"cacheRead":20,"cacheWrite":0}),
-    );
-    session.append_value(&map).unwrap();
-    // compaction
-    let mut c = serde_json::Map::new();
-    c.insert(
-        "type".into(),
-        serde_json::Value::String("compaction".into()),
-    );
-    c.insert(
-        "summary".into(),
-        serde_json::Value::String("summary".into()),
-    );
-    c.insert(
-        "compactedMessages".into(),
-        serde_json::Value::Number(2.into()),
-    );
-    c.insert("keptMessages".into(), serde_json::Value::Number(0.into()));
-    c.insert(
-        "usage".into(),
-        serde_json::json!({"input":40,"output":4,"cacheRead":0,"cacheWrite":0}),
-    );
-    session.append_value(&c).unwrap();
-    // new user message
-    let mut m2 = serde_json::Map::new();
-    m2.insert("type".into(), serde_json::Value::String("message".into()));
-    m2.insert(
-        "message".into(),
-        serde_json::to_value(Message {
-            role: "user".into(),
-            content: Some("new".into()),
-            tool_call_id: String::new(),
-            tool_calls: Vec::new(),
-        })
-        .unwrap(),
-    );
-    session.append_value(&m2).unwrap();
-
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    session
+        .append(tiny_agent_rust::session_runtime::start_run(
+            &session.allocate_id(),
+            &session.allocate_id(),
+            &session.allocate_id(),
+            "unfinished",
+        ))
+        .unwrap();
     let mut agent = test_agent(&cwd, "", Some(session));
-    agent.resume_session().unwrap();
     assert_eq!(
-        agent.messages[1].content.as_deref(),
-        Some("[Compacted history]\nsummary")
+        agent.resume_session().unwrap_err(),
+        "Session recovery required"
     );
-    assert_eq!(agent.messages[2].content.as_deref(), Some("new"));
-    assert_eq!(agent.usage.input, 120);
-    assert_eq!(agent.usage.output, 9);
-    assert_eq!(agent.usage.cache_read, 20);
-    assert!(agent.usage.cache_hit_rate > 19.9 && agent.usage.cache_hit_rate < 20.1);
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +333,7 @@ fn resume_restores_messages_compact_and_usage() {
 fn esc_aborts_model_request_and_persists_interruption() {
     unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
     let cwd = temp_dir();
-    let session = Session::create(&cwd).unwrap();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
     let sid = session.id.clone();
     let server = start_hanging();
     let mut agent = test_agent(&cwd, &server.url, Some(session));
@@ -403,11 +343,11 @@ fn esc_aborts_model_request_and_persists_interruption() {
     cancel.store(true, Ordering::SeqCst);
     let answer = handle.join().unwrap().unwrap();
     assert_eq!(answer, "Operation aborted.");
-    let reloaded = Session::open(&sid, &cwd).unwrap();
-    let records = reloaded.records().unwrap();
-    let last = records.last().unwrap();
-    assert_eq!(last["type"], "interruption");
-    assert_eq!(last["phase"], "model");
+    let reloaded = Session::open(&sid, std::path::Path::new(&cwd)).unwrap();
+    assert!(matches!(
+        reloaded.load().unwrap().operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +355,7 @@ fn esc_aborts_model_request_and_persists_interruption() {
 fn runs_tool_loop_and_compacts_through_mock() {
     unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
     let cwd = temp_dir();
-    let session = Session::create(&cwd).unwrap();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
     // 1. tool call -> write
     // 2. assistant "done"
     // 3. compact summary

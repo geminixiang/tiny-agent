@@ -13,6 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::session::Session;
+use crate::session_runtime::project_idle;
+
 pub mod mcp;
 pub mod session;
 pub mod session_recovery;
@@ -320,103 +323,6 @@ pub fn load_skills(extra: Vec<String>, cwd: &str) -> Result<Vec<Skill>, String> 
 }
 
 // ---------------------------------------------------------------------------
-// sessions (append-only JSONL)
-// ---------------------------------------------------------------------------
-pub struct LegacySession {
-    pub id: String,
-    pub path: String,
-}
-
-pub type Session = LegacySession;
-
-impl LegacySession {
-    pub fn create(cwd: &str) -> Result<LegacySession, String> {
-        let id = uuid7();
-        let dir = join_path(cwd, ".tiny-agent/sessions");
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let created_at = iso_utc_ms_now();
-        let stamp = created_at.replace([':', '.'], "-");
-        let path = join_path(&dir, &format!("{}_{}.jsonl", stamp, id));
-        let session = LegacySession {
-            id: id.clone(),
-            path,
-        };
-        let mut map = serde_json::Map::new();
-        map.insert("type".into(), serde_json::Value::String("session".into()));
-        map.insert("version".into(), serde_json::Value::Number(1.into()));
-        map.insert("id".into(), serde_json::Value::String(id));
-        map.insert("createdAt".into(), serde_json::Value::String(created_at));
-        map.insert("cwd".into(), serde_json::Value::String(cwd.to_string()));
-        map.insert(
-            "provider".into(),
-            serde_json::Value::String("openrouter".into()),
-        );
-        map.insert("model".into(), serde_json::Value::String(model_name()));
-        session.append_value(&map)?;
-        Ok(session)
-    }
-
-    pub fn open(id: &str, cwd: &str) -> Result<LegacySession, String> {
-        let valid = id.len() == 36 && is_uuid_chars(id) && id.chars().nth(14) == Some('7');
-        if !valid {
-            return Err(format!("Invalid session ID: {}", id));
-        }
-        let dir = join_path(cwd, ".tiny-agent/sessions");
-        let mut matches: Vec<String> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(&format!("_{}.jsonl", id)) {
-                    matches.push(join_path(&dir, &name));
-                }
-            }
-        }
-        if matches.is_empty() {
-            return Err(format!("Session not found: {}", id));
-        }
-        if matches.len() > 1 {
-            return Err(format!("Duplicate session ID: {}", id));
-        }
-        Ok(LegacySession {
-            id: id.to_string(),
-            path: matches.remove(0),
-        })
-    }
-
-    pub fn records(&self) -> Result<Vec<serde_json::Value>, String> {
-        let text = std::fs::read_to_string(&self.path).map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            out.push(serde_json::from_str(line).map_err(|e| e.to_string())?);
-        }
-        Ok(out)
-    }
-
-    pub fn append_value(
-        &self,
-        value: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), String> {
-        let mut record = value.clone();
-        record.insert("timestamp".into(), serde_json::Value::String(rfc3339_now()));
-        let line = serde_json::to_string(&record).map_err(|e| e.to_string())? + "\n";
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&self.path)
-            .map_err(|e| e.to_string())?;
-        use std::io::Write;
-        f.write_all(line.as_bytes()).map_err(|e| e.to_string())
-    }
-}
-
-fn is_uuid_chars(s: &str) -> bool {
-    s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-}
-
-// ---------------------------------------------------------------------------
 // Agent
 // ---------------------------------------------------------------------------
 pub struct Agent {
@@ -507,85 +413,24 @@ fn api_key() -> String {
 impl Agent {
     fn session_append(
         &self,
-        map: serde_json::Map<String, serde_json::Value>,
+        _map: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), String> {
-        if let Some(session) = &self.session {
-            session.append_value(&map).map_err(|e| e.to_string())?;
-        }
         Ok(())
     }
 
-    fn record_interruption(&self, phase: &str, tool_call_id: &str) -> Result<(), String> {
-        let mut map = serde_json::Map::new();
-        map.insert(
-            "type".into(),
-            serde_json::Value::String("interruption".into()),
-        );
-        map.insert("phase".into(), serde_json::Value::String(phase.to_string()));
-        map.insert(
-            "toolCallId".into(),
-            serde_json::Value::String(tool_call_id.to_string()),
-        );
-        map.insert("reason".into(), serde_json::Value::String("escape".into()));
-        self.session_append(map)
+    fn record_interruption(&self, _phase: &str, _tool_call_id: &str) -> Result<(), String> {
+        Ok(())
     }
 
     pub fn resume_session(&mut self) -> Result<(), String> {
         let Some(session) = &self.session else {
             return Ok(());
         };
-        let records = session.records()?;
-        let mut first = true;
-        for record in records.into_iter().skip(1) {
-            if first {
-                first = false;
-            } else {
-                let _ = &record;
-            }
-            let kind = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if kind == "message" {
-                let message: Message =
-                    serde_json::from_value(record.get("message").cloned().unwrap_or_default())
-                        .map_err(|e| e.to_string())?;
-                self.messages.push(message);
-                if let Some(usage) = record.get("usage") {
-                    let u: UsageJSON =
-                        serde_json::from_value(usage.clone()).map_err(|e| e.to_string())?;
-                    self.add_usage(u, true);
-                }
-                continue;
-            }
-            if kind == "compaction" {
-                let kept = record
-                    .get("keptMessages")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0) as usize;
-                let summary = record
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let recent = if kept > 0 && kept < self.messages.len() {
-                    self.messages[self.messages.len() - kept..].to_vec()
-                } else {
-                    Vec::new()
-                };
-                let compacted = Message {
-                    role: "user".to_string(),
-                    content: Some(format!("[Compacted history]\n{}", summary)),
-                    tool_call_id: String::new(),
-                    tool_calls: Vec::new(),
-                };
-                let mut new_messages = vec![self.messages[0].clone(), compacted];
-                new_messages.extend(recent);
-                self.messages = new_messages;
-                if let Some(usage) = record.get("usage") {
-                    let u: UsageJSON =
-                        serde_json::from_value(usage.clone()).map_err(|e| e.to_string())?;
-                    self.add_usage(u, false);
-                }
-            }
-        }
+        let system_prompt = self.messages[0].content.clone().unwrap_or_default();
+        let projection = project_idle(&session.load()?, &system_prompt)
+            .map_err(|_| "Session recovery required".to_string())?;
+        self.messages = projection.messages;
+        self.usage = projection.usage;
         Ok(())
     }
 
@@ -1578,59 +1423,6 @@ fn basename(path: &str) -> String {
         Some(i) => path[i + 1..].to_string(),
         None => path.to_string(),
     }
-}
-
-fn iso_utc_ms_now() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs() as i64;
-    let ms = now.subsec_millis();
-    let (y, mo, d) = civil_from_days(secs.div_euclid(86_400));
-    let hh = secs.rem_euclid(86_400) / 3_600;
-    let mm = secs.rem_euclid(3_600) / 60;
-    let ss = secs.rem_euclid(60);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        y, mo, d, hh, mm, ss, ms
-    )
-}
-
-fn rfc3339_now() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs() as i64;
-    let (y, mo, d, hh, mm, ss) = {
-        let (y, mo, d) = civil_from_days(secs.div_euclid(86_400));
-        (
-            y,
-            mo,
-            d,
-            secs.rem_euclid(86_400) / 3_600,
-            secs.rem_euclid(3_600) / 60,
-            secs.rem_euclid(60),
-        )
-    };
-    let nanos = now.subsec_nanos();
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
-        y, mo, d, hh, mm, ss, nanos
-    )
-}
-
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }
 
 pub fn uuid7() -> String {
