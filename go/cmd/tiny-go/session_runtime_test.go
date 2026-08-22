@@ -234,6 +234,49 @@ func TestInvalidTerminalModelResponsesFinishDurably(t *testing.T) {
 	}
 }
 
+func TestStopWithToolCallsFailsWithoutInvalidAssistant(t *testing.T) {
+	for _, content := range []any{nil, "unexpected"} {
+		name := "empty"
+		if content != nil {
+			name = "nonempty"
+		}
+		t.Run(name, func(t *testing.T) {
+			agent, session, close := durableAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []any{map[string]any{
+						"message": map[string]any{
+							"role": "assistant", "content": content,
+							"tool_calls": []any{map[string]any{
+								"id": "call_1", "type": "function",
+								"function": map[string]any{"name": "read", "arguments": `{}`},
+							}},
+						},
+						"finish_reason": "stop",
+					}},
+					"usage": map[string]any{"prompt_tokens": 7, "completion_tokens": 3},
+				})
+			})
+			defer close()
+			if _, err := agent.runAgentLoop("inspect"); err == nil || !strings.Contains(err.Error(), "tool calls with finish_reason: stop") {
+				t.Fatalf("error=%v", err)
+			}
+			state := session.State()
+			if state.Operation.Kind != "idle" || len(state.Transcript) != 1 || state.Usage.Input != 7 || state.Usage.Output != 3 {
+				t.Fatalf("state=%+v", state)
+			}
+			before, _ := os.ReadFile(session.Path)
+			restored := newAgent(nil, session, "")
+			if err := restored.restoreSession(); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := os.ReadFile(session.Path)
+			if string(before) != string(after) {
+				t.Fatal("idle resume appended")
+			}
+		})
+	}
+}
+
 func TestRestoreExecutesNonIdleRecovery(t *testing.T) {
 	agent, session, close := durableAgent(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}],"usage":{}}`))

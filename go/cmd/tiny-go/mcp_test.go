@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,6 +206,84 @@ func TestMCPResponseBoundAndSanitizedErrors(t *testing.T) {
 				t.Fatalf("error: %v", err)
 			}
 		})
+	}
+}
+
+func TestMCPSharedSchemaSubset(t *testing.T) {
+	valid := map[string]any{"type": "object", "properties": map[string]any{
+		"items": map[string]any{"type": "array", "items": map[string]any{"oneOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "integer", "minimum": float64(0)}}}},
+	}, "required": []any{"items"}, "additionalProperties": false}
+	if err := validateMCPToolSchema(valid, "valid"); err != nil {
+		t.Fatalf("valid schema: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		schema map[string]any
+		match  string
+	}{
+		{"unsupported", map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string", "anyOf": []any{}}}}, "anyOf"},
+		{"malformed-required", map[string]any{"type": "object", "required": "x"}, "required"},
+		{"malformed-items", map[string]any{"type": "array", "items": true}, "items"},
+		{"malformed-bound", map[string]any{"type": "string", "minLength": "1"}, "minLength"},
+		{"malformed-one-of", map[string]any{"type": "object", "oneOf": []any{"bad"}}, "oneOf"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateMCPToolSchema(test.schema, "bad"); err == nil || !strings.Contains(err.Error(), test.match) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestMCPEndpointIdentityBlocksPendingEffect(t *testing.T) {
+	inTempDir(t)
+	t.Setenv("OPENROUTER_API_KEY", "test")
+	makeTool := func(endpoint string, effects *int) Tool {
+		mapped, _ := mapMCPToolName("same", "read")
+		return Tool{Name: mapped, Description: "same", Parameters: map[string]any{"type": "object"}, Replay: "never", ReplayKey: "mcp:same:" + endpoint + ":read:v1", Execute: func(context.Context, map[string]any) (string, error) {
+			*effects = *effects + 1
+			return "effect", nil
+		}}
+	}
+	effects := 0
+	session, err := createSessionStore(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	agent := newAgent(nil, session, "")
+	agent.Tools = []Tool{makeTool("https://a.example/mcp", &effects)}
+	run, err := agent.startDurableRun("inspect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.startAttempt(&run, "assistant", 1); err != nil {
+		t.Fatal(err)
+	}
+	call := ToolCall{ID: "call_1", Type: "function", Function: ToolFunction{Name: agent.Tools[0].Name, Arguments: `{}`}}
+	if _, err := agent.settleAssistant(&run, ModelResponse{Message: Message{Role: "assistant", ToolCalls: []ToolCall{call}}, StopReason: "toolUse"}, false); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(session.Path)
+	restored := newAgent(nil, session, "")
+	restored.Tools = []Tool{makeTool("https://b.example/mcp", &effects)}
+	if err := restored.restoreSession(); err == nil || !strings.Contains(err.Error(), "configuration_changed") {
+		t.Fatalf("error=%v", err)
+	}
+	after, _ := os.ReadFile(session.Path)
+	if !bytes.Equal(before, after) || effects != 0 {
+		t.Fatalf("appended=%v effects=%d", !bytes.Equal(before, after), effects)
+	}
+}
+
+func TestMCPReplayKeyUsesCanonicalCredentialFreeEndpoint(t *testing.T) {
+	parsed, _ := url.Parse("HTTPS://Example.COM:443/mcp?tenant=x")
+	endpoint, err := canonicalMCPEndpoint(parsed)
+	if err != nil || endpoint != "https://example.com/mcp?tenant=x" {
+		t.Fatalf("endpoint=%q err=%v", endpoint, err)
+	}
+	if strings.Contains(endpoint, "token") || strings.Contains(endpoint, "Bearer") {
+		t.Fatalf("credential leaked: %s", endpoint)
 	}
 }
 

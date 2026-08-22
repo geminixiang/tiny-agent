@@ -251,6 +251,10 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	if parsed.User != nil {
 		return nil, errors.New("MCP URL must not contain credentials")
 	}
+	endpoint, err := canonicalMCPEndpoint(parsed)
+	if err != nil {
+		return nil, err
+	}
 	if config.CallTimeout <= 0 {
 		config.CallTimeout = 30 * time.Second
 	}
@@ -300,6 +304,9 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 		if len(remote.InputSchema) == 0 || bytes.Equal(bytes.TrimSpace(remote.InputSchema), []byte("null")) || json.Unmarshal(remote.InputSchema, &inputSchema) != nil || inputSchema == nil {
 			return nil, fmt.Errorf("MCP tool inputSchema must be an object: %s", remote.Name)
 		}
+		if err := validateMCPToolSchema(inputSchema, remote.Name); err != nil {
+			return nil, err
+		}
 		if len(remote.InputSchema) > maxMCPSchemaBytes {
 			return nil, fmt.Errorf("MCP tool schema exceeds 50KB: %s", remote.Name)
 		}
@@ -325,7 +332,8 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 			description = fmt.Sprintf("MCP tool %s from %s.", remote.Name, config.Alias)
 		}
 		remoteName := remote.Name
-		mcp.tools = append(mcp.tools, Tool{Name: mappedName, Description: description, Parameters: inputSchema, Replay: "never", ReplayKey: "mcp:" + config.Alias + ":" + remoteName + ":v1", Execute: func(callCtx context.Context, args map[string]any) (string, error) {
+		replayKey := "mcp:" + config.Alias + ":" + endpoint + ":" + remoteName + ":v1"
+		mcp.tools = append(mcp.tools, Tool{Name: mappedName, Description: description, Parameters: inputSchema, Replay: "never", ReplayKey: replayKey, Execute: func(callCtx context.Context, args map[string]any) (string, error) {
 			return mcp.callTool(callCtx, remoteName, args)
 		}})
 	}
@@ -676,6 +684,154 @@ func (m *MCPClient) Close() error {
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("MCP close HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func canonicalMCPEndpoint(parsed *url.URL) (string, error) {
+	if parsed.Fragment != "" {
+		return "", errors.New("MCP URL must not contain a fragment")
+	}
+	canonical := *parsed
+	canonical.Scheme = strings.ToLower(canonical.Scheme)
+	hostname := strings.ToLower(canonical.Hostname())
+	port := canonical.Port()
+	if canonical.Scheme == "https" && port == "443" || canonical.Scheme == "http" && port == "80" {
+		port = ""
+	}
+	if strings.Contains(hostname, ":") {
+		hostname = "[" + hostname + "]"
+	}
+	canonical.Host = hostname
+	if port != "" {
+		canonical.Host += ":" + port
+	}
+	if canonical.Path == "" {
+		canonical.Path = "/"
+	}
+	return canonical.String(), nil
+}
+
+func validateMCPToolSchema(schema map[string]any, toolName string) error {
+	if err := validateSharedSchema(schema, "$", true); err != nil {
+		return fmt.Errorf("MCP tool inputSchema is invalid for %s: %w", toolName, err)
+	}
+	return nil
+}
+
+func validateSharedSchema(schema map[string]any, path string, root bool) error {
+	allowed := map[string]bool{
+		"type": true, "properties": true, "required": true, "additionalProperties": true,
+		"items": true, "enum": true, "const": true, "oneOf": true,
+		"minimum": true, "maximum": true, "exclusiveMinimum": true, "exclusiveMaximum": true,
+		"minLength": true, "maxLength": true, "pattern": true, "minItems": true, "maxItems": true,
+	}
+	for key := range schema {
+		if !allowed[key] {
+			return fmt.Errorf("unsupported schema keyword %s/%s", path, key)
+		}
+	}
+	if raw, ok := schema["type"]; ok {
+		typeName, valid := raw.(string)
+		if !valid || !map[string]bool{"object": true, "array": true, "string": true, "number": true, "integer": true, "boolean": true, "null": true}[typeName] {
+			return fmt.Errorf("%s/type must be a supported type string", path)
+		}
+	} else if root {
+		return fmt.Errorf("%s/type is required", path)
+	}
+	if raw, ok := schema["properties"]; ok {
+		properties, valid := raw.(map[string]any)
+		if !valid {
+			return fmt.Errorf("%s/properties must be an object", path)
+		}
+		for name, child := range properties {
+			childSchema, valid := child.(map[string]any)
+			if !valid {
+				return fmt.Errorf("%s/properties/%s must be an object", path, name)
+			}
+			if err := validateSharedSchema(childSchema, path+"/properties/"+name, false); err != nil {
+				return err
+			}
+		}
+	}
+	if raw, ok := schema["required"]; ok {
+		required, valid := raw.([]any)
+		if !valid {
+			return fmt.Errorf("%s/required must be an array", path)
+		}
+		seen := map[string]bool{}
+		for _, item := range required {
+			name, valid := item.(string)
+			if !valid || name == "" || seen[name] {
+				return fmt.Errorf("%s/required must contain unique nonempty strings", path)
+			}
+			seen[name] = true
+		}
+	}
+	if raw, ok := schema["additionalProperties"]; ok {
+		if _, valid := raw.(bool); !valid {
+			child, valid := raw.(map[string]any)
+			if !valid {
+				return fmt.Errorf("%s/additionalProperties must be a boolean or object", path)
+			}
+			if err := validateSharedSchema(child, path+"/additionalProperties", false); err != nil {
+				return err
+			}
+		}
+	}
+	if raw, ok := schema["items"]; ok {
+		child, valid := raw.(map[string]any)
+		if !valid {
+			return fmt.Errorf("%s/items must be an object", path)
+		}
+		if err := validateSharedSchema(child, path+"/items", false); err != nil {
+			return err
+		}
+	}
+	if raw, ok := schema["oneOf"]; ok {
+		options, valid := raw.([]any)
+		if !valid || len(options) == 0 {
+			return fmt.Errorf("%s/oneOf must be a nonempty array", path)
+		}
+		for index, option := range options {
+			child, valid := option.(map[string]any)
+			if !valid {
+				return fmt.Errorf("%s/oneOf/%d must be an object", path, index)
+			}
+			if err := validateSharedSchema(child, fmt.Sprintf("%s/oneOf/%d", path, index), false); err != nil {
+				return err
+			}
+		}
+	}
+	if raw, ok := schema["enum"]; ok {
+		values, valid := raw.([]any)
+		if !valid || len(values) == 0 {
+			return fmt.Errorf("%s/enum must be a nonempty array", path)
+		}
+	}
+	for _, key := range []string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"} {
+		if raw, ok := schema[key]; ok {
+			if _, valid := raw.(float64); !valid {
+				return fmt.Errorf("%s/%s must be a number", path, key)
+			}
+		}
+	}
+	for _, key := range []string{"minLength", "maxLength", "minItems", "maxItems"} {
+		if raw, ok := schema[key]; ok {
+			number, valid := raw.(float64)
+			if !valid || number < 0 || number != float64(int64(number)) {
+				return fmt.Errorf("%s/%s must be a nonnegative integer", path, key)
+			}
+		}
+	}
+	if raw, ok := schema["pattern"]; ok {
+		pattern, valid := raw.(string)
+		if !valid {
+			return fmt.Errorf("%s/pattern must be a string", path)
+		}
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("%s/pattern must be valid", path)
+		}
 	}
 	return nil
 }

@@ -159,6 +159,18 @@ func (a *Agent) failAttempt(run durableRun, code string, err error, finish bool)
 	return a.failOperationAttempt(run, "run", code, err, finish)
 }
 
+func (a *Agent) failModelResponse(run durableRun, response ModelResponse, err error) error {
+	if a.Session == nil {
+		return err
+	}
+	facts := []map[string]any{
+		{"kind": "usage", "operationId": run.OperationID, "attemptId": run.AttemptID, "usage": map[string]any{"input": response.Usage.Input, "output": response.Usage.Output, "cacheRead": response.Usage.CacheRead, "cacheWrite": response.Usage.CacheWrite}},
+		{"kind": "record", "record": map[string]any{"type": "stepFailed", "operationId": run.OperationID, "stepId": run.StepID, "attemptId": run.AttemptID, "error": map[string]any{"code": "model_error", "message": err.Error()}}},
+		{"kind": "record", "record": map[string]any{"type": "operationFinished", "operationId": run.OperationID, "operationKind": "run", "outcome": "failed", "error": map[string]any{"code": "model_error", "message": err.Error()}}},
+	}
+	return errors.Join(err, a.Session.Commit(facts))
+}
+
 func (a *Agent) settleFailedAssistant(run *durableRun, response ModelResponse, err error) error {
 	if a.Session == nil {
 		return err
@@ -471,7 +483,10 @@ func (a *Agent) recoverStep(plan recoveryPlan, attempt int) error {
 		return a.failAttempt(run, "model_error", fmt.Errorf("unsupported finish_reason: %s", response.StopReason), true)
 	}
 	response.StopReason = stop
-	finish := stop == "stop" && len(response.Message.ToolCalls) == 0 && strings.TrimSpace(value(response.Message.Content)) != ""
+	if stop == "stop" && len(response.Message.ToolCalls) != 0 {
+		return a.failModelResponse(run, response, errors.New("Model returned tool calls with finish_reason: stop"))
+	}
+	finish := stop == "stop" && strings.TrimSpace(value(response.Message.Content)) != ""
 	if stop == "stop" && !finish {
 		return a.settleFailedAssistant(&run, response, errors.New("Model returned an empty response (finish_reason: stop)"))
 	}
