@@ -3,14 +3,15 @@ use std::sync::{Arc, Mutex};
 use tiny_agent_rust::mcp::{LoadedMcp, display_tool_name, load_mcp_configs, load_mcp_tools};
 use tiny_agent_rust::terminal::{TermError, Terminal};
 use tiny_agent_rust::{
-    Session, format_tool_event, format_usage, load_project_instructions, load_skills, model_name,
-    new_agent,
+    Session, format_tool_event, format_usage, load_project_instructions, load_skills,
+    local_tool_names, model_name, new_agent,
 };
 
 struct CliArgs {
     session_id: String,
     extras: Vec<String>,
     mcp: Vec<String>,
+    plugins: Vec<String>,
     prompt: String,
 }
 
@@ -18,10 +19,15 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
     let mut session_id = String::new();
     let mut extras = Vec::new();
     let mut mcp = Vec::new();
+    let mut plugins: Option<Vec<String>> = None;
     let mut words: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--session" || args[i] == "--skill" || args[i] == "--mcp" {
+        if args[i] == "--session"
+            || args[i] == "--skill"
+            || args[i] == "--mcp"
+            || args[i] == "--plugin"
+        {
             if i + 1 >= args.len() {
                 return Err(format!("{} requires a value", args[i]));
             }
@@ -29,7 +35,7 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
                 session_id = args[i + 1].clone();
             } else if args[i] == "--skill" {
                 extras.push(args[i + 1].clone());
-            } else {
+            } else if args[i] == "--mcp" {
                 for alias in args[i + 1]
                     .split(',')
                     .map(str::trim)
@@ -37,6 +43,23 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
                 {
                     if !mcp.iter().any(|existing| existing == alias) {
                         mcp.push(alias.to_string());
+                    }
+                }
+            } else {
+                let selected = plugins.get_or_insert_with(Vec::new);
+                for plugin in args[i + 1]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    if !local_tool_names().contains(&plugin) {
+                        return Err(format!(
+                            "Unknown plugin: {plugin}. Available plugins: {}",
+                            local_tool_names().join(", ")
+                        ));
+                    }
+                    if !selected.iter().any(|existing| existing == plugin) {
+                        selected.push(plugin.to_string());
                     }
                 }
             }
@@ -50,6 +73,14 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
         session_id,
         extras,
         mcp,
+        plugins: plugins
+            .filter(|selected| !selected.is_empty())
+            .unwrap_or_else(|| {
+                local_tool_names()
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect()
+            }),
         prompt: words.join(" "),
     })
 }
@@ -100,6 +131,7 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
     let is_restored = !parsed.session_id.is_empty();
 
     let mut agent = new_agent(skills, Some(session), instructions, &cwd);
+    agent.local_tools = parsed.plugins.clone();
     agent.mcp_tools = loaded_mcp
         .0
         .iter()
@@ -127,12 +159,7 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
 
     let tool_names = {
         let agent = agent.lock().unwrap();
-        let mut names = vec![
-            "bash".to_string(),
-            "read".to_string(),
-            "write".to_string(),
-            "edit".to_string(),
-        ];
+        let mut names = agent.local_tools.clone();
         names.extend(agent.mcp_tools.iter().map(|tool| tool.display_name.clone()));
         names.join(", ")
     };
@@ -242,5 +269,42 @@ fn main() {
             }
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugins_repeat_split_trim_and_stable_dedupe() {
+        let parsed = parse_args(vec![
+            "--plugin".into(),
+            " read, bash ".into(),
+            "--plugin".into(),
+            "read,edit".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.plugins, ["read", "bash", "edit"]);
+    }
+
+    #[test]
+    fn plugins_default_all_and_reject_unknown() {
+        assert_eq!(
+            parse_args(Vec::new()).unwrap().plugins,
+            ["bash", "read", "write", "edit"]
+        );
+        assert_eq!(
+            parse_args(vec!["--plugin".into(), ",  ,".into()])
+                .unwrap()
+                .plugins,
+            ["bash", "read", "write", "edit"]
+        );
+        assert_eq!(
+            parse_args(vec!["--plugin".into(), "read,remote".into()])
+                .err()
+                .unwrap(),
+            "Unknown plugin: remote. Available plugins: bash, read, write, edit"
+        );
     }
 }

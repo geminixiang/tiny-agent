@@ -3,50 +3,22 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tiny_agent_rust::mcp::{McpConfig, display_tool_name, load_mcp_tools};
+use tiny_agent_rust::mcp::{McpConfig, McpProtocolEra, display_tool_name, load_mcp_tools};
 
-fn fixture_config(url: String) -> McpConfig {
+fn config(url: String) -> McpConfig {
     McpConfig {
         alias: "fixture".into(),
         url,
         token: None,
         allowed_tools: None,
-        call_timeout_ms: 1_000,
+        call_timeout_ms: 150,
     }
 }
 
-fn start_fixture(tool: Value, call_result: Option<Value>) -> (String, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
-    let count = if call_result.is_some() { 4 } else { 3 };
-    let handle = thread::spawn(move || {
-        for index in 0..count {
-            let (mut stream, _) = listener.accept().unwrap();
-            let _ = read_request(&mut stream);
-            let response = match index {
-                0 => json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26"}}),
-                1 => {
-                    respond(&mut stream, "application/json", "", false);
-                    continue;
-                }
-                2 => json!({"jsonrpc":"2.0","id":2,"result":{"tools":[tool.clone()]}}),
-                _ => json!({"jsonrpc":"2.0","id":3,"result":call_result.clone().unwrap()}),
-            };
-            respond(
-                &mut stream,
-                "application/json",
-                &response.to_string(),
-                false,
-            );
-        }
-    });
-    (url, handle)
-}
-
-fn read_request(stream: &mut TcpStream) -> (String, String) {
+fn read_request(stream: &mut TcpStream) -> (String, Value) {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -54,9 +26,6 @@ fn read_request(stream: &mut TcpStream) -> (String, String) {
     let mut buffer = [0; 4096];
     loop {
         let count = stream.read(&mut buffer).unwrap();
-        if count == 0 {
-            break;
-        }
         bytes.extend_from_slice(&buffer[..count]);
         let text = String::from_utf8_lossy(&bytes);
         if let Some(split) = text.find("\r\n\r\n") {
@@ -73,106 +42,314 @@ fn read_request(stream: &mut TcpStream) -> (String, String) {
             if bytes.len() >= split + 4 + length {
                 return (
                     text[..split].to_string(),
-                    text[split + 4..split + 4 + length].to_string(),
+                    serde_json::from_slice(&bytes[split + 4..split + 4 + length]).unwrap(),
                 );
             }
         }
     }
-    panic!("incomplete request")
 }
 
-fn respond(stream: &mut TcpStream, content_type: &str, body: &str, session: bool) {
-    let session_header = if session {
+fn respond(stream: &mut TcpStream, status: u16, body: Value, session: bool) {
+    let body = body.to_string();
+    let session = if session {
         "Mcp-Session-Id: fixture-session\r\n"
     } else {
         ""
     };
-    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{session_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\n{session}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+}
+
+fn modern_result(index: usize, call: Value) -> Value {
+    match index {
+        0 => json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}),
+        1 => {
+            json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"echo","inputSchema":{"type":"object"}}]})
+        }
+        _ => call,
+    }
 }
 
 #[test]
-fn streamable_http_lists_calls_and_normalizes_tools() {
+fn strict_modern_is_stateless_and_repeats_metadata() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let captured = requests.clone();
     let server = thread::spawn(move || {
-        for index in 0..4 {
+        for index in 0..3 {
             let (mut stream, _) = listener.accept().unwrap();
-            let (headers, body) = read_request(&mut stream);
-            captured
-                .lock()
-                .unwrap()
-                .push((headers.clone(), body.clone()));
-            match index {
-                0 => respond(&mut stream, "application/json", &json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}).to_string(), true),
-                1 => respond(&mut stream, "application/json", "", false),
-                2 => respond(&mut stream, "text/event-stream", &format!("event: message\ndata: {}\n\nevent: message\ndata: {}\n\n", json!({"jsonrpc":"2.0","method":"notifications/progress","params":{}}), json!({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo text.","inputSchema":{"type":"object"}}]}})), false),
-                _ => respond(&mut stream, "application/json", &json!({"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"hello"}],"structuredContent":{"ok":true}}}).to_string(), false),
-            }
+            let request = read_request(&mut stream);
+            captured.lock().unwrap().push(request.clone());
+            let id = request.1["id"].clone();
+            let result = match index {
+                0 => {
+                    json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"protocolVersion":"extra-is-extensible"})
+                }
+                1 => {
+                    json!({
+                        "resultType":"complete",
+                        "ttlMs":0,
+                        "cacheScope":"private",
+                        "tools":[
+                            {
+                                "name":"echo",
+                                "inputSchema":{
+                                    "type":"object",
+                                    "properties":{
+                                        "context":{
+                                            "type":"object",
+                                            "properties":{
+                                                "label":{"type":"string","x-mcp-header":"Nested-Label"}
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            {
+                                "name":"invalid",
+                                "inputSchema":{
+                                    "type":"object",
+                                    "properties":{
+                                        "first":{"type":"string","x-mcp-header":"Trace"},
+                                        "second":{"type":"string","x-mcp-header":"trace"}
+                                    }
+                                }
+                            }
+                        ]
+                    })
+                }
+                _ => json!({"resultType":"complete","content":[{"type":"text","text":"hello"}]}),
+            };
+            respond(
+                &mut stream,
+                200,
+                json!({"jsonrpc":"2.0","id":id,"result":result}),
+                false,
+            );
         }
     });
-
-    let loaded = load_mcp_tools(McpConfig {
-        alias: "fixture".into(),
-        url,
-        token: Some("secret".into()),
-        allowed_tools: Some(vec!["echo".into()]),
-        call_timeout_ms: 1_000,
-    })
-    .unwrap();
-    assert_eq!(loaded.protocol_version, "2025-03-26");
+    let loaded = load_mcp_tools(config(url)).unwrap();
+    assert_eq!(loaded.protocol_era, McpProtocolEra::Modern);
+    assert_eq!(loaded.protocol_version, "2026-07-28");
     assert_eq!(loaded.tools.len(), 1);
     assert_eq!(display_tool_name(&loaded.tools[0].name), "mcp:fixture/echo");
     assert_eq!(
         loaded.tools[0]
             .execute(
-                json!({"message":"hello"}),
+                json!({"context":{"label":" 北極 "}}),
                 &Arc::new(AtomicBool::new(false))
             )
             .unwrap(),
-        "hello\n\nStructured content:\n{\"ok\":true}"
+        "hello"
     );
+    loaded.close();
+    server.join().unwrap();
+    for (index, (headers, body)) in requests.lock().unwrap().iter().enumerate() {
+        let lower = headers.to_ascii_lowercase();
+        assert!(lower.contains("mcp-protocol-version: 2026-07-28"));
+        assert_eq!(
+            lower
+                .lines()
+                .find_map(|line| line.strip_prefix("mcp-method: ")),
+            body["method"].as_str()
+        );
+        assert_eq!(
+            body["params"]["_meta"],
+            json!({
+                "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                "io.modelcontextprotocol/clientInfo":{"name":"tiny-agent","version":"0.1.0"},
+                "io.modelcontextprotocol/clientCapabilities":{}
+            })
+        );
+        assert!(!lower.contains("mcp-session-id:"));
+        if index == 2 {
+            assert!(lower.contains("mcp-name: echo"));
+            assert!(lower.contains("mcp-param-nested-label: =?base64?iowml+altsa=?="));
+            assert_eq!(
+                body["params"]["arguments"],
+                json!({"context":{"label":" 北極 "}})
+            );
+        }
+    }
+}
+
+#[test]
+fn strict_legacy_fallback_uses_session_and_negotiated_version() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let server = thread::spawn(move || {
+        for index in 0..5 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            captured.lock().unwrap().push(request.clone());
+            match index {
+                0 => respond(
+                    &mut stream,
+                    200,
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"error":{"code":-32601,"message":"unknown"}}),
+                    false,
+                ),
+                1 => respond(
+                    &mut stream,
+                    200,
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"protocolVersion":"2025-06-18","capabilities":{}}}),
+                    true,
+                ),
+                2 => respond(&mut stream, 200, Value::Null, false),
+                3 => respond(
+                    &mut stream,
+                    200,
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}),
+                    false,
+                ),
+                _ => respond(
+                    &mut stream,
+                    200,
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"content":[{"type":"text","text":"legacy"}]}}),
+                    false,
+                ),
+            }
+        }
+    });
+    let loaded = load_mcp_tools(config(url)).unwrap();
+    assert_eq!(loaded.protocol_era, McpProtocolEra::Legacy);
+    assert_eq!(loaded.protocol_version, "2025-06-18");
+    assert_eq!(
+        loaded.tools[0]
+            .execute(json!({"value":1}), &Arc::new(AtomicBool::new(false)))
+            .unwrap(),
+        "legacy"
+    );
+    loaded.close();
     server.join().unwrap();
     let requests = requests.lock().unwrap();
-    assert!(requests.iter().all(|(headers, _)| {
-        headers
-            .to_ascii_lowercase()
-            .contains("authorization: bearer secret")
-    }));
+    assert_eq!(requests[1].1["method"], "initialize");
+    assert!(requests[1].1["params"].get("_meta").is_none());
+    assert!(!requests[1].0.to_ascii_lowercase().contains("mcp-method:"));
+    assert_eq!(requests[4].1["method"], "tools/call");
+    assert_eq!(
+        requests[4].1["params"],
+        json!({"name":"echo","arguments":{"value":1}})
+    );
     assert!(
-        requests[2]
+        requests[4]
             .0
             .to_ascii_lowercase()
             .contains("mcp-session-id: fixture-session")
     );
-    assert_eq!(
-        serde_json::from_str::<Value>(&requests[3].1).unwrap()["method"],
-        "tools/call"
-    );
 }
 
 #[test]
-fn rejects_malformed_discovery_and_result_content() {
-    let (url, server) = start_fixture(json!({"name":"bad","inputSchema":42}), None);
-    let error = match load_mcp_tools(fixture_config(url)) {
-        Ok(_) => panic!("invalid schema was accepted"),
-        Err(error) => error,
-    };
-    assert_eq!(error, "MCP tool inputSchema must be an object: bad");
-    server.join().unwrap();
-
-    let (url, server) = start_fixture(
-        json!({"name":"bad","description":"Bad result.","inputSchema":{"type":"object"}}),
-        Some(json!({"content":{"type":"text","text":"not an array"}})),
+fn modern_input_required_is_explicitly_unsupported() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            respond(
+                &mut stream,
+                200,
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":request.1["id"],
+                    "result":modern_result(index, json!({
+                        "resultType":"input_required",
+                        "inputRequests":[{"type":"text","prompt":"More detail"}]
+                    }))
+                }),
+                false,
+            );
+        }
+    });
+    let loaded = load_mcp_tools(config(url)).unwrap();
+    assert_eq!(
+        loaded.tools[0]
+            .execute(json!({}), &Arc::new(AtomicBool::new(false)))
+            .unwrap_err(),
+        "MCP tool requires additional user input; input_required is not supported"
     );
-    let loaded = load_mcp_tools(fixture_config(url)).unwrap();
-    let error = loaded.tools[0]
-        .execute(
-            json!({"arbitrary":{"nested":[1, true]}}),
-            &Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap_err();
-    assert_eq!(error, "MCP tool content must be an array");
+    loaded.close();
+    server.join().unwrap();
+}
+
+#[test]
+fn rejects_chunked_response_over_10mb() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_request(&mut stream);
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..161 {
+            if write!(stream, "{:x}\r\n", chunk.len()).is_err()
+                || stream.write_all(&chunk).is_err()
+                || stream.write_all(b"\r\n").is_err()
+            {
+                return;
+            }
+        }
+        let _ = stream.write_all(b"0\r\n\r\n");
+    });
+    assert_eq!(
+        load_mcp_tools(config(url)).err().unwrap(),
+        "MCP response exceeded 10MB"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn rejects_oversized_content_length_without_reading_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_request(&mut stream);
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 10485761\r\nConnection: close\r\n\r\n").unwrap();
+    });
+    assert_eq!(
+        load_mcp_tools(config(url)).err().unwrap(),
+        "MCP response exceeded 10MB"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn close_joins_cancelled_request_workers_within_transport_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            if index < 2 {
+                let result = if index == 0 {
+                    json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}})
+                } else {
+                    json!({"resultType":"complete","ttlMs":0,"cacheScope":"public","tools":[{"name":"slow","inputSchema":{"type":"object"}}]})
+                };
+                respond(
+                    &mut stream,
+                    200,
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":result}),
+                    false,
+                );
+            } else {
+                thread::sleep(Duration::from_millis(500));
+            }
+        }
+    });
+    let loaded = load_mcp_tools(config(url)).unwrap();
+    let cancel = Arc::new(AtomicBool::new(true));
+    assert_eq!(
+        loaded.tools[0].execute(json!({}), &cancel).unwrap_err(),
+        "Operation aborted"
+    );
+    let start = Instant::now();
+    loaded.close();
+    assert!(start.elapsed() < Duration::from_secs(1));
     server.join().unwrap();
 }

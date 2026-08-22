@@ -423,6 +423,7 @@ pub struct Agent {
     pub client: Arc<ureq::Agent>,
     pub on_tool: Arc<dyn Fn(ToolEvent) + Send + Sync>,
     pub cwd: String,
+    pub local_tools: Vec<String>,
     pub mcp_tools: Vec<mcp::McpTool>,
 }
 
@@ -462,6 +463,10 @@ pub fn new_agent(
         client: Arc::new(open_router_agent()),
         on_tool: Arc::new(|_| {}),
         cwd: cwd.to_string(),
+        local_tools: local_tool_names()
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
         mcp_tools: Vec::new(),
     }
 }
@@ -619,6 +624,12 @@ impl Agent {
             let mut definitions =
                 serde_json::from_str::<Vec<serde_json::Value>>(tool_definitions_json())
                     .unwrap_or_default();
+            definitions.retain(|definition| {
+                definition
+                    .pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| self.local_tools.iter().any(|selected| selected == name))
+            });
             definitions.extend(self.mcp_tools.iter().map(|tool| {
                 serde_json::json!({
                     "type": "function",
@@ -847,6 +858,9 @@ impl Agent {
     }
 
     pub fn execute_tool(&self, name: &str, args: &ToolArgs) -> Result<String, String> {
+        if !self.local_tools.iter().any(|selected| selected == name) {
+            return Err(format!("unknown tool: {name}"));
+        }
         if self.cancel.load(Ordering::SeqCst) {
             return Err("Operation aborted".to_string());
         }
@@ -1065,6 +1079,10 @@ fn stop_reason_name(reason: StopReason) -> &'static str {
         StopReason::Length => "length",
         StopReason::ToolUse => "toolUse",
     }
+}
+
+pub const fn local_tool_names() -> &'static [&'static str] {
+    &["bash", "read", "write", "edit"]
 }
 
 pub fn tool_definitions_json() -> &'static str {

@@ -1,19 +1,42 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
-use std::thread;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde_json::{Value, json};
 
+const MODERN_VERSION: &str = "2026-07-28";
+const LEGACY_OFFER: &str = "2025-11-25";
+const LEGACY_VERSIONS: &[&str] = &[
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+    "2024-10-07",
+];
+const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 50 * 1024;
 const MAX_SCHEMA_BYTES: usize = 50 * 1024;
 const MAX_DESCRIPTION_BYTES: usize = 8 * 1024;
 const MAX_SCHEMA_DEPTH: usize = 20;
 const MAX_TOOLS: usize = 64;
 const STARTUP_TIMEOUT_MS: u64 = 10_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum McpProtocolEra {
+    Modern,
+    Legacy,
+}
+
+#[derive(Clone)]
+struct McpHeaderDeclaration {
+    path: Vec<String>,
+    name: String,
+}
 
 #[derive(Clone)]
 pub struct McpTool {
@@ -22,6 +45,7 @@ pub struct McpTool {
     pub description: String,
     pub parameters: Value,
     remote_name: String,
+    header_declarations: Vec<McpHeaderDeclaration>,
     client: Arc<McpClient>,
 }
 
@@ -30,12 +54,23 @@ impl McpTool {
         if !arguments.is_object() {
             return Err("MCP tool arguments must be a JSON object".into());
         }
-        let result = self.client.request(
+        let headers = build_mcp_param_headers(&self.header_declarations, &arguments);
+        let result = self.client.request_with_headers(
             "tools/call",
-            json!({"name": self.remote_name, "arguments": arguments}),
+            json!({"name":self.remote_name,"arguments":arguments}),
             self.client.call_timeout_ms,
             Some(cancel),
+            headers,
         )?;
+        if *self
+            .client
+            .era
+            .lock()
+            .map_err(|_| "MCP protocol era lock failed")?
+            == McpProtocolEra::Modern
+        {
+            validate_modern_call_result(&result)?;
+        }
         if result.get("resultType").and_then(Value::as_str) == Some("input_required") {
             return Err(
                 "MCP tool requires additional user input; input_required is not supported".into(),
@@ -56,17 +91,17 @@ impl McpTool {
 pub struct LoadedMcp {
     pub alias: String,
     pub protocol_version: String,
+    pub protocol_era: McpProtocolEra,
     pub tools: Vec<McpTool>,
     client: Arc<McpClient>,
 }
-
 impl LoadedMcp {
     pub fn close(&self) {
         self.client.close();
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct McpConfig {
     pub alias: String,
     pub url: String,
@@ -75,17 +110,47 @@ pub struct McpConfig {
     pub call_timeout_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+enum RequestMode {
+    Modern,
+    Legacy,
+}
+
+#[derive(Debug)]
+enum RequestError {
+    Http(u16, Option<Value>),
+    Rpc(Value),
+    Message(String),
+}
+
+impl RequestError {
+    fn message(self) -> String {
+        match self {
+            Self::Http(status, _) => format!("MCP HTTP {status}"),
+            Self::Rpc(error) => {
+                let code = error
+                    .get("code")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default();
+                format!("MCP JSON-RPC error {code}")
+            }
+            Self::Message(message) => message,
+        }
+    }
+}
+
 struct McpClient {
     agent: ureq::Agent,
     url: String,
     token: Option<String>,
-    session_id: std::sync::Mutex<Option<String>>,
-    protocol_version: std::sync::Mutex<String>,
+    session_id: Mutex<Option<String>>,
+    protocol_version: Mutex<String>,
+    era: Mutex<McpProtocolEra>,
     next_id: AtomicU64,
     call_timeout_ms: u64,
     closed: AtomicBool,
+    workers: Mutex<Vec<JoinHandle<()>>>,
 }
-
 impl Drop for McpClient {
     fn drop(&mut self) {
         self.close();
@@ -100,17 +165,72 @@ impl McpClient {
         timeout_ms: u64,
         cancel: Option<&Arc<AtomicBool>>,
     ) -> Result<Value, String> {
+        self.request_with_headers(method, params, timeout_ms, cancel, Vec::new())
+    }
+
+    fn request_with_headers(
+        &self,
+        method: &str,
+        params: Value,
+        timeout_ms: u64,
+        cancel: Option<&Arc<AtomicBool>>,
+        headers: Vec<(String, String)>,
+    ) -> Result<Value, String> {
+        let mode = match *self
+            .era
+            .lock()
+            .map_err(|_| "MCP protocol era lock failed")?
+        {
+            McpProtocolEra::Modern => RequestMode::Modern,
+            McpProtocolEra::Legacy => RequestMode::Legacy,
+        };
+        self.request_mode_raw_with_headers(method, params, timeout_ms, cancel, mode, headers)
+            .map_err(RequestError::message)
+    }
+
+    fn request_mode_raw(
+        &self,
+        method: &str,
+        params: Value,
+        timeout_ms: u64,
+        cancel: Option<&Arc<AtomicBool>>,
+        mode: RequestMode,
+    ) -> Result<Value, RequestError> {
+        self.request_mode_raw_with_headers(method, params, timeout_ms, cancel, mode, Vec::new())
+    }
+
+    fn request_mode_raw_with_headers(
+        &self,
+        method: &str,
+        mut params: Value,
+        timeout_ms: u64,
+        cancel: Option<&Arc<AtomicBool>>,
+        mode: RequestMode,
+        headers: Vec<(String, String)>,
+    ) -> Result<Value, RequestError> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err("MCP connection is closed".into());
+            return Err(RequestError::Message("MCP connection is closed".into()));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        if matches!(mode, RequestMode::Modern) {
+            add_modern_metadata(&mut params).map_err(RequestError::Message)?;
+        }
         let body = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
-        self.post(body, timeout_ms, cancel, Some(id))
+        self.post(body, timeout_ms, cancel, Some(id), mode, headers)
     }
 
     fn notify(&self, method: &str, timeout_ms: u64) -> Result<(), String> {
         let body = json!({"jsonrpc":"2.0","method":method}).to_string();
-        self.post(body, timeout_ms, None, None).map(|_| ())
+        self.post(
+            body,
+            timeout_ms,
+            None,
+            None,
+            RequestMode::Legacy,
+            Vec::new(),
+        )
+        .map(|_| ())
+        .map_err(RequestError::message)
     }
 
     fn post(
@@ -119,7 +239,11 @@ impl McpClient {
         timeout_ms: u64,
         cancel: Option<&Arc<AtomicBool>>,
         expected_id: Option<u64>,
-    ) -> Result<Value, String> {
+        mode: RequestMode,
+        headers: Vec<(String, String)>,
+    ) -> Result<Value, RequestError> {
+        self.reap_workers();
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let (tx, rx) = mpsc::channel();
         let agent = self.agent.clone();
         let url = self.url.clone();
@@ -127,114 +251,219 @@ impl McpClient {
         let session = self
             .session_id
             .lock()
-            .map_err(|_| "MCP session lock failed")?
+            .map_err(|_| RequestError::Message("MCP session lock failed".into()))?
             .clone();
-        let protocol_version = self
+        let version = self
             .protocol_version
             .lock()
-            .map_err(|_| "MCP protocol version lock failed")?
+            .map_err(|_| RequestError::Message("MCP protocol version lock failed".into()))?
             .clone();
-        thread::spawn(move || {
+        let method = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .ok_or_else(|| RequestError::Message("MCP request has no method".into()))?;
+        let transport_timeout = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1));
+        let handle = thread::spawn(move || {
             let mut request = agent
                 .post(&url)
                 .header("Content-Type", "application/json")
-                .header("Accept", "application/json, text/event-stream")
-                .header("MCP-Protocol-Version", protocol_version);
+                .header("Accept", "application/json, text/event-stream");
+            if matches!(mode, RequestMode::Modern) {
+                request = request
+                    .header("MCP-Protocol-Version", MODERN_VERSION)
+                    .header("Mcp-Method", &method);
+                for (name, value) in headers {
+                    request = request.header(name, value);
+                }
+                if method == "tools/call"
+                    && let Ok(value) = serde_json::from_str::<Value>(&body)
+                    && let Some(name) = value.pointer("/params/name").and_then(Value::as_str)
+                {
+                    request = request.header("Mcp-Name", encode_mcp_name(name));
+                }
+            } else if !version.is_empty() {
+                request = request.header("MCP-Protocol-Version", version);
+            }
             if let Some(token) = token {
                 request = request.header("Authorization", format!("Bearer {token}"));
             }
-            if let Some(session) = session {
+            if matches!(mode, RequestMode::Legacy)
+                && let Some(session) = session
+            {
                 request = request.header("Mcp-Session-Id", session);
             }
-            let response = request.send(body.as_bytes()).map_err(|e| e.to_string());
-            let _ = tx.send(response.and_then(|response| read_response(response, expected_id)));
+            let response = request
+                .config()
+                .timeout_global(Some(transport_timeout))
+                .timeout_connect(Some(transport_timeout))
+                .timeout_recv_response(Some(transport_timeout))
+                .timeout_recv_body(Some(transport_timeout))
+                .build()
+                .send(body.as_bytes());
+            let result = response
+                .map_err(|_| RequestError::Message("MCP transport request failed".into()))
+                .and_then(|response| read_response(response, expected_id));
+            let _ = tx.send(result);
         });
-        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        self.workers
+            .lock()
+            .map_err(|_| RequestError::Message("MCP worker lock failed".into()))?
+            .push(handle);
         loop {
             if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-                // ureq is blocking and cannot abort an in-flight socket. Returning detaches the
-                // bounded worker; its configured I/O timeout remains the final cleanup bound.
-                return Err("Operation aborted".into());
+                return Err(RequestError::Message("Operation aborted".into()));
             }
-            if std::time::Instant::now() >= deadline {
-                return Err("MCP request timed out".into());
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(RequestError::Message("MCP request timed out".into()));
             }
-            match rx.recv_timeout(Duration::from_millis(20)) {
+            match rx.recv_timeout(remaining.min(Duration::from_millis(20))) {
                 Ok(Ok((value, response_session))) => {
-                    if let Some(value) = response_session {
-                        *self
-                            .session_id
-                            .lock()
-                            .map_err(|_| "MCP session lock failed")? = Some(value);
+                    self.reap_workers();
+                    if matches!(mode, RequestMode::Legacy)
+                        && let Some(value) = response_session
+                    {
+                        *self.session_id.lock().map_err(|_| {
+                            RequestError::Message("MCP session lock failed".into())
+                        })? = Some(value);
                     }
                     if expected_id.is_none() || value.is_null() {
                         return Ok(Value::Null);
                     }
                     if let Some(error) = value.get("error") {
-                        return Err(format!("MCP error: {error}"));
+                        return Err(RequestError::Rpc(error.clone()));
                     }
                     return value
                         .get("result")
                         .cloned()
-                        .ok_or("MCP response has no result".into());
+                        .ok_or_else(|| RequestError::Message("MCP response has no result".into()));
                 }
-                Ok(Err(error)) => return Err(error),
+                Ok(Err(error)) => {
+                    self.reap_workers();
+                    return Err(error);
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => return Err("MCP request worker stopped".into()),
+                Err(_) => {
+                    return Err(RequestError::Message("MCP request worker stopped".into()));
+                }
             }
         }
     }
 
-    fn close(&self) {
-        if self.closed.swap(true, Ordering::SeqCst) {
-            return;
+    fn reap_workers(&self) {
+        if let Ok(mut workers) = self.workers.lock() {
+            let mut pending = Vec::new();
+            for handle in workers.drain(..) {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                } else {
+                    pending.push(handle);
+                }
+            }
+            *workers = pending;
         }
-        let Some(session) = self.session_id.lock().ok().and_then(|value| value.clone()) else {
-            return;
-        };
-        let mut request = self
-            .agent
-            .delete(&self.url)
-            .header("Mcp-Session-Id", session);
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        let _ = request.call();
     }
+
+    fn close(&self) {
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            let session = self.session_id.lock().ok().and_then(|value| value.clone());
+            if let Some(session) = session {
+                let mut request = self
+                    .agent
+                    .delete(&self.url)
+                    .header("Mcp-Session-Id", session);
+                if let Some(token) = &self.token {
+                    request = request.header("Authorization", format!("Bearer {token}"));
+                }
+                let _ = request
+                    .config()
+                    .timeout_global(Some(Duration::from_secs(1)))
+                    .build()
+                    .call();
+            }
+        }
+        if let Ok(mut workers) = self.workers.lock() {
+            for handle in workers.drain(..) {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+fn add_modern_metadata(params: &mut Value) -> Result<(), String> {
+    let object = params
+        .as_object_mut()
+        .ok_or("MCP request params must be an object")?;
+    object.insert(
+        "_meta".into(),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": MODERN_VERSION,
+            "io.modelcontextprotocol/clientInfo": {"name":"tiny-agent","version":"0.1.0"},
+            "io.modelcontextprotocol/clientCapabilities": {}
+        }),
+    );
+    Ok(())
 }
 
 fn read_response(
     mut response: ureq::http::Response<ureq::Body>,
     expected_id: Option<u64>,
-) -> Result<(Value, Option<String>), String> {
+) -> Result<(Value, Option<String>), RequestError> {
     let status = response.status().as_u16();
     let session = response
         .headers()
         .get("Mcp-Session-Id")
-        .and_then(|value| value.to_str().ok())
+        .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     let content_type = response
         .headers()
         .get("Content-Type")
-        .and_then(|value| value.to_str().ok())
+        .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let text = response
+    if let Some(length) = response
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        && length > MAX_RESPONSE_BYTES
+    {
+        return Err(RequestError::Message("MCP response exceeded 10MB".into()));
+    }
+    let mut bytes = Vec::new();
+    response
         .body_mut()
-        .read_to_string()
-        .map_err(|e| e.to_string())?;
+        .as_reader()
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| RequestError::Message("Failed to read MCP response".into()))?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(RequestError::Message("MCP response exceeded 10MB".into()));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| RequestError::Message("MCP response was not valid UTF-8".into()))?;
     if !(200..300).contains(&status) {
-        return Err(format!("MCP HTTP {status}"));
+        return Err(RequestError::Http(
+            status,
+            serde_json::from_str::<Value>(&text).ok(),
+        ));
     }
     if text.trim().is_empty() {
         return Ok((Value::Null, session));
     }
     let payload = if content_type.starts_with("text/event-stream") {
-        parse_sse(&text, expected_id)?
+        parse_sse(&text, expected_id).map_err(RequestError::Message)?
     } else {
-        let payload: Value =
-            serde_json::from_str(&text).map_err(|e| format!("Invalid MCP JSON response: {e}"))?;
-        validate_response_id(&payload, expected_id)?;
+        let payload: Value = serde_json::from_str(&text)
+            .map_err(|_| RequestError::Message("Invalid MCP JSON response".into()))?;
+        validate_response_id(&payload, expected_id).map_err(RequestError::Message)?;
         payload
     };
     Ok((payload, session))
@@ -251,22 +480,18 @@ fn parse_sse(text: &str, expected_id: Option<u64>) -> Result<Value, String> {
             continue;
         }
         let value: Value =
-            serde_json::from_str(&data).map_err(|e| format!("Invalid MCP SSE response: {e}"))?;
+            serde_json::from_str(&data).map_err(|_| "Invalid MCP SSE response".to_string())?;
         if validate_response_id(&value, expected_id).is_ok() {
             return Ok(value);
         }
     }
     Err("MCP SSE response contained no matching JSON-RPC response".into())
 }
-
 fn validate_response_id(value: &Value, expected_id: Option<u64>) -> Result<(), String> {
-    let Some(expected_id) = expected_id else {
-        return Ok(());
-    };
-    if value.get("id").and_then(Value::as_u64) != Some(expected_id) {
-        return Err(format!(
-            "MCP response id did not match request {expected_id}"
-        ));
+    if let Some(expected) = expected_id
+        && value.get("id").and_then(Value::as_u64) != Some(expected)
+    {
+        return Err(format!("MCP response id did not match request {expected}"));
     }
     Ok(())
 }
@@ -278,8 +503,7 @@ pub fn load_mcp_configs(aliases: &[String]) -> Result<Vec<McpConfig>, String> {
     let path = std::env::var("TINY_MCP_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join(".tiny-agent/mcp.json")
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".tiny-agent/mcp.json")
         });
     let text = std::fs::read_to_string(path).map_err(|_| {
         "Failed to load MCP catalog: file is missing, unreadable, or invalid JSON".to_string()
@@ -332,7 +556,7 @@ fn validate_catalog(value: &Value, aliases: &[String]) -> Result<Vec<McpConfig>,
         let allowed_tools = validate_allowed_tools(alias, server.get("allowedTools"))?;
         let call_timeout_ms = match server.get("callTimeoutMs") {
             None => 30_000,
-            Some(Value::Number(number)) => number.as_u64().filter(|n| *n > 0).ok_or_else(|| {
+            Some(Value::Number(n)) => n.as_u64().filter(|n| *n > 0).ok_or_else(|| {
                 format!("MCP server {alias} callTimeoutMs must be a positive number")
             })?,
             _ => {
@@ -346,30 +570,30 @@ fn validate_catalog(value: &Value, aliases: &[String]) -> Result<Vec<McpConfig>,
             (url.to_string(), token_env, allowed_tools, call_timeout_ms),
         );
     }
-
-    let mut configs = Vec::new();
-    for alias in aliases {
-        let (url, token_env, allowed_tools, call_timeout_ms) = validated
-            .get(alias)
-            .ok_or_else(|| format!("Unknown MCP server: {alias}"))?;
-        let token = match token_env {
-            Some(name) => Some(
-                std::env::var(name)
-                    .ok()
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| format!("MCP token environment variable is not set: {name}"))?,
-            ),
-            None => None,
-        };
-        configs.push(McpConfig {
-            alias: alias.trim().into(),
-            url: url.clone(),
-            token,
-            allowed_tools: allowed_tools.clone(),
-            call_timeout_ms: *call_timeout_ms,
-        });
-    }
-    Ok(configs)
+    aliases
+        .iter()
+        .map(|alias| {
+            let (url, token_env, allowed_tools, call_timeout_ms) = validated
+                .get(alias)
+                .ok_or_else(|| format!("Unknown MCP server: {alias}"))?;
+            let token = token_env
+                .as_ref()
+                .map(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| format!("MCP token environment variable is not set: {name}"))
+                })
+                .transpose()?;
+            Ok(McpConfig {
+                alias: alias.trim().into(),
+                url: url.clone(),
+                token,
+                allowed_tools: allowed_tools.clone(),
+                call_timeout_ms: *call_timeout_ms,
+            })
+        })
+        .collect()
 }
 
 fn validate_allowed_tools(
@@ -383,12 +607,9 @@ fn validate_allowed_tools(
     let mut seen = HashSet::new();
     let mut tools = Vec::new();
     for value in array {
-        let name = value
-            .as_str()
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| {
-                format!("MCP server {alias} allowedTools must contain nonempty strings")
-            })?;
+        let name = value.as_str().filter(|n| !n.is_empty()).ok_or_else(|| {
+            format!("MCP server {alias} allowedTools must contain nonempty strings")
+        })?;
         if !seen.insert(name.to_string()) {
             return Err(format!(
                 "MCP server {alias} allowedTools must not contain duplicates"
@@ -398,13 +619,11 @@ fn validate_allowed_tools(
     }
     Ok(Some(tools))
 }
-
 fn valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
-
 fn validate_url(url: &str) -> Result<(), String> {
     let uri: http::Uri = url.parse().map_err(|_| "MCP URL must be a valid URL")?;
     let scheme = uri.scheme_str().ok_or("MCP URL must be a valid URL")?;
@@ -412,9 +631,12 @@ fn validate_url(url: &str) -> Result<(), String> {
     if authority.as_str().contains('@') {
         return Err("MCP URL must not contain credentials".into());
     }
-    let host = authority.host();
     if scheme != "https"
-        && !(scheme == "http" && matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1"))
+        && !(scheme == "http"
+            && matches!(
+                authority.host(),
+                "127.0.0.1" | "localhost" | "[::1]" | "::1"
+            ))
     {
         return Err("MCP URL must use HTTPS unless it targets loopback".into());
     }
@@ -424,59 +646,57 @@ fn validate_url(url: &str) -> Result<(), String> {
 pub fn load_mcp_tools(config: McpConfig) -> Result<LoadedMcp, String> {
     let agent_config = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_millis(
-            config.call_timeout_ms.max(STARTUP_TIMEOUT_MS),
-        )))
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_recv_response(Some(Duration::from_millis(
-            config.call_timeout_ms.max(STARTUP_TIMEOUT_MS),
-        )))
-        .timeout_recv_body(Some(Duration::from_millis(
-            config.call_timeout_ms.max(STARTUP_TIMEOUT_MS),
-        )))
         .build();
     let client = Arc::new(McpClient {
         agent: ureq::Agent::new_with_config(agent_config),
-        url: config.url,
-        token: config.token,
-        session_id: std::sync::Mutex::new(None),
-        protocol_version: std::sync::Mutex::new("2025-03-26".into()),
+        url: config.url.clone(),
+        token: config.token.clone(),
+        session_id: Mutex::new(None),
+        protocol_version: Mutex::new(MODERN_VERSION.into()),
+        era: Mutex::new(McpProtocolEra::Modern),
         next_id: AtomicU64::new(1),
         call_timeout_ms: config.call_timeout_ms,
         closed: AtomicBool::new(false),
+        workers: Mutex::new(Vec::new()),
     });
-    let startup_deadline = Instant::now() + Duration::from_millis(STARTUP_TIMEOUT_MS);
-    let initialized = client.request(
-        "initialize",
-        json!({
-            "protocolVersion":"2025-03-26",
-            "capabilities":{},
-            "clientInfo":{"name":"tiny-agent","version":"0.1.0"}
-        }),
-        remaining_ms(startup_deadline)?,
-        None,
-    )?;
-    let protocol_version = initialized
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .ok_or("MCP server did not negotiate a protocol version")?
-        .to_string();
-    if protocol_version != "2025-03-26" {
-        return Err(format!(
-            "MCP server negotiated unsupported protocol version: {protocol_version}"
-        ));
-    }
-    *client
-        .protocol_version
-        .lock()
-        .map_err(|_| "MCP protocol version lock failed")? = protocol_version.clone();
-    client.notify("notifications/initialized", remaining_ms(startup_deadline)?)?;
-    let listed = client.request(
-        "tools/list",
+    let deadline = Instant::now() + Duration::from_millis(STARTUP_TIMEOUT_MS);
+    let discover = client.request_mode_raw(
+        "server/discover",
         json!({}),
-        remaining_ms(startup_deadline)?,
+        remaining_ms(deadline)?,
         None,
-    )?;
+        RequestMode::Modern,
+    );
+    let (era, protocol_version) = match classify_discover(discover) {
+        DiscoverDecision::Modern => (McpProtocolEra::Modern, MODERN_VERSION.to_string()),
+        DiscoverDecision::RetryModern => {
+            let retry = client.request_mode_raw(
+                "server/discover",
+                json!({}),
+                remaining_ms(deadline)?,
+                None,
+                RequestMode::Modern,
+            );
+            match classify_discover(retry) {
+                DiscoverDecision::Modern => (McpProtocolEra::Modern, MODERN_VERSION.to_string()),
+                DiscoverDecision::Legacy => negotiate_legacy(&client, deadline)?,
+                DiscoverDecision::RetryModern => {
+                    return Err("MCP modern discovery retry was rejected".into());
+                }
+                DiscoverDecision::Hard(error) => return Err(error),
+            }
+        }
+        DiscoverDecision::Legacy => negotiate_legacy(&client, deadline)?,
+        DiscoverDecision::Hard(error) => return Err(error),
+    };
+    *client
+        .era
+        .lock()
+        .map_err(|_| "MCP protocol era lock failed")? = era;
+    let listed = client.request("tools/list", json!({}), remaining_ms(deadline)?, None)?;
+    if era == McpProtocolEra::Modern {
+        validate_modern_list_result(&listed)?;
+    }
     let remotes = listed
         .get("tools")
         .and_then(Value::as_array)
@@ -498,7 +718,7 @@ pub fn load_mcp_tools(config: McpConfig) -> Result<LoadedMcp, String> {
         let name = remote
             .get("name")
             .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
+            .filter(|n| !n.is_empty())
             .ok_or("MCP tool name must not be empty")?;
         if !remote_names.insert(name.to_string()) {
             return Err(format!("duplicate MCP tool name: {name}"));
@@ -508,13 +728,21 @@ pub fn load_mcp_tools(config: McpConfig) -> Result<LoadedMcp, String> {
         }
         let schema = remote
             .get("inputSchema")
-            .filter(|schema| schema.is_object())
+            .filter(|s| s.is_object())
             .cloned()
             .ok_or_else(|| format!("MCP tool inputSchema must be an object: {name}"))?;
         validate_schema(&schema, name)?;
+        let header_declarations = if era == McpProtocolEra::Modern {
+            let Some(declarations) = scan_mcp_header_declarations(&schema) else {
+                continue;
+            };
+            declarations
+        } else {
+            Vec::new()
+        };
         let description = match remote.get("description") {
             None => format!("MCP tool {name} from {}.", config.alias),
-            Some(Value::String(description)) => description.clone(),
+            Some(Value::String(v)) => v.clone(),
             Some(_) => return Err(format!("MCP tool description must be a string: {name}")),
         };
         if description.len() > MAX_DESCRIPTION_BYTES {
@@ -530,6 +758,7 @@ pub fn load_mcp_tools(config: McpConfig) -> Result<LoadedMcp, String> {
             description,
             parameters: schema,
             remote_name: name.into(),
+            header_declarations,
             client: client.clone(),
         });
     }
@@ -548,19 +777,332 @@ pub fn load_mcp_tools(config: McpConfig) -> Result<LoadedMcp, String> {
     Ok(LoadedMcp {
         alias: config.alias,
         protocol_version,
+        protocol_era: era,
         tools,
         client,
     })
 }
 
+fn negotiate_legacy(
+    client: &Arc<McpClient>,
+    deadline: Instant,
+) -> Result<(McpProtocolEra, String), String> {
+    *client
+        .era
+        .lock()
+        .map_err(|_| "MCP protocol era lock failed")? = McpProtocolEra::Legacy;
+    *client
+        .protocol_version
+        .lock()
+        .map_err(|_| "MCP protocol version lock failed")? = String::new();
+    let initialized = client
+        .request_mode_raw(
+            "initialize",
+            json!({"protocolVersion":LEGACY_OFFER,"capabilities":{},"clientInfo":{"name":"tiny-agent","version":"0.1.0"}}),
+            remaining_ms(deadline)?,
+            None,
+            RequestMode::Legacy,
+        )
+        .map_err(RequestError::message)?;
+    let version = initialized
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .ok_or("MCP server did not negotiate a protocol version")?
+        .to_string();
+    if !LEGACY_VERSIONS.contains(&version.as_str()) {
+        return Err(format!(
+            "MCP server negotiated unsupported protocol version: {version}"
+        ));
+    }
+    *client
+        .protocol_version
+        .lock()
+        .map_err(|_| "MCP protocol version lock failed")? = version.clone();
+    client.notify("notifications/initialized", remaining_ms(deadline)?)?;
+    Ok((McpProtocolEra::Legacy, version))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum DiscoverDecision {
+    Modern,
+    RetryModern,
+    Legacy,
+    Hard(String),
+}
+
+fn classify_discover(result: Result<Value, RequestError>) -> DiscoverDecision {
+    match result {
+        Ok(result) => {
+            let Some(object) = result.as_object() else {
+                return DiscoverDecision::Legacy;
+            };
+            if object.get("resultType").and_then(Value::as_str) != Some("complete")
+                || !object.get("capabilities").is_some_and(Value::is_object)
+            {
+                return DiscoverDecision::Legacy;
+            }
+            let Some(versions) = string_array(object.get("supportedVersions")) else {
+                return DiscoverDecision::Legacy;
+            };
+            if versions.contains(&MODERN_VERSION) {
+                DiscoverDecision::Modern
+            } else {
+                DiscoverDecision::Legacy
+            }
+        }
+        Err(RequestError::Rpc(error)) => classify_discover_rpc_error(&error),
+        Err(RequestError::Http(status, payload)) => {
+            if matches!(status, 401 | 403) || status >= 500 {
+                return DiscoverDecision::Hard(format!("MCP HTTP {status}"));
+            }
+            if (400..500).contains(&status) {
+                if let Some(error) = payload.as_ref().and_then(|value| value.get("error")) {
+                    return classify_discover_rpc_error(error);
+                }
+                return DiscoverDecision::Legacy;
+            }
+            DiscoverDecision::Hard(format!("MCP HTTP {status}"))
+        }
+        Err(RequestError::Message(error)) => DiscoverDecision::Hard(error),
+    }
+}
+
+fn classify_discover_rpc_error(error: &Value) -> DiscoverDecision {
+    if error.get("code").and_then(Value::as_i64) != Some(-32022) {
+        return DiscoverDecision::Legacy;
+    }
+    let Some(supported) = string_array(error.pointer("/data/supported")) else {
+        return DiscoverDecision::Legacy;
+    };
+    if supported.contains(&MODERN_VERSION) {
+        return DiscoverDecision::RetryModern;
+    }
+    if supported.iter().any(|version| modern_version(version)) {
+        return DiscoverDecision::Hard(
+            "MCP server supports an incompatible modern protocol version".into(),
+        );
+    }
+    DiscoverDecision::Legacy
+}
+
+fn string_array(value: Option<&Value>) -> Option<Vec<&str>> {
+    let values = value?.as_array()?;
+    if values.is_empty() {
+        return None;
+    }
+    values.iter().map(Value::as_str).collect()
+}
+
+fn modern_version(version: &str) -> bool {
+    version >= MODERN_VERSION
+}
+
+fn validate_modern_list_result(result: &Value) -> Result<(), String> {
+    let object = result
+        .as_object()
+        .ok_or("MCP modern tools/list result must be an object")?;
+    validate_complete_result_type(object, "tools/list")?;
+    object
+        .get("ttlMs")
+        .and_then(Value::as_u64)
+        .ok_or("MCP modern tools/list ttlMs must be a nonnegative integer")?;
+    if !matches!(
+        object.get("cacheScope").and_then(Value::as_str),
+        Some("public" | "private")
+    ) {
+        return Err("MCP modern tools/list cacheScope must be public or private".into());
+    }
+    Ok(())
+}
+
+fn validate_modern_call_result(result: &Value) -> Result<(), String> {
+    let object = result
+        .as_object()
+        .ok_or("MCP modern tools/call result must be an object")?;
+    let result_type = object
+        .get("resultType")
+        .and_then(Value::as_str)
+        .ok_or("MCP modern tools/call resultType must be a string")?;
+    match result_type {
+        "input_required" => {
+            let has_requests = object
+                .get("inputRequests")
+                .and_then(Value::as_array)
+                .is_some_and(|requests| !requests.is_empty());
+            let has_state = object
+                .get("requestState")
+                .is_some_and(|state| !state.is_null());
+            if !has_requests && !has_state {
+                return Err(
+                    "MCP modern tools/call input_required must include inputRequests or requestState"
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+        "complete" => {
+            if !object.get("content").is_some_and(Value::is_array) {
+                return Err("MCP modern tools/call complete content must be an array".into());
+            }
+            Ok(())
+        }
+        _ => Err(format!(
+            "Unsupported MCP tools/call resultType: {result_type}"
+        )),
+    }
+}
+
+fn validate_complete_result_type(
+    object: &serde_json::Map<String, Value>,
+    method: &str,
+) -> Result<(), String> {
+    let result_type = object
+        .get("resultType")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("MCP modern {method} resultType must be a string"))?;
+    if result_type != "complete" {
+        return Err(format!(
+            "Unsupported MCP {method} resultType: {result_type}"
+        ));
+    }
+    Ok(())
+}
+
+fn valid_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn scan_mcp_header_declarations(schema: &Value) -> Option<Vec<McpHeaderDeclaration>> {
+    fn visit(
+        schema: &Value,
+        path: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+        declarations: &mut Vec<McpHeaderDeclaration>,
+    ) -> bool {
+        let Some(object) = schema.as_object() else {
+            return true;
+        };
+        if let Some(raw) = object.get("x-mcp-header") {
+            let Some(name) = raw.as_str() else {
+                return false;
+            };
+            let primitive = matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("string" | "number" | "integer" | "boolean")
+            );
+            let folded = name.to_ascii_lowercase();
+            if path.is_empty() || !primitive || !valid_http_token(name) || !seen.insert(folded) {
+                return false;
+            }
+            declarations.push(McpHeaderDeclaration {
+                path: path.clone(),
+                name: name.to_string(),
+            });
+        }
+        let Some(properties) = object.get("properties").and_then(Value::as_object) else {
+            return true;
+        };
+        for (name, child) in properties {
+            path.push(name.clone());
+            let valid = visit(child, path, seen, declarations);
+            path.pop();
+            if !valid {
+                return false;
+            }
+        }
+        true
+    }
+
+    let mut declarations = Vec::new();
+    let mut seen = HashSet::new();
+    visit(schema, &mut Vec::new(), &mut seen, &mut declarations).then_some(declarations)
+}
+
+fn value_at_path<'a>(arguments: &'a Value, path: &[String]) -> Option<&'a Value> {
+    path.iter().try_fold(arguments, |value, key| value.get(key))
+}
+
+fn mirrored_primitive(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => {
+            if let Some(integer) = value.as_i64() {
+                return (integer.unsigned_abs() <= 9_007_199_254_740_991)
+                    .then(|| integer.to_string());
+            }
+            if let Some(integer) = value.as_u64() {
+                return (integer <= 9_007_199_254_740_991).then(|| integer.to_string());
+            }
+            let number = value.as_f64()?;
+            number.is_finite().then(|| number.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn build_mcp_param_headers(
+    declarations: &[McpHeaderDeclaration],
+    arguments: &Value,
+) -> Vec<(String, String)> {
+    declarations
+        .iter()
+        .filter_map(|declaration| {
+            let value = value_at_path(arguments, &declaration.path)?;
+            if value.is_null() {
+                return None;
+            }
+            let value = mirrored_primitive(value)?;
+            Some((
+                format!("Mcp-Param-{}", declaration.name),
+                encode_mcp_name(&value),
+            ))
+        })
+        .collect()
+}
+
+fn encode_mcp_name(name: &str) -> String {
+    let plain = !name.is_empty()
+        && name.trim() == name
+        && name
+            .chars()
+            .all(|character| character == '\t' || (' '..='~').contains(&character))
+        && !(name.starts_with("=?base64?") && name.ends_with("?="));
+    if plain {
+        return name.to_string();
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
+    format!("=?base64?{encoded}?=")
+}
+
 fn remaining_ms(deadline: Instant) -> Result<u64, String> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return Err("MCP request timed out".into());
+        Err("MCP request timed out".into())
+    } else {
+        Ok(remaining.as_millis().min(u64::MAX as u128) as u64)
     }
-    Ok(remaining.as_millis().min(u64::MAX as u128) as u64)
 }
-
 fn validate_schema(schema: &Value, name: &str) -> Result<(), String> {
     let encoded = serde_json::to_vec(schema)
         .map_err(|_| format!("MCP tool schema is not JSON-serializable: {name}"))?;
@@ -576,22 +1118,22 @@ fn validate_schema(schema: &Value, name: &str) -> Result<(), String> {
 }
 fn json_depth(value: &Value) -> usize {
     match value {
-        Value::Array(values) => 1 + values.iter().map(json_depth).max().unwrap_or(0),
-        Value::Object(values) => 1 + values.values().map(json_depth).max().unwrap_or(0),
+        Value::Array(v) => 1 + v.iter().map(json_depth).max().unwrap_or(0),
+        Value::Object(v) => 1 + v.values().map(json_depth).max().unwrap_or(0),
         _ => 0,
     }
 }
 fn map_tool_name(alias: &str, remote: &str) -> Result<String, String> {
-    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let name = format!("mcp__{}__{}", engine.encode(alias), engine.encode(remote));
+    let e = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let name = format!("mcp__{}__{}", e.encode(alias), e.encode(remote));
     if name.len() > 64 {
-        return Err(format!(
+        Err(format!(
             "mapped MCP tool name exceeds 64 characters: {remote}"
-        ));
+        ))
+    } else {
+        Ok(name)
     }
-    Ok(name)
 }
-
 pub fn display_tool_name(name: &str) -> String {
     let Some(encoded) = name.strip_prefix("mcp__") else {
         return name.into();
@@ -599,12 +1141,10 @@ pub fn display_tool_name(name: &str) -> String {
     let Some((alias, tool)) = encoded.split_once("__") else {
         return name.into();
     };
-    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let decoded = engine
-        .decode(alias)
+    let e = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    e.decode(alias)
         .ok()
-        .and_then(|a| engine.decode(tool).ok().map(|t| (a, t)));
-    decoded
+        .and_then(|a| e.decode(tool).ok().map(|t| (a, t)))
         .and_then(|(a, t)| {
             Some(format!(
                 "mcp:{}/{}",
@@ -614,7 +1154,6 @@ pub fn display_tool_name(name: &str) -> String {
         })
         .unwrap_or_else(|| name.into())
 }
-
 fn normalize_result(result: &Value) -> Result<String, String> {
     let result = result
         .as_object()
@@ -635,17 +1174,18 @@ fn normalize_result(result: &Value) -> Result<String, String> {
             if kind != "text" {
                 return Err(format!("Unsupported MCP content type: {kind}"));
             }
-            let text = item
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or("MCP text content must contain string text")?;
-            parts.push(text.to_string());
+            parts.push(
+                item.get("text")
+                    .and_then(Value::as_str)
+                    .ok_or("MCP text content must contain string text")?
+                    .to_string(),
+            );
         }
     }
-    if let Some(structured) = result.get("structuredContent") {
+    if let Some(v) = result.get("structuredContent") {
         parts.push(format!(
             "Structured content:\n{}",
-            serde_json::to_string(structured).map_err(|e| e.to_string())?
+            serde_json::to_string(v).map_err(|e| e.to_string())?
         ));
     }
     let text = if parts.is_empty() {
@@ -662,7 +1202,7 @@ fn truncate_utf8(text: &str) -> String {
     let suffix = "\n\n[MCP result truncated to 50KB]";
     let mut end = MAX_RESULT_BYTES - suffix.len();
     while !text.is_char_boundary(end) {
-        end -= 1;
+        end -= 1
     }
     format!("{}{suffix}", &text[..end])
 }
@@ -670,32 +1210,131 @@ fn truncate_utf8(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn catalog_validates_unselected_entries_before_selection() {
-        let catalog = json!({
-            "servers": {
-                "selected": {"url": "https://example.com/mcp"},
-                "broken": {"url": 42}
-            }
-        });
-        let error = validate_catalog(&catalog, &["selected".into()])
-            .err()
-            .expect("catalog should fail");
-        assert_eq!(error, "MCP server broken url must be a string");
+    fn catalog_validates_unselected_entries() {
+        let catalog =
+            json!({"servers":{"selected":{"url":"https://example.com/mcp"},"broken":{"url":42}}});
+        assert_eq!(
+            validate_catalog(&catalog, &["selected".into()]).unwrap_err(),
+            "MCP server broken url must be a string"
+        );
     }
 
     #[test]
-    fn catalog_rejects_empty_unselected_aliases() {
-        let catalog = json!({
-            "servers": {
-                "selected": {"url": "https://example.com/mcp"},
-                "  ": {"url": "https://example.com/other"}
-            }
-        });
-        let error = validate_catalog(&catalog, &["selected".into()])
-            .err()
-            .expect("catalog should fail");
-        assert_eq!(error, "MCP server alias must not be empty");
+    fn discover_classifier_matches_auto_negotiation_fallbacks() {
+        let complete = |versions: Value| {
+            Ok(json!({
+                "resultType":"complete",
+                "supportedVersions":versions,
+                "capabilities":{},
+                "protocolVersion":"an allowed extension"
+            }))
+        };
+        assert_eq!(
+            classify_discover(complete(json!([MODERN_VERSION]))),
+            DiscoverDecision::Modern
+        );
+        assert_eq!(
+            classify_discover(complete(json!(["2025-11-25"]))),
+            DiscoverDecision::Legacy
+        );
+        assert_eq!(
+            classify_discover(Ok(json!({"supportedVersions":[MODERN_VERSION]}))),
+            DiscoverDecision::Legacy
+        );
+        assert_eq!(
+            classify_discover(Err(RequestError::Rpc(json!({"code":-32601})))),
+            DiscoverDecision::Legacy
+        );
+        assert_eq!(
+            classify_discover(Err(RequestError::Rpc(json!({
+                "code":-32022,
+                "data":{"supported":[MODERN_VERSION]}
+            })))),
+            DiscoverDecision::RetryModern
+        );
+        assert_eq!(
+            classify_discover(Err(RequestError::Rpc(json!({
+                "code":-32022,
+                "data":{"supported":["2027-01-01"]}
+            })))),
+            DiscoverDecision::Hard(
+                "MCP server supports an incompatible modern protocol version".into()
+            )
+        );
+        assert_eq!(
+            classify_discover(Err(RequestError::Rpc(json!({
+                "code":-32022,
+                "data":{"supported":[MODERN_VERSION, 1]}
+            })))),
+            DiscoverDecision::Legacy
+        );
+        assert_eq!(
+            classify_discover(Err(RequestError::Http(
+                400,
+                Some(json!({"error":{"code":-32601}}))
+            ))),
+            DiscoverDecision::Legacy
+        );
+        assert_eq!(
+            classify_discover(Err(RequestError::Http(401, None))),
+            DiscoverDecision::Hard("MCP HTTP 401".into())
+        );
+        assert_eq!(
+            classify_discover(Err(RequestError::Message("network failed".into()))),
+            DiscoverDecision::Hard("network failed".into())
+        );
+    }
+
+    #[test]
+    fn mcp_name_uses_sep_2243_encoding() {
+        assert_eq!(
+            encode_mcp_name("echo tool\t"),
+            "=?base64?ZWNobyB0b29sCQ==?="
+        );
+        assert_eq!(encode_mcp_name(" padded "), "=?base64?IHBhZGRlZCA=?=");
+        assert_eq!(encode_mcp_name("工具"), "=?base64?5bel5YW3?=");
+        assert_eq!(
+            encode_mcp_name("=?base64?ZWNobw==?="),
+            "=?base64?PT9iYXNlNjQ/WldOb2J3PT0/PQ==?="
+        );
+        assert_eq!(encode_mcp_name(""), "=?base64??=");
+    }
+
+    #[test]
+    fn modern_results_require_official_wrappers() {
+        assert!(
+            validate_modern_list_result(&json!({
+                "resultType":"complete","tools":[],"ttlMs":0,"cacheScope":"public"
+            }))
+            .is_ok()
+        );
+        assert!(
+            validate_modern_list_result(&json!({
+                "resultType":"complete","tools":[],"ttlMs":-1,"cacheScope":"public"
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_modern_call_result(&json!({
+                "resultType":"complete","content":[]
+            }))
+            .is_ok()
+        );
+        assert!(
+            validate_modern_call_result(&json!({
+                "resultType":"input_required",
+                "inputRequests":[{"type":"text"}]
+            }))
+            .is_ok()
+        );
+        assert!(validate_modern_call_result(&json!({"resultType":"input_required"})).is_err());
+        assert!(
+            validate_modern_call_result(&json!({
+                "resultType":"unknown","content":[]
+            }))
+            .is_err()
+        );
+        assert!(validate_modern_call_result(&json!({"content":[]})).is_err());
     }
 }
