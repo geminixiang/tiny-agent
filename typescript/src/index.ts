@@ -28,7 +28,8 @@ type SessionRecord = {
     [key: string]: unknown;
 };
 type ToolEdit = { oldText: string; newText: string };
-type ToolArgs = {
+export type ToolArgs = {
+    [key: string]: unknown;
     command?: string;
     timeout?: number;
     path?: string;
@@ -36,6 +37,16 @@ type ToolArgs = {
     offset?: number;
     limit?: number;
     edits?: ToolEdit[];
+};
+export type Plugin = {
+    name: string;
+    tools: Tool[];
+};
+export type Tool = {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    execute(args: ToolArgs, signal?: AbortSignal): Promise<string>;
 };
 export type ToolEvent = {
     phase: "start" | "end";
@@ -64,8 +75,10 @@ export type RunEvent =
       };
 
 export function formatToolEvent({ phase, name, args, result }: ToolEvent) {
-    if (phase === "end")
+    if (phase === "end") {
+        if (result?.startsWith("Error:") || result === "Operation aborted") return `  └ ${result}`;
         return `  └ ${result === "ok" || result === "(no output)" ? result : `${result?.length ?? 0} chars`}`;
+    }
     const target = name === "bash" ? args.command : args.path,
         suffix =
             name === "write"
@@ -116,7 +129,7 @@ export async function loadSkills(extra: string[] = []) {
     );
 }
 
-const toolDefinitions = [
+const toolMetadata = [
     {
         name: "bash",
         description:
@@ -178,10 +191,23 @@ const toolDefinitions = [
         },
         required: ["path", "edits"],
     },
-].map(({ name, description, properties, required }) => ({
-    type: "function",
-    function: { name, description, parameters: { type: "object", properties, required } },
+];
+
+export const builtInTools: Tool[] = toolMetadata.map(({ name, description, properties, required }) => ({
+    name,
+    description,
+    parameters: { type: "object", properties, required },
+    execute: (args, signal) => executeBuiltInTool(name, args, signal),
 }));
+
+export const builtInPlugins: Plugin[] = builtInTools.map((tool) => ({ name: tool.name, tools: [tool] }));
+
+function toolDefinitions(tools: Tool[]) {
+    return tools.map(({ name, description, parameters }) => ({
+        type: "function",
+        function: { name, description, parameters },
+    }));
+}
 
 function pathInRoot(path: string) {
     const full = resolve(root, path);
@@ -239,7 +265,7 @@ function toolResultOK(content: string) {
     ].some((marker) => content.includes(marker));
 }
 
-export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal) {
+async function executeBuiltInTool(name: string, args: ToolArgs, signal?: AbortSignal) {
     if (signal?.aborted) throw Error("Operation aborted");
     if (name === "bash") {
         if (!args.command) throw Error("command is required");
@@ -338,6 +364,12 @@ export async function executeTool(name: string, args: ToolArgs, signal?: AbortSi
     throw Error(`unknown tool: ${name}`);
 }
 
+export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal) {
+    const tool = builtInTools.find((candidate) => candidate.name === name);
+    if (!tool) throw Error(`unknown tool: ${name}`);
+    return tool.execute(args, signal);
+}
+
 // prettier-ignore
 function uuid7(now = Date.now()) { const b = randomBytes(16); let t = BigInt(now); for (let i = 5; i >= 0; i--) { b[i] = Number(t & 0xffn); t >>= 8n; } b[6] = (b[6] & 15) | 0x70; b[8] = (b[8] & 63) | 0x80; const h = b.toString("hex"); return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`; }
 
@@ -410,7 +442,12 @@ export class Agent {
         public onTool: (event: ToolEvent) => void = () => {},
         instructions = "",
         public onEvent: (event: RunEvent) => void = () => {},
+        public tools: Tool[] = builtInTools,
     ) {
+        const duplicate = tools.find(
+            (tool, index) => tools.findIndex((candidate) => candidate.name === tool.name) !== index,
+        );
+        if (duplicate) throw Error(`duplicate tool name: ${duplicate.name}`);
         const list =
             skills
                 .map(
@@ -424,10 +461,10 @@ export class Agent {
         this.messages = [
             {
                 role: "system",
-                content: `You are tiny-agent, a concise coding agent in ${root}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.
+                content: `You are tiny-agent, a concise coding agent in ${root}. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.
 
 For implementation tasks, inspect only what is needed, then make the changes and run focused tests. Do not keep researching the same uncertainty when a mature dependency or direct implementation is available.
-Use read to inspect files, write for new files, edit for existing files, and bash for discovery, commands, builds, and tests.
+Use the provided tool descriptions to choose the right capability. Not every run enables file access, shell access, or file modification.
 Prefer completing a small working implementation over exhaustively researching every option. If repeated experiments fail, reconsider the approach instead of making another similar attempt.${project}
 
 <available_skills>
@@ -499,7 +536,7 @@ ${list}
         const totalPrompt = this.usage.input + this.usage.cacheRead + this.usage.cacheWrite;
         if (totalPrompt > 0) this.usage.cacheHitRate = (this.usage.cacheRead / totalPrompt) * 100;
     }
-    async callModel(messages = this.messages, tools: unknown = toolDefinitions, signal?: AbortSignal) {
+    async callModel(messages = this.messages, tools: unknown = toolDefinitions(this.tools), signal?: AbortSignal) {
         const key = process.env.OPENROUTER_API_KEY;
         if (!key) throw Error("Set OPENROUTER_API_KEY");
         const body = { model: MODEL, messages, ...(tools ? { tools } : {}) };
@@ -542,7 +579,7 @@ ${list}
         this.messages.push(user);
         await this.session?.append({ type: "message", message: user });
         for (;;) {
-            const response = await this.runModelRequest(this.messages, toolDefinitions, "model");
+            const response = await this.runModelRequest(this.messages, toolDefinitions(this.tools), "model");
             if (!response) return "Operation aborted.";
             const { message: answer, usage, stopReason } = response;
             this.messages.push(answer);
@@ -570,7 +607,9 @@ ${list}
                     } else {
                         args = JSON.parse(c.function.arguments);
                         this.onTool({ phase: "start", name: c.function.name, args });
-                        content = await executeTool(c.function.name, args, this.beginOperation("tool", c.id));
+                        const tool = this.tools.find((candidate) => candidate.name === c.function.name);
+                        if (!tool) throw Error(`unknown tool: ${c.function.name}`);
+                        content = await tool.execute(args, this.beginOperation("tool", c.id));
                     }
                 } catch (e) {
                     aborted = !!this.active?.controller.signal.aborted;

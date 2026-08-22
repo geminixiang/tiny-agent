@@ -6,8 +6,17 @@ import test from "node:test";
 
 const dir = await mkdtemp(join(tmpdir(), "tiny-agent-"));
 process.chdir(dir);
-const { Agent, MODEL, Session, loadProjectInstructions, loadSkills, executeTool, formatToolEvent, formatUsage } =
-    await import("../src/index.js");
+const {
+    Agent,
+    MODEL,
+    Session,
+    loadProjectInstructions,
+    loadSkills,
+    executeTool,
+    formatToolEvent,
+    formatUsage,
+    builtInTools,
+} = await import("../src/index.js");
 
 test("loads cwd AGENTS.md into the system prompt", async () => {
     await writeFile("AGENTS.md", "Always answer briefly.\n");
@@ -16,7 +25,7 @@ test("loads cwd AGENTS.md into the system prompt", async () => {
     const system = new Agent([], fetch, undefined, () => {}, instructions).messages[0].content!;
     assert.match(system, /<project_context>/);
     assert.match(system, /inspect only what is needed, then make the changes and run focused tests/);
-    assert.match(system, /Use read to inspect files, write for new files, edit for existing files/);
+    assert.match(system, /Use the provided tool descriptions to choose the right capability/);
     assert.match(system, /If repeated experiments fail, reconsider the approach/);
     assert.match(system, /<project_instructions path=".*\/AGENTS\.md">\nAlways answer briefly\./);
     assert.equal(await loadProjectInstructions(resolve(dir, "missing")), "");
@@ -30,8 +39,8 @@ test("formats concise TUI tool events", () => {
     );
     assert.equal(formatToolEvent({ phase: "end", name: "read", args: {}, result: "hello" }), "  └ 5 chars");
     assert.equal(
-        formatToolEvent({ phase: "end", name: "write", args: {}, result: "Successfully wrote 5 bytes to a.txt." }),
-        "  └ 36 chars",
+        formatToolEvent({ phase: "end", name: "bash", args: {}, result: "Error: unknown tool: bash" }),
+        "  └ Error: unknown tool: bash",
     );
 });
 
@@ -434,6 +443,123 @@ test("counts cache from DeepSeek-style prompt_cache_hit_tokens", async () => {
         cacheWrite: 0,
         cacheHitRate: 40,
     });
+});
+
+test("restricted tools do not advertise unavailable capabilities", () => {
+    const edit = builtInTools.find((tool) => tool.name === "edit")!;
+    const system = new Agent(
+        [],
+        fetch,
+        undefined,
+        () => {},
+        "",
+        () => {},
+        [edit],
+    ).messages[0].content!;
+    assert.match(system, /Use only the tools provided in this request/);
+    assert.match(system, /explain the missing capability/);
+    assert.doesNotMatch(system, /Use read to inspect files|bash for discovery/);
+});
+
+test("rejects duplicate injected tool names", () => {
+    assert.throws(
+        () =>
+            new Agent(
+                [],
+                fetch,
+                undefined,
+                () => {},
+                "",
+                () => {},
+                [...builtInTools, builtInTools[0]],
+            ),
+        /duplicate tool name: bash/,
+    );
+});
+
+test("runs an injected tool without changing the agent loop", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const replies = [
+        {
+            choices: [
+                {
+                    message: {
+                        role: "assistant",
+                        content: null,
+                        tool_calls: [
+                            {
+                                id: "lookup-1",
+                                type: "function",
+                                function: { name: "lookup", arguments: '{"query":"revenue"}' },
+                            },
+                        ],
+                    },
+                },
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 2 },
+        },
+        {
+            choices: [{ message: { role: "assistant", content: "Revenue is 42." } }],
+            usage: { prompt_tokens: 20, completion_tokens: 4 },
+        },
+    ];
+    const requests: any[] = [],
+        queries: unknown[] = [],
+        events: any[] = [],
+        session = await Session.create(dir, new Date("2026-08-09T00:00:00Z"));
+    const agent = new Agent(
+        [],
+        (async (_url: unknown, init: any) => {
+            requests.push(JSON.parse(init.body));
+            return new Response(JSON.stringify(replies.shift()), { status: 200 });
+        }) as typeof fetch,
+        session,
+        () => {},
+        "",
+        (event) => events.push(event),
+        [
+            {
+                name: "lookup",
+                description: "Look up internal facts.",
+                parameters: {
+                    type: "object",
+                    properties: { query: { type: "string" } },
+                    required: ["query"],
+                },
+                async execute(args) {
+                    queries.push(args.query);
+                    return "42";
+                },
+            },
+        ],
+    );
+
+    assert.equal(await agent.runAgentLoop("check revenue"), "Revenue is 42.");
+    assert.deepEqual(queries, ["revenue"]);
+    assert.deepEqual(requests[0].tools, [
+        {
+            type: "function",
+            function: {
+                name: "lookup",
+                description: "Look up internal facts.",
+                parameters: {
+                    type: "object",
+                    properties: { query: { type: "string" } },
+                    required: ["query"],
+                },
+            },
+        },
+    ]);
+    assert.equal(requests[1].messages.at(-1).content, "42");
+    assert.deepEqual(
+        events.filter((event) => event.type.startsWith("tool.")).map(({ type, tool }) => ({ type, tool })),
+        [
+            { type: "tool.started", tool: "lookup" },
+            { type: "tool.completed", tool: "lookup" },
+        ],
+    );
+    const toolRecord = (await session.records()).find((record) => record.toolName === "lookup");
+    assert.equal(toolRecord.message.content, "42");
 });
 
 test("runs tool calls and compacts through mocked OpenRouter", async () => {

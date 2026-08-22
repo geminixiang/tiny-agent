@@ -34,7 +34,7 @@
                     "additionalProperties": false,
                     "required": ["name", "arguments"],
                     "properties": {
-                        "name": { "enum": ["bash", "read", "write", "edit"] },
+                        "name": { "type": "string", "minLength": 1 },
                         "arguments": {
                             "type": "string",
                             "description": "JSON-encoded tool arguments as returned by OpenRouter."
@@ -88,7 +88,7 @@
                 "timestamp": { "$ref": "#/$defs/timestamp" },
                 "message": { "$ref": "#/$defs/message" },
                 "usage": { "$ref": "#/$defs/usage" },
-                "toolName": { "enum": ["bash", "read", "write", "edit"] }
+                "toolName": { "type": "string", "minLength": 1 }
             }
         },
         "compaction": {

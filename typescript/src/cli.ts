@@ -12,6 +12,7 @@ import {
     formatUsage,
     type RunEvent,
     type RunResult,
+    builtInPlugins,
 } from "./index.js";
 
 function parseCLIArgs(args = process.argv.slice(2)) {
@@ -21,6 +22,7 @@ function parseCLIArgs(args = process.argv.slice(2)) {
             session: { type: "string" },
             skill: { type: "string", multiple: true },
             json: { type: "boolean" },
+            plugin: { type: "string", multiple: true },
         },
         allowPositionals: true,
     });
@@ -28,13 +30,29 @@ function parseCLIArgs(args = process.argv.slice(2)) {
         sessionId: values.session,
         extras: values.skill ?? [],
         json: values.json ?? false,
+        plugins: [
+            ...new Set(
+                (values.plugin ?? [])
+                    .flatMap((value) => value.split(","))
+                    .map((value) => value.trim())
+                    .filter(Boolean),
+            ),
+        ],
         oneShot: positionals.join(" "),
     };
 }
 
 async function main() {
-    const { sessionId, extras, json, oneShot } = parseCLIArgs();
+    const { sessionId, extras, json, plugins, oneShot } = parseCLIArgs();
     if (json && !oneShot) throw Error("--json requires a one-shot prompt.");
+    const selectedPlugins = plugins.length ? plugins : builtInPlugins.map((plugin) => plugin.name);
+    const unknown = selectedPlugins.find((name) => !builtInPlugins.some((plugin) => plugin.name === name));
+    if (unknown) {
+        throw Error(
+            `Unknown plugin: ${unknown}. Available plugins: ${builtInPlugins.map((plugin) => plugin.name).join(", ")}`,
+        );
+    }
+    const tools = selectedPlugins.flatMap((name) => builtInPlugins.find((plugin) => plugin.name === name)?.tools ?? []);
     const skills = await loadSkills(extras),
         instructions = await loadProjectInstructions();
     const session = sessionId ? await Session.open(sessionId) : await Session.create();
@@ -44,7 +62,7 @@ async function main() {
     const emit = (event: RunEvent | Record<string, unknown>) => {
         if (json) process.stdout.write(`${JSON.stringify(event)}\n`);
     };
-    const agent = new Agent(skills, fetch, session, showTool, instructions, emit);
+    const agent = new Agent(skills, fetch, session, showTool, instructions, emit, tools);
     if (sessionId) await agent.resumeSession();
     const resume = () => {
         if (!json) console.log(`\nResume: tiny-ts --session ${session.id}`);
@@ -85,6 +103,7 @@ async function main() {
                 timestamp: new Date().toISOString(),
                 sessionId: session.id,
                 model: MODEL,
+                plugins: selectedPlugins,
             });
             try {
                 const answer = await agent.runAgentLoop(oneShot);
