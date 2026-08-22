@@ -68,6 +68,10 @@ fn head_body_split(buf: &[u8]) -> Option<String> {
 }
 
 fn start_serving(responses: Vec<String>) -> MockServer {
+    start_serving_with_delay(responses, Duration::ZERO)
+}
+
+fn start_serving_with_delay(responses: Vec<String>, delay: Duration) -> MockServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -77,6 +81,7 @@ fn start_serving(responses: Vec<String>) -> MockServer {
             let (mut stream, _) = listener.accept().unwrap();
             let body = read_request(&mut stream);
             reqs.lock().unwrap().push(body);
+            thread::sleep(delay);
             let out = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 resp.len(),
@@ -398,26 +403,694 @@ fn session_create_open_and_idle_resume() {
     assert!(matches!(fixed.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
 }
 
-#[test]
-fn non_idle_session_requires_recovery() {
-    let cwd = temp_dir();
-    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+fn recovery_configuration(agent: &Agent) -> tiny_agent_rust::session_runtime::RuntimeConfiguration {
+    let definitions: Vec<serde_json::Value> =
+        serde_json::from_str(tool_definitions_json()).unwrap();
+    let tools = definitions
+        .into_iter()
+        .map(|definition| {
+            let name = definition["function"]["name"].as_str().unwrap().to_string();
+            tiny_agent_rust::session_runtime::RuntimeTool {
+                replay: if name == "read" { "safe" } else { "never" }.into(),
+                replay_key: if name == "read" {
+                    "builtin:read:v1".into()
+                } else {
+                    format!("builtin:{name}:v1")
+                },
+                name,
+                definition,
+            }
+        })
+        .collect();
+    tiny_agent_rust::session_runtime::runtime_configuration(
+        &model_name(),
+        agent.messages[0].content.as_deref().unwrap(),
+        tools,
+        "openrouter:chat-completions:v1",
+        &format!("openrouter:{}", model_name()),
+    )
+}
+
+struct ToolPrefix {
+    operation_id: String,
+    step_id: String,
+    assistant_id: String,
+    configuration: tiny_agent_rust::session_runtime::RuntimeConfiguration,
+}
+
+fn append_tool_prefix(session: &Session, agent: &Agent, calls: Vec<ToolCall>) -> ToolPrefix {
+    let input_id = session.allocate_id();
+    let operation_id = session.allocate_id();
+    let step_id = session.allocate_id();
+    let attempt_id = session.allocate_id();
+    let assistant_id = session.allocate_id();
+    let configuration = recovery_configuration(agent);
     session
         .append(tiny_agent_rust::session_runtime::start_run(
+            &input_id,
             &session.allocate_id(),
+            &operation_id,
+            "recover tools",
+        ))
+        .unwrap();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
             &session.allocate_id(),
+            &operation_id,
+            &step_id,
+            &attempt_id,
+            "assistant",
+            1,
+            &input_id,
+            &configuration,
+        )])
+        .unwrap();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::assistant_entry(
+            &assistant_id,
+            &step_id,
+            &attempt_id,
+            "toolUse",
+            &Message {
+                role: "assistant".into(),
+                content: None,
+                tool_call_id: String::new(),
+                tool_calls: calls,
+            },
+        )])
+        .unwrap();
+    ToolPrefix {
+        operation_id,
+        step_id,
+        assistant_id,
+        configuration,
+    }
+}
+
+fn tool_call(id: &str, name: &str, arguments: &str) -> ToolCall {
+    ToolCall {
+        id: id.into(),
+        r#type: "function".into(),
+        function: ToolFunction {
+            name: name.into(),
+            arguments: arguments.into(),
+        },
+    }
+}
+
+#[test]
+fn non_idle_session_recovers_open_attempt_once_and_retry_two_is_terminal() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let input_id = session.allocate_id();
+    let operation_id = session.allocate_id();
+    session
+        .append(tiny_agent_rust::session_runtime::start_run(
+            &input_id,
             &session.allocate_id(),
+            &operation_id,
             "unfinished",
         ))
         .unwrap();
-    let mut agent = test_agent(&cwd, "", Some(session));
+    let seed_agent = test_agent(&cwd, "", None);
+    let configuration = recovery_configuration(&seed_agent);
+    let step_id = session.allocate_id();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+            &session.allocate_id(),
+            &operation_id,
+            &step_id,
+            &session.allocate_id(),
+            "assistant",
+            1,
+            &input_id,
+            &configuration,
+        )])
+        .unwrap();
+    let server = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"recovered"}}],"usage":{}}"#.into(),
+    ]);
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    agent.resume_session().unwrap();
+    let state = agent.session.as_ref().unwrap().load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    assert_eq!(
+        agent.messages.last().unwrap().content.as_deref(),
+        Some("recovered")
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    let log = std::fs::read_to_string(&agent.session.as_ref().unwrap().path).unwrap();
+    assert_eq!(log.matches("\"attempt\":2").count(), 1);
+
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let input_id = session.allocate_id();
+    let operation_id = session.allocate_id();
+    session
+        .append(tiny_agent_rust::session_runtime::start_run(
+            &input_id,
+            &session.allocate_id(),
+            &operation_id,
+            "exhausted",
+        ))
+        .unwrap();
+    let configuration = recovery_configuration(&test_agent(&cwd, "", None));
+    let first_attempt_id = session.allocate_id();
+    let exhausted_step_id = session.allocate_id();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+            &session.allocate_id(),
+            &operation_id,
+            &exhausted_step_id,
+            &first_attempt_id,
+            "assistant",
+            1,
+            &input_id,
+            &configuration,
+        )])
+        .unwrap();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+            &session.allocate_id(),
+            &operation_id,
+            &exhausted_step_id,
+            &session.allocate_id(),
+            "assistant",
+            2,
+            &input_id,
+            &configuration,
+        )])
+        .unwrap();
+    let before = std::fs::read(&session.path).unwrap();
+    let mut agent = test_agent(&cwd, "http://127.0.0.1:1", Some(session));
     assert_eq!(
         agent.resume_session().unwrap_err(),
-        "Session recovery required"
+        "Session recovery blocked: attempts_exhausted"
+    );
+    assert_eq!(
+        std::fs::read(&agent.session.as_ref().unwrap().path).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn pending_safe_read_replays_once_then_closes_and_finishes_idempotently() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    std::fs::write(format!("{cwd}/input.txt"), "recovered contents").unwrap();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let seed_agent = test_agent(&cwd, "", None);
+    let prefix = append_tool_prefix(
+        &session,
+        &seed_agent,
+        vec![tool_call("read-crash", "read", r#"{"path":"input.txt"}"#)],
+    );
+    let started_id = session.allocate_id();
+    let result_id = session.allocate_id();
+    let read = prefix
+        .configuration
+        .tools
+        .iter()
+        .find(|tool| tool.name == "read")
+        .unwrap();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+            &started_id,
+            &prefix.operation_id,
+            &prefix.step_id,
+            &prefix.assistant_id,
+            0,
+            "read-crash",
+            "read",
+            serde_json::json!({"path":"input.txt"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            read,
+            &tiny_agent_rust::session::environment_identity(std::path::Path::new(&cwd)).unwrap(),
+            &result_id,
+        )])
+        .unwrap();
+    let id = session.id.clone();
+    session.close().unwrap();
+
+    let server = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"finished"}}],"usage":{}}"#.into(),
+    ]);
+    let reopened = Session::open(&id, std::path::Path::new(&cwd)).unwrap();
+    let mut agent = test_agent(&cwd, &server.url, Some(reopened));
+    agent.resume_session().unwrap();
+    let state = agent.session.as_ref().unwrap().load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    let tool_messages = state
+        .transcript
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect::<Vec<_>>();
+    assert_eq!(tool_messages.len(), 1);
+    assert_eq!(tool_messages[0]["tool_call_id"], "read-crash");
+    assert_eq!(tool_messages[0]["content"], "recovered contents");
+    let before = std::fs::read(&agent.session.as_ref().unwrap().path).unwrap();
+    agent.resume_session().unwrap();
+    assert_eq!(
+        std::fs::read(&agent.session.as_ref().unwrap().path).unwrap(),
+        before
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn pending_never_replay_tool_is_interrupted_without_effect_then_run_continues() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let seed_agent = test_agent(&cwd, "", None);
+    let prefix = append_tool_prefix(
+        &session,
+        &seed_agent,
+        vec![
+            tool_call(
+                "write-crash",
+                "write",
+                r#"{"path":"must-not-exist.txt","content":"bad"}"#,
+            ),
+            tool_call(
+                "write-later",
+                "write",
+                r#"{"path":"later.txt","content":"recovered"}"#,
+            ),
+        ],
+    );
+    let write = prefix
+        .configuration
+        .tools
+        .iter()
+        .find(|tool| tool.name == "write")
+        .unwrap();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+            &session.allocate_id(),
+            &prefix.operation_id,
+            &prefix.step_id,
+            &prefix.assistant_id,
+            0,
+            "write-crash",
+            "write",
+            serde_json::json!({"path":"must-not-exist.txt","content":"bad"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            write,
+            &tiny_agent_rust::session::environment_identity(std::path::Path::new(&cwd)).unwrap(),
+            &session.allocate_id(),
+        )])
+        .unwrap();
+    let server = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"continued"}}],"usage":{}}"#.into(),
+    ]);
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    agent.resume_session().unwrap();
+    assert!(!std::path::Path::new(&format!("{cwd}/must-not-exist.txt")).exists());
+    assert_eq!(
+        std::fs::read_to_string(format!("{cwd}/later.txt")).unwrap(),
+        "recovered"
+    );
+    let state = agent.session.as_ref().unwrap().load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    let interrupted = state
+        .transcript
+        .iter()
+        .find(|message| message["tool_call_id"] == "write-crash")
+        .unwrap();
+    assert_eq!(
+        interrupted["content"],
+        tiny_agent_rust::session_recovery::SYNTHETIC_INTERRUPTED
+    );
+    let tool_ids = state
+        .transcript
+        .iter()
+        .filter_map(|message| message["tool_call_id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tool_ids, ["write-crash", "write-later"]);
+    assert_eq!(
+        agent.messages.last().unwrap().content.as_deref(),
+        Some("continued")
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn abort_recovery_orders_current_interrupted_before_remaining_aborted() {
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let seed_agent = test_agent(&cwd, "", None);
+    let calls = vec![
+        tool_call(
+            "current",
+            "write",
+            r#"{"path":"current.txt","content":"bad"}"#,
+        ),
+        tool_call(
+            "remaining",
+            "write",
+            r#"{"path":"remaining.txt","content":"bad"}"#,
+        ),
+    ];
+    let prefix = append_tool_prefix(&session, &seed_agent, calls);
+    let write = prefix
+        .configuration
+        .tools
+        .iter()
+        .find(|tool| tool.name == "write")
+        .unwrap();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+            &session.allocate_id(),
+            &prefix.operation_id,
+            &prefix.step_id,
+            &prefix.assistant_id,
+            0,
+            "current",
+            "write",
+            serde_json::json!({"path":"current.txt","content":"bad"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            write,
+            &tiny_agent_rust::session::environment_identity(std::path::Path::new(&cwd)).unwrap(),
+            &session.allocate_id(),
+        )])
+        .unwrap();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::abort_requested(
+            &session.allocate_id(),
+            &prefix.operation_id,
+            "run",
+            "tool",
+            Some("current"),
+        )])
+        .unwrap();
+    let mut agent = test_agent(&cwd, "http://127.0.0.1:1", Some(session));
+    agent.resume_session().unwrap();
+    let state = agent.session.as_ref().unwrap().load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    let results = state
+        .transcript
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["tool_call_id"], "current");
+    assert_eq!(
+        results[0]["content"],
+        tiny_agent_rust::session_recovery::SYNTHETIC_INTERRUPTED
+    );
+    assert_eq!(results[1]["tool_call_id"], "remaining");
+    assert_eq!(
+        results[1]["content"],
+        tiny_agent_rust::session_recovery::SYNTHETIC_ABORTED
+    );
+    assert!(!std::path::Path::new(&format!("{cwd}/current.txt")).exists());
+    assert!(!std::path::Path::new(&format!("{cwd}/remaining.txt")).exists());
+}
+
+#[test]
+fn recovery_mismatches_append_nothing_and_execute_nothing() {
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let input_id = session.allocate_id();
+    let operation_id = session.allocate_id();
+    session
+        .append(tiny_agent_rust::session_runtime::start_run(
+            &input_id,
+            &session.allocate_id(),
+            &operation_id,
+            "configuration mismatch",
+        ))
+        .unwrap();
+    let configuration = recovery_configuration(&test_agent(&cwd, "", None));
+    session
+        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+            &session.allocate_id(),
+            &operation_id,
+            &session.allocate_id(),
+            &session.allocate_id(),
+            "assistant",
+            1,
+            &input_id,
+            &configuration,
+        )])
+        .unwrap();
+    let before = std::fs::read(&session.path).unwrap();
+    let mut changed = new_agent(
+        Vec::new(),
+        Some(session),
+        "changed instructions".into(),
+        &cwd,
+    );
+    changed.endpoint = "http://127.0.0.1:1".into();
+    assert_eq!(
+        changed.resume_session().unwrap_err(),
+        "Session recovery blocked: configuration_changed"
+    );
+    assert_eq!(
+        std::fs::read(&changed.session.as_ref().unwrap().path).unwrap(),
+        before
+    );
+
+    let cwd = temp_dir();
+    let other_cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let seed_agent = test_agent(&cwd, "", None);
+    let prefix = append_tool_prefix(
+        &session,
+        &seed_agent,
+        vec![tool_call(
+            "read-env",
+            "read",
+            r#"{"path":"would-read.txt"}"#,
+        )],
+    );
+    let read = prefix
+        .configuration
+        .tools
+        .iter()
+        .find(|tool| tool.name == "read")
+        .unwrap();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+            &session.allocate_id(),
+            &prefix.operation_id,
+            &prefix.step_id,
+            &prefix.assistant_id,
+            0,
+            "read-env",
+            "read",
+            serde_json::json!({"path":"would-read.txt"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            read,
+            &tiny_agent_rust::session::environment_identity(std::path::Path::new(&cwd)).unwrap(),
+            &session.allocate_id(),
+        )])
+        .unwrap();
+    let before = std::fs::read(&session.path).unwrap();
+    let mut moved = test_agent(&other_cwd, "http://127.0.0.1:1", Some(session));
+    assert_eq!(
+        moved.resume_session().unwrap_err(),
+        "Session recovery blocked: environment_changed"
+    );
+    assert_eq!(
+        std::fs::read(&moved.session.as_ref().unwrap().path).unwrap(),
+        before
+    );
+
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let seed_agent = test_agent(&cwd, "", None);
+    append_tool_prefix(
+        &session,
+        &seed_agent,
+        vec![tool_call(
+            "write-unstarted",
+            "write",
+            r#"{"path":"must-not-start.txt","content":"bad"}"#,
+        )],
+    );
+    let before = std::fs::read(&session.path).unwrap();
+    let mut changed = test_agent(&cwd, "http://127.0.0.1:1", Some(session));
+    changed.local_tools.retain(|name| name != "write");
+    assert_eq!(
+        changed.resume_session().unwrap_err(),
+        "Session recovery blocked: configuration_changed"
+    );
+    assert_eq!(
+        std::fs::read(&changed.session.as_ref().unwrap().path).unwrap(),
+        before
+    );
+    assert!(!std::path::Path::new(&format!("{cwd}/must-not-start.txt")).exists());
+}
+
+#[test]
+fn durable_tool_loop_closes_started_tool_before_next_model() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let server = start_serving(vec![
+        tool_args("read-1", "read", r#"{"path":"input.txt"}"#),
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{}}"#.into(),
+    ]);
+    std::fs::write(format!("{cwd}/input.txt"), "contents").unwrap();
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    assert_eq!(agent.run_agent_loop("inspect").unwrap(), "done");
+    let state = agent.session.as_ref().unwrap().load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    assert_eq!(
+        state
+            .transcript
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["user", "assistant", "tool", "assistant"]
     );
 }
 
 // ---------------------------------------------------------------------------
+#[test]
+fn abort_handle_persists_once_before_cancellation() {
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let input_id = session.allocate_id();
+    let operation_id = session.allocate_id();
+    session
+        .append(tiny_agent_rust::session_runtime::start_run(
+            &input_id,
+            &session.allocate_id(),
+            &operation_id,
+            "wait",
+        ))
+        .unwrap();
+    let agent = test_agent(&cwd, "", Some(session));
+    let abort = agent.abort_handle();
+    assert!(!agent.cancel.load(Ordering::SeqCst));
+    abort.request().unwrap();
+    abort.request().unwrap();
+    assert!(!agent.cancel.load(Ordering::SeqCst));
+    assert!(matches!(
+        agent.session.as_ref().unwrap().load().unwrap().operation,
+        tiny_agent_rust::session_reducer::OperationState::Run {
+            abort_requested: true,
+            ..
+        }
+    ));
+    let records = std::fs::read_to_string(&agent.session.as_ref().unwrap().path)
+        .unwrap()
+        .matches("abortRequested")
+        .count();
+    assert_eq!(records, 1);
+
+    let concurrent = agent.abort_handle();
+    let requests = (0..8)
+        .map(|_| {
+            let concurrent = concurrent.clone();
+            thread::spawn(move || concurrent.request())
+        })
+        .collect::<Vec<_>>();
+    for request in requests {
+        request.join().unwrap().unwrap();
+    }
+    let records = std::fs::read_to_string(&agent.session.as_ref().unwrap().path)
+        .unwrap()
+        .matches("abortRequested")
+        .count();
+    assert_eq!(records, 1);
+}
+
+#[test]
+fn durable_abort_before_tool_start_prevents_write_effect() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let server = start_serving_with_delay(
+        vec![tool_args(
+            "write-aborted",
+            "write",
+            r#"{"path":"must-not-write.txt","content":"bad"}"#,
+        )],
+        Duration::from_millis(200),
+    );
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    let abort = agent.abort_handle();
+    let run = thread::spawn(move || agent.run_agent_loop("write"));
+    while server.requests.lock().unwrap().is_empty() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    abort.request().unwrap();
+    assert_eq!(run.join().unwrap().unwrap(), "Operation aborted.");
+    assert!(!std::path::Path::new(&format!("{cwd}/must-not-write.txt")).exists());
+}
+
+#[test]
+fn abort_request_racing_completed_operation_is_harmless() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let server = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{}}"#.into(),
+    ]);
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
+    let abort = agent.abort_handle();
+    assert_eq!(agent.run_agent_loop("finish").unwrap(), "done");
+    abort.request().unwrap();
+    assert!(matches!(
+        agent.session.as_ref().unwrap().load().unwrap().operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+}
+
+#[test]
+fn direct_agent_can_run_again_after_abort() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let hanging = start_hanging();
+    let mut agent = test_agent(&cwd, &hanging.url, None);
+    let cancel = agent.cancel.clone();
+    let first = thread::spawn(move || {
+        let result = agent.run_agent_loop("wait");
+        (agent, result)
+    });
+    while hanging.requests.lock().unwrap().is_empty() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    cancel.store(true, Ordering::SeqCst);
+    let (mut agent, result) = first.join().unwrap();
+    assert_eq!(result.unwrap(), "Operation aborted.");
+
+    let server = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"second"}}],"usage":{}}"#.into(),
+    ]);
+    agent.endpoint = server.url;
+    assert_eq!(agent.run_agent_loop("again").unwrap(), "second");
+}
+
 #[test]
 fn esc_aborts_model_request_and_persists_interruption() {
     unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };

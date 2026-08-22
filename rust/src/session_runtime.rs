@@ -236,11 +236,38 @@ pub fn tool_result(
     content: &str,
     result_type: &str,
 ) -> SessionFact {
+    let result = if result_type == "synthetic" {
+        json!({"type":"synthetic","reason":"interrupted"})
+    } else {
+        json!({"type":result_type})
+    };
     fact(json!({
         "kind":"entry", "id":entry_id,
         "entry":{
             "type":"message", "stepId":step_id, "toolStartedId":tool_started_id,
-            "toolName":tool_name, "result":{"type":result_type},
+            "toolName":tool_name, "result":result,
+            "message":{"role":"tool","content":content,"tool_call_id":tool_call_id},
+        }
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn synthetic_tool_result(
+    entry_id: &str,
+    step_id: &str,
+    assistant_entry_id: &str,
+    tool_index: u64,
+    tool_call_id: &str,
+    tool_name: &str,
+    content: &str,
+    reason: &str,
+) -> SessionFact {
+    fact(json!({
+        "kind":"entry", "id":entry_id,
+        "entry":{
+            "type":"message", "stepId":step_id,
+            "assistantEntryId":assistant_entry_id, "toolIndex":tool_index,
+            "toolName":tool_name, "result":{"type":"synthetic","reason":reason},
             "message":{"role":"tool","content":content,"tool_call_id":tool_call_id},
         }
     }))

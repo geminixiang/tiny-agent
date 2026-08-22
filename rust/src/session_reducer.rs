@@ -116,6 +116,8 @@ pub struct SessionState {
     pub header: SessionHeader,
     pub transcript: Vec<Value>,
     pub active_context: Vec<Value>,
+    #[serde(skip_serializing)]
+    pub active_context_through_entry_id: Option<String>,
     pub usage: SessionUsage,
     pub operation: OperationState,
     pub repaired_length: usize,
@@ -988,6 +990,7 @@ fn apply_message_entry(
     }
     state.public.transcript.push(message.clone());
     state.public.active_context.push(message);
+    state.public.active_context_through_entry_id = Some(fact_id.to_string());
     state.active_context_through_entry_id = Some(fact_id.to_string());
     state.entries.insert(fact_id.to_string(), info);
     state.entry_order.push(fact_id.to_string());
@@ -1116,6 +1119,7 @@ fn apply_compaction_entry(
         serde_json::json!({"role":"user","content":format!("[Compacted history]\n{summary}")}),
     ];
     state.public.active_context.extend(messages);
+    state.public.active_context_through_entry_id = Some(input_id.clone());
     state.active_context_through_entry_id = Some(input_id);
     let current_attempt = match &state.public.operation {
         OperationState::Compaction {
@@ -2372,6 +2376,7 @@ pub fn reduce_session(bytes: &[u8]) -> Result<SessionState> {
             header,
             transcript: Vec::new(),
             active_context: Vec::new(),
+            active_context_through_entry_id: None,
             usage: SessionUsage {
                 input: 0,
                 output: 0,

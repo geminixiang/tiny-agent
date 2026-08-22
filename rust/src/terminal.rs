@@ -328,9 +328,15 @@ impl Terminal {
 
     /// Run an operation, giving Esc/Ctrl+C a chance to cancel it on the main
     /// thread while the operation runs on a worker thread.
-    pub fn run<F>(&mut self, cancel: &Arc<AtomicBool>, operation: F) -> Result<String, TermError>
+    pub fn run<F, A>(
+        &mut self,
+        cancel: &Arc<AtomicBool>,
+        mut abort: A,
+        operation: F,
+    ) -> Result<String, TermError>
     where
         F: FnOnce() -> Result<String, String> + Send + 'static,
+        A: FnMut() -> Result<(), String>,
     {
         cancel.store(false, Ordering::SeqCst);
         if !self.tty {
@@ -349,9 +355,15 @@ impl Terminal {
                 let (_, is_arrow) = self.escape_sequence();
                 if !is_arrow {
                     self.out.print("\r\n\x1b[33mAborting...\x1b[0m\r\n");
+                    if let Err(error) = abort() {
+                        return Err(TermError::Error(error));
+                    }
                     cancel.store(true, Ordering::SeqCst);
                 }
             } else if key == 3 {
+                if let Err(error) = abort() {
+                    return Err(TermError::Error(error));
+                }
                 cancel.store(true, Ordering::SeqCst);
                 loop {
                     if rx.try_recv().is_ok() {
@@ -454,8 +466,38 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(true));
         let (_tx, rx) = mpsc::channel();
         let mut tty = Terminal::from_keys(rx, Box::new(Vec::new()), true);
-        assert_eq!(tty.run(&cancel, || Ok("next".into())).unwrap(), "next");
+        assert_eq!(
+            tty.run(&cancel, || Ok(()), || Ok("next".into())).unwrap(),
+            "next"
+        );
         assert!(!cancel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn abort_hook_runs_before_cancellation_signal() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let ordered = Arc::new(AtomicBool::new(false));
+        let operation_cancel = cancel.clone();
+        let operation_ordered = ordered.clone();
+        let hook_cancel = cancel.clone();
+        let hook_ordered = ordered.clone();
+        let mut tty = Terminal::from_keys(keys_from(b"\x1b"), Box::new(Vec::new()), true);
+        let result = tty.run(
+            &cancel,
+            move || {
+                assert!(!hook_cancel.load(Ordering::SeqCst));
+                hook_ordered.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            move || {
+                while !operation_cancel.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                assert!(operation_ordered.load(Ordering::SeqCst));
+                Ok("aborted".into())
+            },
+        );
+        assert_eq!(result.unwrap(), "aborted");
     }
 
     #[test]
@@ -506,14 +548,18 @@ mod tests {
         let agent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel = agent.clone();
         let mut tty = Terminal::from_keys(keys_from(b"\x1b"), Box::new(Vec::new()), false);
-        let result = tty.run(&agent, move || {
-            // simulate an operation that is cancelled right away
-            if cancel.load(Ordering::SeqCst) {
-                Err("Operation aborted".to_string())
-            } else {
-                Ok("finished".to_string())
-            }
-        });
+        let result = tty.run(
+            &agent,
+            || Ok(()),
+            move || {
+                // simulate an operation that is cancelled right away
+                if cancel.load(Ordering::SeqCst) {
+                    Err("Operation aborted".to_string())
+                } else {
+                    Ok("finished".to_string())
+                }
+            },
+        );
         // not tty -> should just return operation result
         assert!(result.is_ok());
     }

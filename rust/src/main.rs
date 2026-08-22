@@ -183,9 +183,14 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
 
     if !parsed.prompt.is_empty() {
         let cancel = { agent.lock().unwrap().cancel.clone() };
+        let abort = { agent.lock().unwrap().abort_handle() };
         let a3 = agent.clone();
         let prompt = parsed.prompt.clone();
-        let result = term.run(&cancel, move || a3.lock().unwrap().run_agent_loop(&prompt));
+        let result = term.run(
+            &cancel,
+            move || abort.request(),
+            move || a3.lock().unwrap().run_agent_loop(&prompt),
+        );
         let answer = match result {
             Ok(a) => a,
             Err(TermError::Exit) | Err(TermError::Eof) => {
@@ -217,10 +222,15 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
             break;
         }
         let cancel = { agent.lock().unwrap().cancel.clone() };
+        let abort = { agent.lock().unwrap().abort_handle() };
         let answer: Result<String, String> = if input == "/compact" {
             let a3 = agent.clone();
-            term.run(&cancel, move || a3.lock().unwrap().compact())
-                .map_err(term_err_to_string)
+            term.run(
+                &cancel,
+                move || abort.request(),
+                move || a3.lock().unwrap().compact(),
+            )
+            .map_err(term_err_to_string)
         } else if let Some(rest) = input.strip_prefix("/skill:") {
             let rest = rest.to_string();
             let mut parts = rest.splitn(2, ' ');
@@ -240,12 +250,22 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
             let text = std::fs::read_to_string(&skill.path).map_err(|e| e.to_string())?;
             let prompt = format!("{}\n\nUser: {}", text, request);
             let a3 = agent.clone();
-            term.run(&cancel, move || a3.lock().unwrap().run_agent_loop(&prompt))
-                .map_err(term_err_to_string)
+            let abort = agent.lock().unwrap().abort_handle();
+            term.run(
+                &cancel,
+                move || abort.request(),
+                move || a3.lock().unwrap().run_agent_loop(&prompt),
+            )
+            .map_err(term_err_to_string)
         } else {
             let a3 = agent.clone();
-            term.run(&cancel, move || a3.lock().unwrap().run_agent_loop(&input))
-                .map_err(term_err_to_string)
+            let abort = agent.lock().unwrap().abort_handle();
+            term.run(
+                &cancel,
+                move || abort.request(),
+                move || a3.lock().unwrap().run_agent_loop(&input),
+            )
+            .map_err(term_err_to_string)
         };
         let answer = answer?;
         let usage = agent.lock().unwrap().usage;

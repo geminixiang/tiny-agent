@@ -7,16 +7,19 @@ use std::os::unix::process::CommandExt;
 use std::path::Path as FsPath;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 pub use crate::session::Session;
+use crate::session_recovery::{CurrentConfiguration, CurrentTool, plan_recovery};
+use crate::session_reducer::OperationState;
 use crate::session_runtime::{
-    RuntimeConfiguration, RuntimeTool, assistant_entry, operation_finished, project_idle,
-    runtime_configuration, start_run, step_attempt, step_failed, usage,
+    RuntimeConfiguration, RuntimeTool, abort_requested, assistant_entry, operation_finished,
+    project_idle, runtime_configuration, start_run, step_attempt, step_failed,
+    synthetic_tool_result, tool_declaration, tool_result, tool_started, usage,
 };
 
 pub mod mcp;
@@ -328,6 +331,80 @@ pub fn load_skills(extra: Vec<String>, cwd: &str) -> Result<Vec<Skill>, String> 
 // ---------------------------------------------------------------------------
 // Agent
 // ---------------------------------------------------------------------------
+#[derive(Clone)]
+pub struct AbortHandle {
+    session: Option<Session>,
+    coordination: Arc<(Mutex<AbortCoordination>, Condvar)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AbortCoordination {
+    Waiting,
+    DurableReady,
+    NonDurable,
+}
+
+impl AbortHandle {
+    pub fn request(&self) -> Result<(), String> {
+        let Some(session) = &self.session else {
+            return Ok(());
+        };
+        let (lock, ready) = &*self.coordination;
+        let mut coordination = lock.lock().unwrap();
+        loop {
+            let state = session.load()?;
+            if !matches!(state.operation, OperationState::Idle) {
+                let (operation_id, operation_kind, phase, tool_call_id, requested) =
+                    match state.operation {
+                        OperationState::Run {
+                            operation_id,
+                            tool_calls,
+                            abort_requested,
+                            ..
+                        } => {
+                            let pending = tool_calls
+                                .iter()
+                                .filter(|tool| tool.status == "pending")
+                                .min_by_key(|tool| tool.tool_index);
+                            (
+                                operation_id,
+                                "run",
+                                if pending.is_some() { "tool" } else { "model" },
+                                pending.map(|tool| tool.tool_call_id.clone()),
+                                abort_requested,
+                            )
+                        }
+                        OperationState::Compaction {
+                            operation_id,
+                            abort_requested,
+                            ..
+                        } => (operation_id, "compaction", "compact", None, abort_requested),
+                        OperationState::Idle => unreachable!(),
+                    };
+                if !requested {
+                    session.append_abort_if_active(
+                        &operation_id,
+                        abort_requested(
+                            &uuid7(),
+                            &operation_id,
+                            operation_kind,
+                            phase,
+                            tool_call_id.as_deref(),
+                        ),
+                    )?;
+                }
+                return Ok(());
+            }
+            if *coordination == AbortCoordination::NonDurable
+                || *coordination == AbortCoordination::DurableReady
+            {
+                return Ok(());
+            }
+            coordination = ready.wait(coordination).unwrap();
+        }
+    }
+}
+
 pub struct Agent {
     pub messages: Vec<Message>,
     pub usage: UsageState,
@@ -340,6 +417,7 @@ pub struct Agent {
     pub cwd: String,
     pub local_tools: Vec<String>,
     pub mcp_tools: Vec<mcp::McpTool>,
+    abort_coordination: Arc<(Mutex<AbortCoordination>, Condvar)>,
 }
 
 pub fn new_agent(
@@ -383,6 +461,7 @@ pub fn new_agent(
             .map(|name| (*name).to_string())
             .collect(),
         mcp_tools: Vec::new(),
+        abort_coordination: Arc::new((Mutex::new(AbortCoordination::NonDurable), Condvar::new())),
     }
 }
 
@@ -414,6 +493,38 @@ fn api_key() -> String {
 }
 
 impl Agent {
+    pub fn abort_handle(&self) -> AbortHandle {
+        if let Ok(mut state) = self.abort_coordination.0.lock() {
+            *state = AbortCoordination::Waiting;
+        }
+        AbortHandle {
+            session: self.session.clone(),
+            coordination: self.abort_coordination.clone(),
+        }
+    }
+
+    fn publish_abort_coordination(&self, state: AbortCoordination) {
+        let (lock, ready) = &*self.abort_coordination;
+        *lock.lock().unwrap() = state;
+        ready.notify_all();
+    }
+
+    fn abort_was_requested(&self) -> Result<bool, String> {
+        let Some(session) = &self.session else {
+            return Ok(false);
+        };
+        Ok(matches!(
+            session.load()?.operation,
+            OperationState::Run {
+                abort_requested: true,
+                ..
+            } | OperationState::Compaction {
+                abort_requested: true,
+                ..
+            }
+        ))
+    }
+
     fn record_interruption(&self, _phase: &str, _tool_call_id: &str) -> Result<(), String> {
         Ok(())
     }
@@ -440,15 +551,23 @@ impl Agent {
         }));
         let tools = definitions
             .into_iter()
-            .map(|definition| RuntimeTool {
-                name: definition
+            .map(|definition| {
+                let name = definition
                     .pointer("/function/name")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
-                    .to_string(),
-                definition,
-                replay: "never".into(),
-                replay_key: String::new(),
+                    .to_string();
+                let implementation = if self.local_tools.iter().any(|selected| selected == &name) {
+                    "builtin"
+                } else {
+                    "mcp"
+                };
+                RuntimeTool {
+                    replay_key: format!("{implementation}:{name}:v1"),
+                    name,
+                    definition,
+                    replay: "never".into(),
+                }
             })
             .map(|mut tool| {
                 if tool.name == "read" {
@@ -468,114 +587,721 @@ impl Agent {
     }
 
     fn run_durable_model(&mut self, input: &str) -> Result<String, String> {
+        let (coordination_lock, ready) = &*self.abort_coordination;
+        let mut coordination = coordination_lock.lock().unwrap();
+        self.cancel.store(false, Ordering::SeqCst);
         let user_entry_id = uuid7();
         let operation_id = uuid7();
-        self.session.as_ref().unwrap().append(start_run(
+        let started = self.session.as_ref().unwrap().append(start_run(
             &user_entry_id,
             &uuid7(),
             &operation_id,
             input,
-        ))?;
+        ));
+        if let Err(error) = started {
+            *coordination = AbortCoordination::NonDurable;
+            ready.notify_all();
+            return Err(error);
+        }
+        *coordination = AbortCoordination::DurableReady;
+        ready.notify_all();
+        drop(coordination);
         self.messages.push(Message {
             role: "user".into(),
             content: Some(input.into()),
             tool_call_id: String::new(),
             tool_calls: Vec::new(),
         });
+        self.run_durable_operation(&operation_id, &user_entry_id, None, 1)
+    }
 
-        let step_id = uuid7();
-        let attempt_id = uuid7();
-        self.session.as_ref().unwrap().append(vec![step_attempt(
-            &uuid7(),
-            &operation_id,
-            &step_id,
-            &attempt_id,
-            "assistant",
-            1,
-            &user_entry_id,
-            &self.runtime_configuration(),
-        )])?;
+    fn run_durable_operation(
+        &mut self,
+        operation_id: &str,
+        context_entry_id: &str,
+        existing_step_id: Option<&str>,
+        attempt: u64,
+    ) -> Result<String, String> {
+        let mut context_entry_id = context_entry_id.to_string();
+        let mut existing_step_id = existing_step_id.map(str::to_string);
+        let mut attempt = attempt;
+        loop {
+            let step_id = existing_step_id.take().unwrap_or_else(uuid7);
+            let attempt_id = uuid7();
+            let configuration = self.runtime_configuration();
+            self.session.as_ref().unwrap().append(vec![step_attempt(
+                &uuid7(),
+                operation_id,
+                &step_id,
+                &attempt_id,
+                "assistant",
+                attempt,
+                &context_entry_id,
+                &configuration,
+            )])?;
 
-        let messages = self.messages.clone();
-        let data = match self.call_model(&messages, true, true) {
-            Ok(data) => data,
-            Err(error) => {
-                let code = if self.cancel.load(Ordering::SeqCst) {
-                    "aborted"
+            let messages = self.messages.clone();
+            let data = match self.call_model(&messages, true, true) {
+                Ok(data) => data,
+                Err(error) => {
+                    if self.cancel.load(Ordering::SeqCst) {
+                        let mut facts = Vec::new();
+                        if !self.abort_was_requested()? {
+                            facts.push(abort_requested(
+                                &uuid7(),
+                                operation_id,
+                                "run",
+                                "model",
+                                None,
+                            ));
+                        }
+                        facts.extend([
+                            step_failed(
+                                &uuid7(),
+                                operation_id,
+                                &step_id,
+                                &attempt_id,
+                                "aborted",
+                                &error,
+                            ),
+                            operation_finished(
+                                &uuid7(),
+                                operation_id,
+                                "run",
+                                "aborted",
+                                None,
+                                None,
+                            ),
+                        ]);
+                        self.session.as_ref().unwrap().append(facts)?;
+                        return Ok("Operation aborted.".into());
+                    }
+                    self.session.as_ref().unwrap().append(vec![
+                        step_failed(
+                            &uuid7(),
+                            operation_id,
+                            &step_id,
+                            &attempt_id,
+                            "model_error",
+                            &error,
+                        ),
+                        operation_finished(
+                            &uuid7(),
+                            operation_id,
+                            "run",
+                            "failed",
+                            None,
+                            Some(("model_error", &error)),
+                        ),
+                    ])?;
+                    return Err(error);
+                }
+            };
+
+            let answer = data.message.clone();
+            let answer_id = uuid7();
+            let stop_reason = stop_reason_name(data.stop_reason);
+            self.session.as_ref().unwrap().append(vec![
+                assistant_entry(&answer_id, &step_id, &attempt_id, stop_reason, &answer),
+                usage(&uuid7(), operation_id, Some(&attempt_id), None, data.usage),
+            ])?;
+            self.messages.push(answer.clone());
+
+            if answer.tool_calls.is_empty() {
+                let content = answer.content.unwrap_or_default();
+                if data.stop_reason == StopReason::Stop && !content.trim().is_empty() {
+                    self.session
+                        .as_ref()
+                        .unwrap()
+                        .append(vec![operation_finished(
+                            &uuid7(),
+                            operation_id,
+                            "run",
+                            "completed",
+                            Some(&answer_id),
+                            None,
+                        )])?;
+                    return Ok(content);
+                }
+                let message = if content.trim().is_empty() {
+                    format!("Model returned an empty response (finish_reason: {stop_reason}).")
                 } else {
-                    "model_error"
+                    "Model response was truncated by the token limit.".into()
                 };
-                self.session.as_ref().unwrap().append(vec![
-                    step_failed(&uuid7(), &operation_id, &step_id, &attempt_id, code, &error),
-                    operation_finished(
+                self.session
+                    .as_ref()
+                    .unwrap()
+                    .append(vec![operation_finished(
                         &uuid7(),
-                        &operation_id,
+                        operation_id,
                         "run",
                         "failed",
                         None,
-                        Some((code, &error)),
-                    ),
-                ])?;
-                if code == "aborted" {
-                    return Ok("Operation aborted.".into());
-                }
-                return Err(error);
+                        Some(("model_length", &message)),
+                    )])?;
+                return Err(message);
             }
-        };
 
-        let answer = data.message.clone();
-        let answer_id = uuid7();
-        let stop_reason = stop_reason_name(data.stop_reason);
-        let mut facts = vec![
-            assistant_entry(&answer_id, &step_id, &attempt_id, stop_reason, &answer),
-            usage(&uuid7(), &operation_id, Some(&attempt_id), None, data.usage),
-        ];
-        self.messages.push(answer.clone());
-
-        if !answer.tool_calls.is_empty() {
-            self.session.as_ref().unwrap().append(facts)?;
-            return Err("Durable tool integration required".into());
+            let (aborted, result_entry_id) = self.run_durable_tools(
+                operation_id,
+                &step_id,
+                &answer_id,
+                &answer.tool_calls,
+                data.stop_reason,
+                &configuration,
+            )?;
+            if aborted {
+                return Ok("Operation aborted.".into());
+            }
+            context_entry_id = result_entry_id;
+            attempt = 1;
         }
-        let content = answer.content.unwrap_or_default();
-        if data.stop_reason == StopReason::Stop && !content.trim().is_empty() {
-            facts.push(operation_finished(
+    }
+
+    fn run_durable_tools(
+        &mut self,
+        operation_id: &str,
+        step_id: &str,
+        assistant_entry_id: &str,
+        calls: &[ToolCall],
+        stop_reason: StopReason,
+        configuration: &RuntimeConfiguration,
+    ) -> Result<(bool, String), String> {
+        let mut result_entry_id = String::new();
+        for (index, call) in calls.iter().enumerate() {
+            if stop_reason == StopReason::Length {
+                result_entry_id = self.append_pre_execution_result(
+                    step_id,
+                    assistant_entry_id,
+                    index,
+                    call,
+                    "truncated",
+                    crate::session_recovery::SYNTHETIC_TRUNCATED,
+                )?;
+                continue;
+            }
+            let Some(declaration) = tool_declaration(configuration, &call.function.name) else {
+                result_entry_id = self.append_pre_execution_result(
+                    step_id,
+                    assistant_entry_id,
+                    index,
+                    call,
+                    "unknownTool",
+                    crate::session_recovery::SYNTHETIC_UNKNOWN_TOOL,
+                )?;
+                continue;
+            };
+            let Ok(serde_json::Value::Object(arguments)) =
+                serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+            else {
+                result_entry_id = self.append_pre_execution_result(
+                    step_id,
+                    assistant_entry_id,
+                    index,
+                    call,
+                    "invalidArguments",
+                    crate::session_recovery::SYNTHETIC_INVALID_ARGUMENTS,
+                )?;
+                continue;
+            };
+            let parsed = if self
+                .mcp_tools
+                .iter()
+                .any(|tool| tool.name == call.function.name)
+            {
+                Ok(ToolArgs::default_layout())
+            } else {
+                ToolArgs::from_json(&call.function.arguments)
+            };
+            let Ok(args) = parsed else {
+                result_entry_id = self.append_pre_execution_result(
+                    step_id,
+                    assistant_entry_id,
+                    index,
+                    call,
+                    "invalidArguments",
+                    crate::session_recovery::SYNTHETIC_INVALID_ARGUMENTS,
+                )?;
+                continue;
+            };
+            let started_id = uuid7();
+            let result_id = uuid7();
+            let environment = crate::session::environment_identity(FsPath::new(&self.cwd))?;
+            let mut aborted_facts = calls
+                .iter()
+                .enumerate()
+                .skip(index)
+                .map(|(pending_index, pending)| {
+                    synthetic_tool_result(
+                        &uuid7(),
+                        step_id,
+                        assistant_entry_id,
+                        pending_index as u64,
+                        &pending.id,
+                        &pending.function.name,
+                        crate::session_recovery::SYNTHETIC_ABORTED,
+                        "aborted",
+                    )
+                })
+                .collect::<Vec<_>>();
+            aborted_facts.push(operation_finished(
                 &uuid7(),
-                &operation_id,
+                operation_id,
                 "run",
-                "completed",
-                Some(&answer_id),
+                "aborted",
+                None,
                 None,
             ));
-            self.session.as_ref().unwrap().append(facts)?;
-            return Ok(content);
+            let started = self
+                .session
+                .as_ref()
+                .unwrap()
+                .append_unless_abort_requested(
+                    vec![tool_started(
+                        &started_id,
+                        operation_id,
+                        step_id,
+                        assistant_entry_id,
+                        index as u64,
+                        &call.id,
+                        &call.function.name,
+                        arguments.clone(),
+                        declaration,
+                        &environment,
+                        &result_id,
+                    )],
+                    aborted_facts,
+                )?;
+            if !started {
+                return Ok((true, result_id));
+            }
+            if self.abort_was_requested()? {
+                let mut facts = vec![tool_result(
+                    &result_id,
+                    step_id,
+                    &started_id,
+                    &call.id,
+                    &call.function.name,
+                    crate::session_recovery::SYNTHETIC_INTERRUPTED,
+                    "synthetic",
+                )];
+                for (pending_index, pending) in calls.iter().enumerate().skip(index + 1) {
+                    facts.push(synthetic_tool_result(
+                        &uuid7(),
+                        step_id,
+                        assistant_entry_id,
+                        pending_index as u64,
+                        &pending.id,
+                        &pending.function.name,
+                        crate::session_recovery::SYNTHETIC_ABORTED,
+                        "aborted",
+                    ));
+                }
+                facts.push(operation_finished(
+                    &uuid7(),
+                    operation_id,
+                    "run",
+                    "aborted",
+                    None,
+                    None,
+                ));
+                self.session.as_ref().unwrap().append(facts)?;
+                return Ok((true, result_id));
+            }
+            (self.on_tool.as_ref())(ToolEvent {
+                phase: "start".into(),
+                name: call.function.name.clone(),
+                args: args.clone(),
+                result: String::new(),
+            });
+            let result = if let Some(tool) = self
+                .mcp_tools
+                .iter()
+                .find(|tool| tool.name == call.function.name)
+            {
+                tool.execute(serde_json::Value::Object(arguments), &self.cancel)
+            } else {
+                self.execute_tool(&call.function.name, &args)
+            };
+            if self.cancel.load(Ordering::SeqCst) {
+                let mut facts = Vec::new();
+                if !self.abort_was_requested()? {
+                    facts.push(abort_requested(
+                        &uuid7(),
+                        operation_id,
+                        "run",
+                        "tool",
+                        Some(&call.id),
+                    ));
+                }
+                facts.push(tool_result(
+                    &result_id,
+                    step_id,
+                    &started_id,
+                    &call.id,
+                    &call.function.name,
+                    crate::session_recovery::SYNTHETIC_INTERRUPTED,
+                    "synthetic",
+                ));
+                for (pending_index, pending) in calls.iter().enumerate().skip(index + 1) {
+                    facts.push(synthetic_tool_result(
+                        &uuid7(),
+                        step_id,
+                        assistant_entry_id,
+                        pending_index as u64,
+                        &pending.id,
+                        &pending.function.name,
+                        crate::session_recovery::SYNTHETIC_ABORTED,
+                        "aborted",
+                    ));
+                }
+                facts.push(operation_finished(
+                    &uuid7(),
+                    operation_id,
+                    "run",
+                    "aborted",
+                    None,
+                    None,
+                ));
+                self.session.as_ref().unwrap().append(facts)?;
+                return Ok((true, result_id));
+            }
+            let (content, result_type) = match result {
+                Ok(content) => (content, "success"),
+                Err(error) => (format!("Error: {error}"), "error"),
+            };
+            (self.on_tool.as_ref())(ToolEvent {
+                phase: "end".into(),
+                name: call.function.name.clone(),
+                args,
+                result: content.clone(),
+            });
+            self.session.as_ref().unwrap().append(vec![tool_result(
+                &result_id,
+                step_id,
+                &started_id,
+                &call.id,
+                &call.function.name,
+                &content,
+                result_type,
+            )])?;
+            result_entry_id = result_id;
+            self.messages.push(Message {
+                role: "tool".into(),
+                content: Some(content),
+                tool_call_id: call.id.clone(),
+                tool_calls: Vec::new(),
+            });
         }
-        let message = if content.trim().is_empty() {
-            format!("Model returned an empty response (finish_reason: {stop_reason}).")
-        } else {
-            "Model response was truncated by the token limit.".into()
-        };
-        facts.push(operation_finished(
-            &uuid7(),
-            &operation_id,
-            "run",
-            "failed",
-            None,
-            Some(("model_length", &message)),
-        ));
-        self.session.as_ref().unwrap().append(facts)?;
-        Err(message)
+        Ok((false, result_entry_id))
+    }
+
+    fn append_pre_execution_result(
+        &mut self,
+        step_id: &str,
+        assistant_entry_id: &str,
+        index: usize,
+        call: &ToolCall,
+        reason: &str,
+        content: &str,
+    ) -> Result<String, String> {
+        let entry_id = uuid7();
+        self.session
+            .as_ref()
+            .unwrap()
+            .append(vec![synthetic_tool_result(
+                &entry_id,
+                step_id,
+                assistant_entry_id,
+                index as u64,
+                &call.id,
+                &call.function.name,
+                content,
+                reason,
+            )])?;
+        self.messages.push(Message {
+            role: "tool".into(),
+            content: Some(content.into()),
+            tool_call_id: call.id.clone(),
+            tool_calls: Vec::new(),
+        });
+        Ok(entry_id)
     }
 
     pub fn resume_session(&mut self) -> Result<(), String> {
-        let Some(session) = &self.session else {
+        if self.session.is_none() {
             return Ok(());
-        };
+        }
         let system_prompt = self.messages[0].content.clone().unwrap_or_default();
-        let projection = project_idle(&session.load()?, &system_prompt)
-            .map_err(|_| "Session recovery required".to_string())?;
+        if matches!(
+            self.session.as_ref().unwrap().load()?.operation,
+            OperationState::Idle
+        ) {
+            let state = self.session.as_ref().unwrap().load()?;
+            let projection = project_idle(&state, &system_prompt)?;
+            self.messages = projection.messages;
+            self.usage = projection.usage;
+            return Ok(());
+        }
+        self.recover_session()?;
+        let state = self.session.as_ref().unwrap().load()?;
+        let projection = project_idle(&state, &system_prompt)?;
         self.messages = projection.messages;
         self.usage = projection.usage;
         Ok(())
+    }
+
+    fn recover_session(&mut self) -> Result<(), String> {
+        loop {
+            let state = self.session.as_ref().unwrap().load()?;
+            if matches!(state.operation, OperationState::Idle) {
+                return Ok(());
+            }
+            let configuration = self.runtime_configuration();
+            let environment = crate::session::environment_identity(FsPath::new(&self.cwd))?;
+            let current = CurrentConfiguration {
+                configuration_digest: configuration.digest.clone(),
+                environment_identity: environment.clone(),
+                tools: configuration
+                    .tools
+                    .iter()
+                    .map(|tool| CurrentTool {
+                        name: tool.name.clone(),
+                        definition_digest: configuration
+                            .snapshot
+                            .tools
+                            .iter()
+                            .find(|item| item.name == tool.name)
+                            .map(|item| item.definition_digest.clone())
+                            .unwrap_or_default(),
+                        replay: tool.replay.clone(),
+                        replay_key: tool.replay_key.clone(),
+                    })
+                    .collect(),
+            };
+            let action = plan_recovery(&state, &current);
+            let action_type = action["type"].as_str().unwrap_or_default();
+            let (operation_id, operation_kind) = match &state.operation {
+                OperationState::Run { operation_id, .. } => (operation_id.as_str(), "run"),
+                OperationState::Compaction { operation_id, .. } => {
+                    (operation_id.as_str(), "compaction")
+                }
+                OperationState::Idle => return Ok(()),
+            };
+            match action_type {
+                "blocked" => {
+                    return Err(format!(
+                        "Session recovery blocked: {}",
+                        action["reason"].as_str().unwrap_or("unknown")
+                    ));
+                }
+                "closeAttempt" => {
+                    let step = match &state.operation {
+                        OperationState::Run {
+                            step: Some(step), ..
+                        }
+                        | OperationState::Compaction {
+                            step: Some(step), ..
+                        } => step,
+                        _ => return Err("Session recovery attempt missing".into()),
+                    };
+                    self.session.as_ref().unwrap().append(vec![step_failed(
+                        &uuid7(),
+                        operation_id,
+                        &step.step_id,
+                        &step.attempt_id,
+                        action["error"]["code"].as_str().unwrap_or("aborted"),
+                        action["error"]["message"]
+                            .as_str()
+                            .unwrap_or("Operation aborted"),
+                    )])?;
+                }
+                "appendSynthetic" => {
+                    let step_id = match &state.operation {
+                        OperationState::Run {
+                            step: Some(step), ..
+                        } => step.step_id.clone(),
+                        _ => return Err("Session recovery step missing".into()),
+                    };
+                    let facts = action["results"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|result| {
+                            let reason = result["reason"].as_str().unwrap_or("interrupted");
+                            if let Some(started_id) = result["toolStartedId"].as_str() {
+                                tool_result(
+                                    result["resultEntryId"].as_str().unwrap_or_default(),
+                                    &step_id,
+                                    started_id,
+                                    result["toolCallId"].as_str().unwrap_or_default(),
+                                    result["toolName"].as_str().unwrap_or_default(),
+                                    result["content"].as_str().unwrap_or_default(),
+                                    "synthetic",
+                                )
+                            } else {
+                                synthetic_tool_result(
+                                    &uuid7(),
+                                    &step_id,
+                                    result["assistantEntryId"].as_str().unwrap_or_default(),
+                                    result["toolIndex"].as_u64().unwrap_or_default(),
+                                    result["toolCallId"].as_str().unwrap_or_default(),
+                                    result["toolName"].as_str().unwrap_or_default(),
+                                    result["content"].as_str().unwrap_or_default(),
+                                    reason,
+                                )
+                            }
+                        })
+                        .collect();
+                    self.session.as_ref().unwrap().append(facts)?;
+                }
+                "startTool" => {
+                    if operation_kind != "run" {
+                        return Err("Compaction recovery is not implemented".into());
+                    }
+                    let name = action["toolName"].as_str().unwrap_or_default();
+                    let Some(declaration) = tool_declaration(&configuration, name) else {
+                        return Err("Session recovery tool declaration missing".into());
+                    };
+                    let arguments = action["arguments"]
+                        .as_object()
+                        .cloned()
+                        .ok_or_else(|| "Session recovery tool arguments missing".to_string())?;
+                    let args: ToolArgs =
+                        serde_json::from_value(serde_json::Value::Object(arguments.clone()))
+                            .map_err(|error| error.to_string())?;
+                    let tool = match &state.operation {
+                        OperationState::Run {
+                            step: Some(step),
+                            tool_calls,
+                            ..
+                        } => {
+                            let existing = action["toolStartedId"].as_str().and_then(|id| {
+                                tool_calls.iter().find(|tool| tool.tool_started_id == id)
+                            });
+                            (
+                                step.step_id.clone(),
+                                existing
+                                    .map(|tool| tool.tool_call_id.clone())
+                                    .unwrap_or_else(|| {
+                                        state
+                                            .transcript
+                                            .iter()
+                                            .rev()
+                                            .find_map(|message| {
+                                                message["tool_calls"]
+                                            .as_array()?
+                                            .get(action["toolIndex"].as_u64()? as usize)?["id"]
+                                            .as_str()
+                                            .map(str::to_string)
+                                            })
+                                            .unwrap_or_default()
+                                    }),
+                                existing.map(|tool| tool.tool_started_id.clone()),
+                                existing.map(|tool| tool.result_entry_id.clone()),
+                            )
+                        }
+                        _ => return Err("Session recovery run step missing".into()),
+                    };
+                    let started_id = tool.2.unwrap_or_else(uuid7);
+                    let result_id = tool.3.unwrap_or_else(uuid7);
+                    if action["mode"] == "start" {
+                        let started = self
+                            .session
+                            .as_ref()
+                            .unwrap()
+                            .append_unless_abort_requested(
+                                vec![tool_started(
+                                    &started_id,
+                                    operation_id,
+                                    &tool.0,
+                                    action["assistantEntryId"].as_str().unwrap_or_default(),
+                                    action["toolIndex"].as_u64().unwrap_or_default(),
+                                    &tool.1,
+                                    name,
+                                    arguments.clone(),
+                                    declaration,
+                                    &environment,
+                                    &result_id,
+                                )],
+                                Vec::new(),
+                            )?;
+                        if !started {
+                            continue;
+                        }
+                    }
+                    if self.abort_was_requested()? {
+                        continue;
+                    }
+                    let result = if let Some(mcp_tool) =
+                        self.mcp_tools.iter().find(|tool| tool.name == name)
+                    {
+                        mcp_tool.execute(serde_json::Value::Object(arguments), &self.cancel)
+                    } else {
+                        self.execute_tool(name, &args)
+                    };
+                    let (content, result_type) = match result {
+                        Ok(content) => (content, "success"),
+                        Err(error) => (format!("Error: {error}"), "error"),
+                    };
+                    self.session.as_ref().unwrap().append(vec![tool_result(
+                        &result_id,
+                        &tool.0,
+                        &started_id,
+                        &tool.1,
+                        name,
+                        &content,
+                        result_type,
+                    )])?;
+                }
+                "startStep" => {
+                    if operation_kind != "run" {
+                        return Err("Compaction recovery is not implemented".into());
+                    }
+                    self.messages = vec![Message {
+                        role: "system".into(),
+                        content: self.messages[0].content.clone(),
+                        tool_call_id: String::new(),
+                        tool_calls: Vec::new(),
+                    }];
+                    for message in &state.active_context {
+                        self.messages.push(
+                            serde_json::from_value(message.clone())
+                                .map_err(|error| error.to_string())?,
+                        );
+                    }
+                    self.run_durable_operation(
+                        operation_id,
+                        action["contextThroughEntryId"].as_str().unwrap_or_default(),
+                        action["stepId"].as_str(),
+                        action["attempt"].as_u64().unwrap_or(1),
+                    )?;
+                }
+                "finish" => {
+                    let outcome = action["outcome"].as_str().unwrap_or("failed");
+                    let error = action.get("error").map(|error| {
+                        (
+                            error["code"].as_str().unwrap_or("recovery_error"),
+                            error["message"]
+                                .as_str()
+                                .unwrap_or("Session recovery failed"),
+                        )
+                    });
+                    self.session
+                        .as_ref()
+                        .unwrap()
+                        .append(vec![operation_finished(
+                            &uuid7(),
+                            operation_id,
+                            operation_kind,
+                            outcome,
+                            action["finalEntryId"].as_str(),
+                            error,
+                        )])?;
+                }
+                _ => return Err(format!("Unknown session recovery action: {action_type}")),
+            }
+        }
     }
 
     fn add_usage(&mut self, u: UsageJSON, cache_rate: bool) {
@@ -661,10 +1387,10 @@ impl Agent {
     }
 
     pub fn run_agent_loop(&mut self, input: &str) -> Result<String, String> {
-        self.cancel.store(false, Ordering::SeqCst);
         if self.session.is_some() {
             return self.run_durable_model(input);
         }
+        self.cancel.store(false, Ordering::SeqCst);
         let user = Message {
             role: "user".to_string(),
             content: Some(input.to_string()),
@@ -775,6 +1501,7 @@ impl Agent {
     }
 
     pub fn compact(&mut self) -> Result<String, String> {
+        self.publish_abort_coordination(AbortCoordination::NonDurable);
         self.cancel.store(false, Ordering::SeqCst);
         let keep = 6;
         if self.messages.len() <= 1 {

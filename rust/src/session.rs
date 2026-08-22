@@ -3,7 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
@@ -30,10 +30,11 @@ pub fn environment_identity(cwd: &Path) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+#[derive(Clone)]
 pub struct Session {
     pub id: String,
     pub path: PathBuf,
-    inner: Mutex<StoreInner>,
+    inner: Arc<Mutex<StoreInner>>,
 }
 
 struct StoreInner {
@@ -90,13 +91,13 @@ impl Session {
         Ok(Self {
             id,
             path,
-            inner: Mutex::new(StoreInner {
+            inner: Arc::new(Mutex::new(StoreInner {
                 file: Some(file),
                 bytes,
                 next_seq: 1,
                 state,
                 closed: false,
-            }),
+            })),
         })
     }
 
@@ -169,13 +170,13 @@ impl Session {
             Ok(Self {
                 id: id.to_string(),
                 path: canonical.clone(),
-                inner: Mutex::new(StoreInner {
+                inner: Arc::new(Mutex::new(StoreInner {
                     file: Some(file),
                     bytes,
                     next_seq,
                     state,
                     closed: false,
-                }),
+                })),
             })
         })();
         if result.is_err() {
@@ -189,42 +190,59 @@ impl Session {
     }
 
     pub fn append(&self, facts: Vec<SessionFact>) -> Result<Vec<SessionFact>, String> {
-        if facts.is_empty() {
-            return Err("Session transaction must not be empty".into());
-        }
         let mut inner = self.inner.lock().unwrap();
-        if inner.closed {
-            return Err("Session is closed".into());
+        append_locked(&mut inner, facts)
+    }
+
+    pub fn append_unless_abort_requested(
+        &self,
+        facts: Vec<SessionFact>,
+        aborted_facts: Vec<SessionFact>,
+    ) -> Result<bool, String> {
+        let mut inner = self.inner.lock().unwrap();
+        let aborted = matches!(
+            inner.state.operation,
+            crate::session_reducer::OperationState::Run {
+                abort_requested: true,
+                ..
+            } | crate::session_reducer::OperationState::Compaction {
+                abort_requested: true,
+                ..
+            }
+        );
+        if aborted {
+            if !aborted_facts.is_empty() {
+                append_locked(&mut inner, aborted_facts)?;
+            }
+            return Ok(false);
         }
-        let timestamp = now_millis();
-        let mut committed = Vec::with_capacity(facts.len());
-        for (index, mut fact) in facts.into_iter().enumerate() {
-            fact.entry("id").or_insert_with(|| Value::String(uuid7()));
-            fact.insert("seq".into(), Value::from(inner.next_seq + index as u64));
-            fact.entry("timestamp")
-                .or_insert_with(|| Value::from(timestamp));
-            committed.push(fact);
-        }
-        let value = if committed.len() == 1 {
-            Value::Object(committed[0].clone())
-        } else {
-            Value::Array(committed.iter().cloned().map(Value::Object).collect())
+        append_locked(&mut inner, facts)?;
+        Ok(true)
+    }
+
+    pub fn append_abort_if_active(
+        &self,
+        operation_id: &str,
+        fact: SessionFact,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let should_append = match &inner.state.operation {
+            crate::session_reducer::OperationState::Run {
+                operation_id: active,
+                abort_requested,
+                ..
+            }
+            | crate::session_reducer::OperationState::Compaction {
+                operation_id: active,
+                abort_requested,
+                ..
+            } => active == operation_id && !abort_requested,
+            crate::session_reducer::OperationState::Idle => false,
         };
-        let mut line = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
-        line.push(b'\n');
-        let mut candidate = inner.bytes.clone();
-        candidate.extend_from_slice(&line);
-        let state = reduce_session(&candidate).map_err(|error| error.to_string())?;
-        inner
-            .file
-            .as_mut()
-            .unwrap()
-            .write_all(&line)
-            .map_err(|error| error.to_string())?;
-        inner.bytes = candidate;
-        inner.next_seq += committed.len() as u64;
-        inner.state = state;
-        Ok(committed)
+        if should_append {
+            append_locked(&mut inner, vec![fact])?;
+        }
+        Ok(())
     }
 
     pub fn load(&self) -> Result<SessionState, String> {
@@ -251,12 +269,54 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Ok(inner) = self.inner.get_mut()
+        if Arc::strong_count(&self.inner) == 1
+            && let Ok(inner) = self.inner.lock()
             && !inner.closed
         {
             writers().lock().unwrap().remove(&self.path);
         }
     }
+}
+
+fn append_locked(
+    inner: &mut StoreInner,
+    facts: Vec<SessionFact>,
+) -> Result<Vec<SessionFact>, String> {
+    if facts.is_empty() {
+        return Err("Session transaction must not be empty".into());
+    }
+    if inner.closed {
+        return Err("Session is closed".into());
+    }
+    let timestamp = now_millis();
+    let mut committed = Vec::with_capacity(facts.len());
+    for (index, mut fact) in facts.into_iter().enumerate() {
+        fact.entry("id").or_insert_with(|| Value::String(uuid7()));
+        fact.insert("seq".into(), Value::from(inner.next_seq + index as u64));
+        fact.entry("timestamp")
+            .or_insert_with(|| Value::from(timestamp));
+        committed.push(fact);
+    }
+    let value = if committed.len() == 1 {
+        Value::Object(committed[0].clone())
+    } else {
+        Value::Array(committed.iter().cloned().map(Value::Object).collect())
+    };
+    let mut line = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+    line.push(b'\n');
+    let mut candidate = inner.bytes.clone();
+    candidate.extend_from_slice(&line);
+    let state = reduce_session(&candidate).map_err(|error| error.to_string())?;
+    inner
+        .file
+        .as_mut()
+        .unwrap()
+        .write_all(&line)
+        .map_err(|error| error.to_string())?;
+    inner.bytes = candidate;
+    inner.next_seq += committed.len() as u64;
+    inner.state = state;
+    Ok(committed)
 }
 
 fn count_facts(bytes: &[u8]) -> Result<u64, String> {
