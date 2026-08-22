@@ -81,6 +81,21 @@ class TinyAgentTest(unittest.TestCase):
         self.assertEqual(restored.usage["input"], 10)
         reopened.close()
 
+    def test_recovered_model_abort_race_records_known_usage(self):
+        session = tiny.Session.create(tiny.ROOT); user_id, operation_id = tiny.uuid7(), tiny.uuid7()
+        session.append(
+            {"kind": "entry", "id": user_id, "entry": {"type": "message", "message": {"role": "user", "content": "recover"}}},
+            {"kind": "record", "record": {"type": "runStarted", "operationId": operation_id, "operationKind": "run", "inputEntryId": user_id}},
+        )
+        agent = None
+        def reply(*_):
+            agent.abort()
+            return {"choices": [{"message": {"role": "assistant", "content": "discard"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 9, "completion_tokens": 4}}
+        agent = tiny.Agent(session=session, requester=reply)
+        self.assertEqual(agent.resume_session(), "Operation aborted.")
+        self.assertEqual(session.load()["usage"], {"input": 9, "output": 4, "cacheRead": 0, "cacheWrite": 0})
+        self.assert_aborted_reopens_idempotently(session, "recover", {"input": 9, "output": 4})
+
     def test_non_idle_resume_starts_recovery(self):
         session = tiny.Session.create(tiny.ROOT)
         user_id, operation_id = tiny.uuid7(), tiny.uuid7()
@@ -209,6 +224,24 @@ class TinyAgentTest(unittest.TestCase):
         self.assertIn("second knowledge", session.load()["activeContext"][0]["content"])
         session.close()
 
+    def test_recovered_compaction_abort_race_records_known_usage(self):
+        session = tiny.Session.create(tiny.ROOT); agent = self._completed_conversation(session)
+        source = agent._message_facts(); operation_id, result_id = tiny.uuid7(), tiny.uuid7()
+        session.append({"kind": "record", "record": {
+            "type": "compactionStarted", "operationId": operation_id, "operationKind": "compaction",
+            "inputThroughEntryId": source[-1]["id"], "resultEntryId": result_id,
+            "compactedEntryIds": [item["id"] for item in source[:2]], "retainedEntryIds": [item["id"] for item in source[2:]],
+            "sourceDigest": source_digest(agent._full_state(), source[-1]["id"]),
+        }})
+        agent = None
+        def reply(*_):
+            agent.abort()
+            return {"choices": [{"message": {"role": "assistant", "content": "discard"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 11, "completion_tokens": 6}}
+        agent = tiny.Agent(session=session, requester=reply); agent.configuration_digest = agent.configuration_digest
+        agent.resume_session()
+        self.assertEqual(session.load()["usage"], {"input": 51, "output": 14, "cacheRead": 0, "cacheWrite": 0})
+        self.assert_aborted_reopens_idempotently(session, "answer 3", {"input": 51, "output": 14})
+
     def test_durable_compaction_abort(self):
         session = tiny.Session.create(tiny.ROOT); agent = self._completed_conversation(session)
         started = threading.Event()
@@ -297,7 +330,7 @@ class TinyAgentTest(unittest.TestCase):
         self.assertEqual(session.load()["operation"]["kind"], "idle")
         session.close()
 
-    def assert_aborted_reopens_idempotently(self, session, expected):
+    def assert_aborted_reopens_idempotently(self, session, expected, usage=None):
         self.assertEqual(session.load()["operation"]["kind"], "idle")
         facts = [fact for line in session.path.read_text().splitlines()[1:] for fact in (json.loads(line) if isinstance(json.loads(line), list) else [json.loads(line)])]
         abort_index = next(index for index, fact in enumerate(facts) if fact.get("record", {}).get("type") == "abortRequested")
@@ -307,6 +340,8 @@ class TinyAgentTest(unittest.TestCase):
         before = reopened.path.read_bytes()
         self.assertIsNone(restored.resume_session()); self.assertEqual(reopened.path.read_bytes(), before)
         self.assertEqual(restored.messages[-1].get("content"), expected)
+        if usage:
+            for key, value in usage.items(): self.assertEqual(restored.usage[key], value)
         reopened.close()
 
     def test_abort_after_successful_model_return_discards_answer(self):
@@ -318,7 +353,9 @@ class TinyAgentTest(unittest.TestCase):
         agent = tiny.Agent(session=session, requester=reply)
         self.assertEqual(agent.run_agent_loop("race"), "Operation aborted.")
         self.assertNotIn("must be discarded", [message.get("content") for message in agent.messages])
-        self.assert_aborted_reopens_idempotently(session, "race")
+        self.assertEqual(agent.usage["input"], 8); self.assertEqual(agent.usage["output"], 2)
+        self.assertEqual(session.load()["usage"]["input"], 8); self.assertEqual(session.load()["usage"]["output"], 2)
+        self.assert_aborted_reopens_idempotently(session, "race", {"input": 8, "output": 2})
 
     def test_abort_race_after_model_settlement_does_not_create_durable_abort(self):
         session = tiny.Session.create(tiny.ROOT); agent = None
@@ -369,11 +406,12 @@ class TinyAgentTest(unittest.TestCase):
         session = tiny.Session.create(tiny.ROOT); agent = self._completed_conversation(session); agent.requester = None
         def reply(*_):
             agent.abort()
-            return {"choices": [{"message": {"role": "assistant", "content": "must be discarded"}, "finish_reason": "stop"}], "usage": {}}
+            return {"choices": [{"message": {"role": "assistant", "content": "must be discarded"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 13, "completion_tokens": 5}}
         agent.requester = reply
         self.assertEqual(agent.compact(), "Compaction aborted.")
         self.assertFalse(any(fact.get("entry", {}).get("type") == "compaction" for fact in agent._facts()))
-        self.assert_aborted_reopens_idempotently(session, "answer 3")
+        self.assertEqual(session.load()["usage"]["input"], 53); self.assertEqual(session.load()["usage"]["output"], 13)
+        self.assert_aborted_reopens_idempotently(session, "answer 3", {"input": 53, "output": 13})
 
     def test_model_and_tool_abort_keep_legal_transcript(self):
         started = threading.Event()
@@ -401,6 +439,68 @@ class TinyAgentTest(unittest.TestCase):
             ("later", "Operation aborted before execution."),
         ])
         tool_session.close()
+
+    def test_connection_cleanup_is_bound_to_activity_generation(self):
+        class FakeConnection:
+            def __init__(self): self.closed = 0
+            def close(self): self.closed += 1
+
+        session = tiny.Session.create(tiny.ROOT); agent = tiny.Agent(session=session)
+        first_cancelled = agent.begin("first", "model"); first = FakeConnection()
+        first_activity = agent._install_connection(first_cancelled, first); agent.end()
+        second_cancelled = agent.begin("second", "model"); second = FakeConnection()
+        second_activity = agent._install_connection(second_cancelled, second)
+        agent._clear_connection(first_activity, first)
+        self.assertIs(agent.active, second_activity); self.assertIs(agent.active["connection"], second)
+        self.assertEqual((first.closed, second.closed), (0, 0))
+        second_cancelled.set(); agent.abort()
+        self.assertEqual((first.closed, second.closed), (0, 1))
+        agent.end(); session.close()
+
+    def test_stale_abort_close_cannot_touch_next_model_connection(self):
+        first_requested = threading.Event(); allow_first_response = threading.Event()
+        abort_close_started = threading.Event(); release_abort_close = threading.Event()
+        second_requested = threading.Event(); allow_second_response = threading.Event()
+        connections = []
+
+        class Response:
+            status = 200
+            def __init__(self, content): self.content = content
+            def read(self):
+                return json.dumps({"choices": [{"message": {"role": "assistant", "content": self.content}, "finish_reason": "stop"}], "usage": {}}).encode()
+
+        class FakeConnection:
+            def __init__(self, *_args, **_kwargs):
+                self.index = len(connections); self.close_count = 0; connections.append(self)
+            def request(self, *_args):
+                (first_requested if self.index == 0 else second_requested).set()
+            def getresponse(self):
+                (allow_first_response if self.index == 0 else allow_second_response).wait()
+                return Response("first" if self.index == 0 else "second")
+            def close(self):
+                self.close_count += 1
+                if self.index == 0 and self.close_count == 1:
+                    abort_close_started.set(); release_abort_close.wait()
+
+        session = tiny.Session.create(tiny.ROOT); agent = tiny.Agent(session=session); first_result = []
+        with patch.object(tiny.http.client, "HTTPSConnection", FakeConnection):
+            first_thread = threading.Thread(target=lambda: first_result.append(agent.run_agent_loop("first")))
+            first_thread.start(); first_requested.wait()
+            abort_thread = threading.Thread(target=agent.abort); abort_thread.start(); abort_close_started.wait()
+            allow_first_response.set(); first_thread.join(2)
+            self.assertEqual(first_result, ["Operation aborted."])
+
+            second_result = []
+            second_thread = threading.Thread(target=lambda: second_result.append(agent.run_agent_loop("second")))
+            second_thread.start(); second_requested.wait()
+            release_abort_close.set(); abort_thread.join(2)
+            self.assertEqual(connections[1].close_count, 0)
+            allow_second_response.set(); second_thread.join(2)
+
+        self.assertEqual(second_result, ["second"])
+        self.assertGreaterEqual(connections[0].close_count, 2)
+        self.assertEqual(connections[1].close_count, 1)
+        session.close()
 
     def test_replay_declaration_uses_exact_builtin_read(self):
         custom_read = {"type": "function", "function": {**tiny.TOOL_DEFINITIONS[1]["function"]}, "execute": lambda *_: "custom"}

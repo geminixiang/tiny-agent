@@ -128,6 +128,14 @@ class Session:
             cancelled.set()
             return True
 
+    def append_aborted_attempt(self, operation_id: str, cancelled: threading.Event, failure: dict, usage: dict) -> list[dict]:
+        with self.lock:
+            if self.closed: raise ValueError("Session is closed")
+            operation = self.state["operation"]
+            if operation["kind"] == "idle" or operation.get("operationId") != operation_id or not (cancelled.is_set() or operation.get("abortRequested")):
+                raise ValueError("Operation is not aborted")
+            return self._append_locked((failure, usage))
+
     def append_if_active(self, operation_id: str, cancelled: threading.Event, *facts: dict) -> list[dict] | None:
         if not facts: raise ValueError("Session transaction must not be empty")
         with self.lock:

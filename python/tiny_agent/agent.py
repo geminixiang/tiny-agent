@@ -147,8 +147,8 @@ class Agent:
         self.skills, self.session, self.requester, self.on_tool = skills or [], session, requester, on_tool
         self.tools = tools if tools is not None else TOOL_DEFINITIONS
         self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
-        self.cancelled: threading.Event | None = None; self.connection: http.client.HTTPConnection | None = None
-        self.active: dict | None = None; self.activity_lock = threading.Lock()
+        self.cancelled: threading.Event | None = None
+        self.active: dict | None = None; self.activity_lock = threading.Lock(); self.activity_generation = 0
         listing = "\n".join(f"<skill>\n<name>{s['name']}</name>\n<description>{s['description']}</description>\n<location>{s['path']}</location>\n</skill>" for s in self.skills) or "(none)"
         project = f'\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="{ROOT / "AGENTS.md"}">\n{instructions}\n</project_instructions>\n\n</project_context>' if instructions else ""
         prompt = f"You are tiny-agent, a concise coding agent in {ROOT}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.{project}\n\n<available_skills>\n{listing}\n</available_skills>"
@@ -174,6 +174,7 @@ class Agent:
     def busy(self) -> bool: return self.cancelled is not None
 
     def abort(self) -> None:
+        connection = None
         with self.activity_lock:
             active, cancelled = self.active, self.cancelled
             if cancelled and active and self.session and not active.get("abortRequested"):
@@ -185,31 +186,57 @@ class Agent:
                 active["abortRequested"] = self.session.request_abort(
                     active["operationId"], cancelled, {"kind": "record", "record": record},
                 )
+                connection = active.get("connection")
+                active["connection"] = None
             elif cancelled:
                 cancelled.set()
-        if self.connection:
-            try: self.connection.close()
+        if connection:
+            try: connection.close()
             except OSError: pass
 
     def begin(self, operation_id: str, phase: str, tool_call_id: str | None = None, operation_kind: str = "run") -> threading.Event:
         with self.activity_lock:
+            self.activity_generation += 1
             self.cancelled = threading.Event()
-            self.active = {"operationId": operation_id, "operationKind": operation_kind, "phase": phase, "toolCallId": tool_call_id, "abortRequested": False}
+            self.active = {"generation": self.activity_generation, "operationId": operation_id, "operationKind": operation_kind, "phase": phase, "toolCallId": tool_call_id, "abortRequested": False, "connection": None}
             return self.cancelled
 
     def end(self) -> None:
         with self.activity_lock:
-            self.cancelled = None; self.connection = None; self.active = None
+            self.cancelled = None; self.active = None
+
+    def _install_connection(self, cancelled: threading.Event, connection: http.client.HTTPConnection) -> dict | None:
+        with self.activity_lock:
+            active = self.active
+            if not active or self.cancelled is not cancelled or cancelled.is_set():
+                try: connection.close()
+                except OSError: pass
+                return None
+            active["connection"] = connection
+            return active
+
+    def _clear_connection(self, active: dict, connection: http.client.HTTPConnection) -> None:
+        with self.activity_lock:
+            if self.active is active and active.get("connection") is connection:
+                active["connection"] = None
 
     def _is_aborted(self, operation_id: str, cancelled: threading.Event) -> bool:
         operation = self.session.load()["operation"]
         return cancelled.is_set() or (operation.get("operationId") == operation_id and operation.get("abortRequested", False))
 
-    def _fail_aborted_attempt(self, operation_id: str, step_id: str, attempt_id: str) -> None:
-        self.session.append({"kind": "record", "record": {
+    def _fail_aborted_attempt(self, operation_id: str, step_id: str, attempt_id: str, cancelled: threading.Event, usage: dict | None = None, cache_rate: bool = True) -> None:
+        failure = {"kind": "record", "record": {
             "type": "stepFailed", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id,
             "error": {"code": "aborted", "message": "Operation aborted"},
-        }})
+        }}
+        if usage is None:
+            self.session.append(failure)
+            return
+        self.session.append_aborted_attempt(
+            operation_id, cancelled, failure,
+            {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage},
+        )
+        self.add_usage(usage, cache_rate)
 
     def add_usage(self, usage: dict, cache_rate: bool = True) -> None:
         for key in ("input", "output", "cacheRead", "cacheWrite"): self.usage[key] += usage.get(key, 0)
@@ -349,13 +376,15 @@ class Agent:
         body = {"model": os.getenv("TINY_MODEL") or DEFAULT_MODEL, "messages": messages, **({"tools": tools} if tools else {})}
         if self.requester: data = self.requester(body, cancelled)
         else:
-            url = urlsplit(OPENROUTER_URL); connection = http.client.HTTPSConnection(url.hostname, timeout=120); self.connection = connection
+            url = urlsplit(OPENROUTER_URL); connection = http.client.HTTPSConnection(url.hostname, timeout=120)
+            activity = self._install_connection(cancelled, connection)
+            if activity is None: raise InterruptedError("Operation aborted")
             try:
                 connection.request("POST", url.path, json.dumps(body), {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "HTTP-Referer": "https://github.com/geminixiang/tiny-agent"})
                 response = connection.getresponse(); raw = response.read().decode()
             finally:
+                self._clear_connection(activity, connection)
                 connection.close()
-                if self.connection is connection: self.connection = None
             if response.status < 200 or response.status >= 300: raise RuntimeError(f"OpenRouter {response.status}: {raw}")
             data = json.loads(raw)
         raw_usage = data.get("usage", {}); details = raw_usage.get("prompt_tokens_details", {})
@@ -416,7 +445,7 @@ class Agent:
             )
             self.end()
             if committed is None:
-                self._fail_aborted_attempt(operation_id, step_id, attempt_id)
+                self._fail_aborted_attempt(operation_id, step_id, attempt_id, cancelled, usage)
                 self._finish(operation_id, "aborted")
                 return "Operation aborted."
             self.add_usage(usage)
@@ -555,7 +584,7 @@ class Agent:
         )
         self.end()
         if committed is None:
-            self._fail_aborted_attempt(operation_id, step_id, attempt_id)
+            self._fail_aborted_attempt(operation_id, step_id, attempt_id, cancelled, usage, cache_rate=False)
             self._finish(operation_id, "aborted", operation_kind="compaction")
             return "Compaction aborted."
         self.add_usage(usage, cache_rate=False)
