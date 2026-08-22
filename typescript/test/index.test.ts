@@ -82,6 +82,61 @@ async function appendSettledToolStep(
     return { ...accepted, stepId, assistantEntryId };
 }
 
+async function appendCompactionHistory(session: Awaited<ReturnType<typeof openStore>>, fetcher?: typeof fetch) {
+    let replies = 0;
+    const agent = new Agent(
+        [],
+        fetcher ??
+            ((async () =>
+                new Response(
+                    JSON.stringify({
+                        choices: [
+                            { finish_reason: "stop", message: { role: "assistant", content: `answer-${++replies}` } },
+                        ],
+                        usage: {},
+                    }),
+                    { status: 200 },
+                )) as typeof fetch),
+        session,
+    );
+    for (const prompt of ["a", "b", "c", "d"]) await agent.runAgentLoop(prompt);
+    return agent;
+}
+
+function factType(input: unknown) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+    const value = input as { kind?: string; record?: { type?: string }; entry?: { type?: string } };
+    return value.record?.type ?? value.entry?.type ?? value.kind;
+}
+
+async function leaveCompactionPrefix(
+    agent: InstanceType<typeof Agent>,
+    session: Awaited<ReturnType<typeof openStore>>,
+    stopBefore: "stepAttempt" | "usage" | "operationFinished",
+) {
+    const originalAppend = session.append.bind(session);
+    let crashed = false;
+    session.append = (async (input: Parameters<typeof session.append>[0]) => {
+        if (crashed) throw Error(`crash after ${stopBefore}`);
+        const type = factType(input);
+        if (type === stopBefore && stopBefore !== "usage") {
+            crashed = true;
+            throw Error(`crash before ${stopBefore}`);
+        }
+        const result = await originalAppend(input);
+        if (type === "stepAttempt" && stopBefore === "usage") {
+            crashed = true;
+            throw Error("crash after stepAttempt");
+        }
+        return result;
+    }) as typeof session.append;
+    try {
+        await assert.rejects(() => agent.compact(), /crash/);
+    } finally {
+        session.append = originalAppend;
+    }
+}
+
 test("loads cwd AGENTS.md into the system prompt", async () => {
     await writeFile("AGENTS.md", "Always answer briefly.\n");
     const instructions = await loadProjectInstructions();
@@ -608,10 +663,607 @@ test("reconciles an abort in tool order and repeated resume remains idle", async
     }
 });
 
-test("compaction is disabled until durable Phase 2b integration", async () => {
+test("durable tool abort wins while its append races successful settlement", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-06T03:30:00Z"));
+    try {
+        let requests = 0;
+        let releaseTool!: () => void;
+        let toolStarted!: () => void;
+        const toolPending = new Promise<void>((resolve) => (toolStarted = resolve));
+        const toolReleased = new Promise<void>((resolve) => (releaseTool = resolve));
+        const agent = new Agent(
+            [],
+            (async () => {
+                requests++;
+                return new Response(
+                    JSON.stringify({
+                        choices: [
+                            {
+                                finish_reason: "tool_calls",
+                                message: {
+                                    role: "assistant",
+                                    content: null,
+                                    tool_calls: [
+                                        {
+                                            id: "race-call",
+                                            type: "function",
+                                            function: { name: "race", arguments: "{}" },
+                                        },
+                                    ],
+                                },
+                            },
+                        ],
+                        usage: {},
+                    }),
+                    { status: 200 },
+                );
+            }) as typeof fetch,
+            session,
+            () => {},
+            "",
+            () => {},
+            [
+                {
+                    name: "race",
+                    description: "Settle during durable abort persistence.",
+                    parameters: { type: "object", properties: {} },
+                    async execute() {
+                        toolStarted();
+                        await toolReleased;
+                        return "success must not persist";
+                    },
+                },
+            ],
+        );
+        let releaseAbortAppend!: () => void;
+        let abortAppendStarted!: () => void;
+        const abortAppendPending = new Promise<void>((resolve) => (abortAppendStarted = resolve));
+        const abortAppendReleased = new Promise<void>((resolve) => (releaseAbortAppend = resolve));
+        const originalAppend = session.append.bind(session);
+        session.append = (async (input: Parameters<typeof session.append>[0]) => {
+            if (factType(input) === "abortRequested") {
+                abortAppendStarted();
+                await abortAppendReleased;
+            }
+            return originalAppend(input);
+        }) as typeof session.append;
+
+        const running = agent.runAgentLoop("race abort");
+        await toolPending;
+        const aborting = agent.abort();
+        await abortAppendPending;
+        releaseTool();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        releaseAbortAppend();
+        await aborting;
+
+        assert.equal(await running, "Operation aborted.");
+        assert.equal(requests, 1);
+        const persisted = await facts(session);
+        assert.equal(persisted.filter((fact) => fact.record?.type === "abortRequested").length, 1);
+        const result = persisted.find((fact) => fact.entry?.message?.tool_call_id === "race-call");
+        assert.equal(result.entry.message.content, SYNTHETIC_CONTENT.interrupted);
+        assert.deepEqual(result.entry.result, { type: "synthetic", reason: "interrupted" });
+        assert.equal(
+            persisted.some((fact) => fact.entry?.message?.content === "success must not persist"),
+            false,
+        );
+        assert.equal(persisted.at(-1).record.outcome, "aborted");
+    } finally {
+        await session.close();
+    }
+});
+
+test("persists durable compaction and keeps repeated context bounded", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const replies = ["one", "two", "three", "four", "summary-one", "summary-two"];
+    const requests: Array<{ messages: Array<{ role: string; content: string }> }> = [];
     const session = await openStore(new Date("2026-08-07T00:00:00Z"));
-    await assert.rejects(() => new Agent([], fetch, session).compact(), /Phase 2b/);
+    const agent = new Agent(
+        [],
+        (async (_url: unknown, init: RequestInit) => {
+            requests.push(JSON.parse(String(init.body)));
+            return new Response(
+                JSON.stringify({
+                    choices: [{ message: { role: "assistant", content: replies.shift() }, finish_reason: "stop" }],
+                    usage: { prompt_tokens: 10, completion_tokens: 2 },
+                }),
+                { status: 200 },
+            );
+        }) as typeof fetch,
+        session,
+    );
+    for (const prompt of ["a", "b", "c", "d"]) await agent.runAgentLoop(prompt);
+
+    assert.match(await agent.compact(), /^Compacted 2 messages \(kept last 6\)\.$/);
+    let state = await session.load();
+    assert.equal(state.activeContext.length, 7);
+    assert.match(String(state.activeContext[0].content), /summary-one/);
+    const compactFacts = await facts(session);
+    const compactionId = compactFacts.find((item) => item.record?.type === "compactionStarted").record.operationId;
+    const types = compactFacts
+        .filter((fact) => fact.record?.operationId === compactionId || fact.entry?.operationId === compactionId)
+        .map((fact) => fact.record?.type ?? fact.entry?.type);
+    assert.deepEqual(types, ["compactionStarted", "stepAttempt", "compaction", "operationFinished"]);
+    const usageIndex = compactFacts.findIndex((fact) => fact.kind === "usage" && fact.operationId === compactionId);
+    const entryIndex = compactFacts.findIndex((fact) => fact.entry?.type === "compaction");
+    assert.ok(usageIndex < entryIndex);
+
+    assert.match(await agent.compact(), /^Compacted 2 messages \(kept last 6\)\.$/);
+    state = await session.load();
+    assert.equal(state.activeContext.length, 7);
+    assert.match(requests.at(-1)!.messages[1].content, /summary-one/);
+    assert.match(String(state.activeContext[0].content), /summary-two/);
     await session.close();
+});
+
+test("persists compaction abort before signalling and closes the operation", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-07T01:00:00Z"));
+    let requests = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => (release = resolve));
+    const agent = new Agent(
+        [],
+        (async (_url: unknown, init: RequestInit) => {
+            requests++;
+            if (requests <= 4)
+                return new Response(
+                    JSON.stringify({
+                        choices: [
+                            { message: { role: "assistant", content: `answer-${requests}` }, finish_reason: "stop" },
+                        ],
+                        usage: { prompt_tokens: 1, completion_tokens: 1 },
+                    }),
+                    { status: 200 },
+                );
+            if (!(init.signal as AbortSignal).aborted) await blocked;
+            throw new DOMException("aborted", "AbortError");
+        }) as typeof fetch,
+        session,
+    );
+    for (const prompt of ["a", "b", "c", "d"]) await agent.runAgentLoop(prompt);
+    const compacting = agent.compact();
+    while (!agent.busy) await new Promise((resolve) => setTimeout(resolve, 0));
+    const aborting = agent.abort();
+    await aborting;
+    const beforeSignal = await facts(session);
+    assert.equal(beforeSignal.at(-1).record.type, "abortRequested");
+    release();
+    assert.equal(await compacting, "Compaction aborted.");
+    assert.deepEqual((await session.load()).operation, { kind: "idle" });
+    await session.close();
+});
+
+test("durable compaction abort wins while its append races model settlement", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-07T01:30:00Z"));
+    try {
+        let resolveProvider!: () => void;
+        const providerReady = new Promise<void>((resolve) => (resolveProvider = resolve));
+        const agent = await appendCompactionHistory(session);
+        agent.fetcher = (async () => {
+            await providerReady;
+            return new Response(
+                JSON.stringify({
+                    choices: [{ finish_reason: "stop", message: { role: "assistant", content: "summary" } }],
+                    usage: { prompt_tokens: 9, completion_tokens: 2 },
+                }),
+                { status: 200 },
+            );
+        }) as typeof fetch;
+        let releaseAbortAppend!: () => void;
+        let abortAppendStarted!: () => void;
+        const abortAppendPending = new Promise<void>((resolve) => (abortAppendStarted = resolve));
+        const abortAppendReleased = new Promise<void>((resolve) => (releaseAbortAppend = resolve));
+        const originalAppend = session.append.bind(session);
+        session.append = (async (input: Parameters<typeof session.append>[0]) => {
+            if (factType(input) === "abortRequested") {
+                abortAppendStarted();
+                await abortAppendReleased;
+            }
+            return originalAppend(input);
+        }) as typeof session.append;
+
+        const compacting = agent.compact();
+        while (!agent.busy) await new Promise((resolve) => setTimeout(resolve, 0));
+        const aborting = agent.abort();
+        await abortAppendPending;
+        resolveProvider();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        releaseAbortAppend();
+        await aborting;
+
+        assert.equal(await compacting, "Compaction aborted.");
+        const compactFacts = await facts(session);
+        assert.equal(
+            compactFacts.some((fact) => fact.entry?.type === "compaction"),
+            false,
+        );
+        const compactionId = compactFacts.findLast((fact) => fact.record?.type === "compactionStarted").record
+            .operationId;
+        assert.deepEqual(
+            compactFacts.find((fact) => fact.kind === "usage" && fact.operationId === compactionId).usage,
+            { input: 9, output: 2, cacheRead: 0, cacheWrite: 0 },
+        );
+        assert.equal(compactFacts.filter((fact) => fact.record?.type === "abortRequested").length, 1);
+        assert.equal(compactFacts.at(-1).record.outcome, "aborted");
+        assert.deepEqual((await session.load()).usage, {
+            input: 9,
+            output: 2,
+            cacheRead: 0,
+            cacheWrite: 0,
+        });
+        const restored = new Agent([], fetch, session);
+        await restored.resumeSession();
+        assert.deepEqual(restored.usage, {
+            input: 9,
+            output: 2,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cacheHitRate: 0,
+        });
+        assert.deepEqual((await session.load()).operation, { kind: "idle" });
+    } finally {
+        await session.close();
+    }
+});
+
+test("persists malformed model usage when a compaction abort races response validation", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-07T01:45:00Z"));
+    try {
+        let resolveProvider!: () => void;
+        const providerReady = new Promise<void>((resolve) => (resolveProvider = resolve));
+        const agent = await appendCompactionHistory(session);
+        agent.fetcher = (async () => {
+            await providerReady;
+            return new Response(
+                JSON.stringify({
+                    choices: [{ finish_reason: "stop" }],
+                    usage: { prompt_tokens: 17, completion_tokens: 5 },
+                }),
+                { status: 200 },
+            );
+        }) as typeof fetch;
+        let releaseAbortAppend!: () => void;
+        let abortAppendStarted!: () => void;
+        const abortAppendPending = new Promise<void>((resolve) => (abortAppendStarted = resolve));
+        const abortAppendReleased = new Promise<void>((resolve) => (releaseAbortAppend = resolve));
+        const originalAppend = session.append.bind(session);
+        session.append = (async (input: Parameters<typeof session.append>[0]) => {
+            if (factType(input) === "abortRequested") {
+                abortAppendStarted();
+                await abortAppendReleased;
+            }
+            return originalAppend(input);
+        }) as typeof session.append;
+
+        const compacting = agent.compact();
+        while (!agent.busy) await new Promise((resolve) => setTimeout(resolve, 0));
+        const aborting = agent.abort();
+        await abortAppendPending;
+        resolveProvider();
+        while (agent.usage.input !== 17) await new Promise((resolve) => setTimeout(resolve, 0));
+        releaseAbortAppend();
+        await aborting;
+
+        assert.equal(await compacting, "Compaction aborted.");
+        const compactFacts = await facts(session);
+        const compactionId = compactFacts.findLast((fact) => fact.record?.type === "compactionStarted").record
+            .operationId;
+        const usageFacts = compactFacts.filter((fact) => fact.kind === "usage" && fact.operationId === compactionId);
+        assert.equal(usageFacts.length, 1);
+        assert.deepEqual(usageFacts[0].usage, { input: 17, output: 5, cacheRead: 0, cacheWrite: 0 });
+        assert.equal(
+            compactFacts.some((fact) => fact.entry?.type === "compaction"),
+            false,
+        );
+        assert.equal(compactFacts.at(-1).record.outcome, "aborted");
+        assert.deepEqual((await session.load()).operation, { kind: "idle" });
+
+        const lines = (await readFile(session.path, "utf8")).trimEnd().split("\n").slice(1);
+        const failedTransaction = lines
+            .map((line) => JSON.parse(line))
+            .find(
+                (transaction) =>
+                    Array.isArray(transaction) && transaction.some((fact) => fact.record?.type === "stepFailed"),
+            );
+        assert.deepEqual(failedTransaction.map(factType), ["usage", "stepFailed"]);
+
+        const restored = new Agent([], fetch, session);
+        await restored.resumeSession();
+        assert.deepEqual(restored.usage, {
+            input: 17,
+            output: 5,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cacheHitRate: 0,
+        });
+    } finally {
+        await session.close();
+    }
+});
+
+test("compaction reports when the active context is already bounded", async () => {
+    const session = await openStore(new Date("2026-08-07T02:00:00Z"));
+    assert.equal(await new Agent([], fetch, session).compact(), "Nothing to compact.");
+    await session.close();
+});
+
+test("recovers compactionStarted without an attempt as attempt 1", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-07T02:30:00Z"));
+    try {
+        const agent = await appendCompactionHistory(session);
+        await leaveCompactionPrefix(agent, session, "stepAttempt");
+        let requests = 0;
+        const restored = new Agent(
+            [],
+            (async () => {
+                requests++;
+                return new Response(
+                    JSON.stringify({
+                        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "summary" } }],
+                        usage: {},
+                    }),
+                    { status: 200 },
+                );
+            }) as typeof fetch,
+            session,
+        );
+
+        await restored.resumeSession();
+        const after = await readFile(session.path);
+        await restored.resumeSession();
+
+        assert.equal(requests, 1);
+        assert.deepEqual(await readFile(session.path), after);
+        const attempts = (await facts(session)).filter((fact) => fact.record?.stepKind === "compaction");
+        assert.deepEqual(
+            attempts.map((fact) => fact.record.attempt),
+            [1],
+        );
+        assert.deepEqual((await session.load()).operation, { kind: "idle" });
+    } finally {
+        await session.close();
+    }
+});
+
+test("recovers an open compaction attempt 1 once as attempt 2", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-07T03:00:00Z"));
+    try {
+        const agent = await appendCompactionHistory(session);
+        await leaveCompactionPrefix(agent, session, "usage");
+        let requests = 0;
+        const restored = new Agent(
+            [],
+            (async () => {
+                requests++;
+                return new Response(
+                    JSON.stringify({
+                        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "summary" } }],
+                        usage: {},
+                    }),
+                    { status: 200 },
+                );
+            }) as typeof fetch,
+            session,
+        );
+
+        await restored.resumeSession();
+        const after = await readFile(session.path);
+        await restored.resumeSession();
+
+        assert.equal(requests, 1);
+        assert.deepEqual(await readFile(session.path), after);
+        const attempts = (await facts(session)).filter((fact) => fact.record?.stepKind === "compaction");
+        assert.deepEqual(
+            attempts.map((fact) => fact.record.attempt),
+            [1, 2],
+        );
+    } finally {
+        await session.close();
+    }
+});
+
+test("blocks mismatched and exhausted compaction recovery without bytes or provider effects", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const mismatched = await openStore(new Date("2026-08-07T03:30:00Z"));
+    try {
+        const agent = await appendCompactionHistory(mismatched);
+        await leaveCompactionPrefix(agent, mismatched, "usage");
+        const before = await readFile(mismatched.path);
+        let requests = 0;
+        const changed = new Agent(
+            [],
+            (async () => {
+                requests++;
+                throw Error("provider must not be called");
+            }) as typeof fetch,
+            mismatched,
+            () => {},
+            "changed instructions",
+        );
+        await assert.rejects(() => changed.resumeSession(), /configuration_changed/);
+        assert.equal(requests, 0);
+        assert.deepEqual(await readFile(mismatched.path), before);
+    } finally {
+        await mismatched.close();
+    }
+
+    const exhausted = await openStore(new Date("2026-08-07T04:00:00Z"));
+    try {
+        const agent = await appendCompactionHistory(exhausted);
+        await leaveCompactionPrefix(agent, exhausted, "usage");
+        const state = await exhausted.load();
+        assert.equal(state.operation.kind, "compaction");
+        if (state.operation.kind !== "compaction" || !state.operation.step) throw Error("missing compaction attempt");
+        await exhausted.append({
+            kind: "record",
+            record: {
+                type: "stepAttempt",
+                operationId: state.operation.operationId,
+                stepId: state.operation.step.stepId,
+                attemptId: exhausted.allocateId(),
+                stepKind: "compaction",
+                attempt: 2,
+                contextThroughEntryId: state.operation.step.contextThroughEntryId,
+                configurationSnapshot: state.operation.step.configurationSnapshot,
+                configurationDigest: state.operation.step.configurationDigest,
+            },
+        });
+        const before = await readFile(exhausted.path);
+        let requests = 0;
+        const restored = new Agent(
+            [],
+            (async () => {
+                requests++;
+                throw Error("provider must not be called");
+            }) as typeof fetch,
+            exhausted,
+        );
+        await assert.rejects(() => restored.resumeSession(), /attempts_exhausted/);
+        assert.equal(requests, 0);
+        assert.deepEqual(await readFile(exhausted.path), before);
+    } finally {
+        await exhausted.close();
+    }
+});
+
+test("finishes a persisted compaction entry without repeating provider effects", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-07T04:30:00Z"));
+    try {
+        let requests = 0;
+        const agent = await appendCompactionHistory(session, (async () => {
+            requests++;
+            return new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: {
+                                role: "assistant",
+                                content: requests <= 4 ? `answer-${requests}` : "summary",
+                            },
+                        },
+                    ],
+                    usage: {},
+                }),
+                { status: 200 },
+            );
+        }) as typeof fetch);
+        await leaveCompactionPrefix(agent, session, "operationFinished");
+        assert.equal(requests, 5);
+        const prefixFacts = await facts(session);
+        assert.equal(prefixFacts.at(-1).entry.type, "compaction");
+
+        await agent.resumeSession();
+        const after = await readFile(session.path);
+        await agent.resumeSession();
+
+        assert.equal(requests, 5);
+        assert.deepEqual(await readFile(session.path), after);
+        const recoveredFacts = await facts(session);
+        assert.equal(recoveredFacts.length, prefixFacts.length + 1);
+        assert.equal(recoveredFacts.at(-1).record.type, "operationFinished");
+        assert.deepEqual((await session.load()).operation, { kind: "idle" });
+    } finally {
+        await session.close();
+    }
+});
+
+test("persists compaction usage before failing an invalid summary", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-07T05:00:00Z"));
+    try {
+        const agent = await appendCompactionHistory(session);
+        agent.fetcher = (async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [{ finish_reason: "length", message: { role: "assistant", content: "partial" } }],
+                    usage: { prompt_tokens: 7, completion_tokens: 3 },
+                }),
+                { status: 200 },
+            )) as typeof fetch;
+
+        await assert.rejects(() => agent.compact(), /invalid compaction summary/);
+
+        const compactFacts = (await facts(session)).slice(-5);
+        assert.deepEqual(compactFacts.map(factType), [
+            "compactionStarted",
+            "stepAttempt",
+            "usage",
+            "stepFailed",
+            "operationFinished",
+        ]);
+        assert.deepEqual(compactFacts[2].usage, { input: 7, output: 3, cacheRead: 0, cacheWrite: 0 });
+    } finally {
+        await session.close();
+    }
+});
+
+test("persists compaction usage when the provider omits the assistant message", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-07T05:30:00Z"));
+    try {
+        const agent = await appendCompactionHistory(session);
+        agent.fetcher = (async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [{ finish_reason: "stop" }],
+                    usage: { prompt_tokens: 11, completion_tokens: 4 },
+                }),
+                { status: 200 },
+            )) as typeof fetch;
+
+        await assert.rejects(() => agent.compact(), /no assistant message/);
+
+        const compactFacts = (await facts(session)).slice(-5);
+        assert.deepEqual(compactFacts.map(factType), [
+            "compactionStarted",
+            "stepAttempt",
+            "usage",
+            "stepFailed",
+            "operationFinished",
+        ]);
+        assert.deepEqual(compactFacts[2].usage, { input: 11, output: 4, cacheRead: 0, cacheWrite: 0 });
+    } finally {
+        await session.close();
+    }
+});
+
+test("persists compaction usage when the provider returns an invalid finish reason", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-07T06:00:00Z"));
+    try {
+        const agent = await appendCompactionHistory(session);
+        agent.fetcher = (async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [{ finish_reason: "content_filter", message: { role: "assistant", content: "blocked" } }],
+                    usage: { prompt_tokens: 13, completion_tokens: 1 },
+                }),
+                { status: 200 },
+            )) as typeof fetch;
+
+        await assert.rejects(() => agent.compact(), /Provider finish_reason: content_filter/);
+
+        const compactFacts = (await facts(session)).slice(-5);
+        assert.deepEqual(compactFacts.map(factType), [
+            "compactionStarted",
+            "stepAttempt",
+            "usage",
+            "stepFailed",
+            "operationFinished",
+        ]);
+        assert.deepEqual(compactFacts[2].usage, { input: 13, output: 1, cacheRead: 0, cacheWrite: 0 });
+    } finally {
+        await session.close();
+    }
 });
 
 test("formats pi-style token usage and cache ratio", () => {
@@ -1149,7 +1801,7 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         persisted.some((fact) => fact.kind === "entry" && fact.entry?.message?.role === "tool"),
         true,
     );
-    await assert.rejects(() => agent.compact(), /Phase 2b durable integration/);
+    assert.equal(await agent.compact(), "Nothing to compact.");
     assert.equal(requests[0].model, MODEL);
     const definitions = Object.fromEntries(requests[0].tools.map((tool: any) => [tool.function.name, tool.function]));
     assert.match(definitions.bash.description, /last 2,000 lines or 50KB/);
@@ -1165,4 +1817,5 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
     assert.equal(definitions.edit.parameters.properties.edits.items.properties.oldText.minLength, 1);
     assert.deepEqual(definitions.edit.parameters.required, ["path", "edits"]);
     assert.equal(requests.length, 2);
+    await session.close();
 });

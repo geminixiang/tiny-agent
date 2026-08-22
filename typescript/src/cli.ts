@@ -154,15 +154,20 @@ async function main() {
     emitKeypressEvents(process.stdin, rl);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     let exiting = false;
+    const requestAbort = () => {
+        void agent.abort().catch((error: unknown) => {
+            console.error(`Failed to persist abort: ${error instanceof Error ? error.message : String(error)}`);
+        });
+    };
     const onInterrupt = () => {
         exiting = true;
-        if (agent.busy) agent.abort();
+        if (agent.busy) requestAbort();
         else rl.write("/exit\n");
     };
     const onKeypress = (_: string, key: { name?: string }) => {
         if (key.name !== "escape" || !agent.busy) return;
         console.log("\n\x1b[33mAborting...\x1b[0m");
-        agent.abort();
+        requestAbort();
     };
     rl.on("SIGINT", onInterrupt);
     process.stdin.on("keypress", onKeypress);

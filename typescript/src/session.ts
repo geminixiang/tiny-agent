@@ -133,6 +133,15 @@ export class SessionStore {
         });
     }
 
+    async facts() {
+        await this.queue;
+        const lines = new TextDecoder("utf8", { fatal: true }).decode(this.bytes).trimEnd().split("\n").slice(1);
+        return lines.flatMap((line) => {
+            const transaction = JSON.parse(line) as SessionFact | SessionFact[];
+            return Array.isArray(transaction) ? transaction : [transaction];
+        });
+    }
+
     async load() {
         await this.queue;
         return this.state;

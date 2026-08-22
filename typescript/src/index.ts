@@ -45,6 +45,15 @@ export type Usage = {
     cacheHitRate?: number;
 };
 
+class ModelResponseError extends Error {
+    constructor(
+        message: string,
+        readonly usage: Usage,
+    ) {
+        super(message);
+    }
+}
+
 export type RunResult = {
     status: "succeeded" | "failed" | "cancelled";
     answer?: string;
@@ -194,15 +203,20 @@ function parseToolArgs(value: string): ToolArgs {
     return args as ToolArgs;
 }
 
+type ActiveOperation = {
+    controller: AbortController;
+    phase: "model" | "tool" | "compact";
+    operationId: string;
+    toolCallId?: string;
+    abortPersisted: boolean;
+    aborting?: Promise<void>;
+};
+
 export class Agent {
     messages: Message[];
     usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     public readonly systemPrompt: string;
-    private active?: {
-        controller: AbortController;
-        phase: "model" | "tool" | "compact";
-        toolCallId?: string;
-    };
+    private active?: ActiveOperation;
     constructor(
         public skills: Skill[] = [],
         public fetcher: typeof fetch = fetch,
@@ -240,16 +254,34 @@ ${list}
     get busy() {
         return !!this.active;
     }
-    abort() {
-        this.active?.controller.abort();
+    async abort() {
+        const active = this.active;
+        if (!active || active.abortPersisted) return;
+        if (active.aborting) return active.aborting;
+        active.aborting = (async () => {
+            await this.recordAbort(active.operationId, active.phase, active.toolCallId);
+            active.abortPersisted = true;
+            active.controller.abort();
+        })();
+        try {
+            await active.aborting;
+        } finally {
+            active.aborting = undefined;
+        }
     }
-    private beginOperation(phase: "model" | "tool" | "compact", toolCallId?: string) {
+    private beginOperation(phase: "model" | "tool" | "compact", operationId: string, toolCallId?: string) {
         const controller = new AbortController();
-        this.active = { controller, phase, toolCallId };
+        this.active = { controller, phase, operationId, toolCallId, abortPersisted: false };
         return controller.signal;
     }
-    private endOperation() {
-        this.active = undefined;
+    private endOperation(active: ActiveOperation) {
+        if (this.active === active) this.active = undefined;
+    }
+    private async settleOperation(active: ActiveOperation) {
+        if (active.aborting) await active.aborting;
+        const aborted = active.abortPersisted || active.controller.signal.aborted;
+        this.endOperation(active);
+        return aborted;
     }
     private async recordAbort(operationId: string, phase: "model" | "tool" | "compact", toolCallId?: string) {
         await this.session?.append({
@@ -272,10 +304,27 @@ ${list}
         stepId: string,
         attemptId: string,
     ) {
-        const signal = this.beginOperation(phase),
+        const signal = this.beginOperation(phase, operationId),
+            active = this.active!,
             started = performance.now();
         try {
             const response = await this.callModel(messages, tools, signal);
+            if (await this.settleOperation(active)) {
+                await this.session?.append([
+                    { kind: "usage", operationId, attemptId, usage: response.usage },
+                    {
+                        kind: "record",
+                        record: {
+                            type: "stepFailed",
+                            operationId,
+                            stepId,
+                            attemptId,
+                            error: { code: "aborted", message: "Operation aborted" },
+                        },
+                    },
+                ]);
+                return;
+            }
             this.onEvent({
                 type: "model.completed",
                 timestamp: new Date().toISOString(),
@@ -287,20 +336,24 @@ ${list}
             });
             return response;
         } catch (error) {
-            if (!signal.aborted) throw error;
-            await this.recordAbort(operationId, phase);
-            await this.session?.append({
-                kind: "record",
-                record: {
-                    type: "stepFailed",
-                    operationId,
-                    stepId,
-                    attemptId,
-                    error: { code: "aborted", message: "Operation aborted" },
+            if (!(await this.settleOperation(active))) throw error;
+            await this.session?.append([
+                ...(error instanceof ModelResponseError
+                    ? [{ kind: "usage" as const, operationId, attemptId, usage: error.usage }]
+                    : []),
+                {
+                    kind: "record",
+                    record: {
+                        type: "stepFailed",
+                        operationId,
+                        stepId,
+                        attemptId,
+                        error: { code: "aborted", message: "Operation aborted" },
+                    },
                 },
-            });
+            ]);
         } finally {
-            this.endOperation();
+            this.endOperation(active);
         }
     }
     async resumeSession() {
@@ -314,7 +367,6 @@ ${list}
                 return;
             }
             const operation = state.operation;
-            if (operation.kind === "compaction") throw Error("Compaction requires Phase 2b durable integration");
 
             const configuration = buildConfiguration(this.systemPrompt, this.tools);
             const current = {
@@ -332,13 +384,14 @@ ${list}
             const plan = planRecovery(state, current);
             const operationId = operation.operationId;
             if (plan.type === "blocked") {
-                if (plan.reason !== "attempts_exhausted") throw Error(`Session recovery blocked: ${plan.reason}`);
+                if (plan.reason !== "attempts_exhausted" || operation.kind === "compaction")
+                    throw Error(`Session recovery blocked: ${plan.reason}`);
                 await this.session.append({
                     kind: "record",
                     record: {
                         type: "operationFinished",
                         operationId,
-                        operationKind: "run",
+                        operationKind: operation.kind,
                         outcome: "failed",
                         error: { code: "model_error", message: "provider request attempts exhausted" },
                     },
@@ -351,7 +404,7 @@ ${list}
                     record: {
                         type: "operationFinished",
                         operationId,
-                        operationKind: "run",
+                        operationKind: operation.kind,
                         outcome: plan.outcome,
                         ...(plan.completion ? { completion: plan.completion } : {}),
                         ...(plan.finalEntryId ? { finalEntryId: plan.finalEntryId } : {}),
@@ -382,6 +435,15 @@ ${list}
             }
             if (plan.type === "startTool") {
                 await this.executeRecoveryTool(state, plan);
+                continue;
+            }
+
+            if (operation.kind === "compaction") {
+                try {
+                    await this.continueCompaction(operationId, plan, configuration);
+                } catch (error) {
+                    recoveryError = error instanceof Error ? error : Error(String(error));
+                }
                 continue;
             }
 
@@ -497,14 +559,20 @@ ${list}
         }
         const toolCallId = this.recoveryToolCallId(state, plan.assistantEntryId, plan.toolIndex);
         let content: string;
-        let result: { type: "success" } | { type: "error" } = { type: "success" };
+        let result: { type: "success" } | { type: "error" } | { type: "synthetic"; reason: "interrupted" } = {
+            type: "success",
+        };
+        const signal = this.beginOperation("tool", state.operation.operationId, toolCallId);
+        const active = this.active!;
         try {
-            content = await tool.execute(plan.arguments, this.beginOperation("tool", toolCallId));
+            content = await tool.execute(plan.arguments, signal);
         } catch (error) {
             content = `Error: ${error instanceof Error ? error.message : String(error)}`;
             result = { type: "error" };
-        } finally {
-            this.endOperation();
+        }
+        if (await this.settleOperation(active)) {
+            content = SYNTHETIC_CONTENT.interrupted;
+            result = { type: "synthetic", reason: "interrupted" };
         }
         await this.session.append({
             kind: "entry",
@@ -560,11 +628,18 @@ ${list}
         const totalPrompt = this.usage.input + this.usage.cacheRead + this.usage.cacheWrite;
         if (totalPrompt > 0) this.usage.cacheHitRate = (this.usage.cacheRead / totalPrompt) * 100;
         const choice = data.choices?.[0];
-        if (!choice?.message) throw Error("OpenRouter returned no assistant message");
+        const usage = { input, output: u.completion_tokens ?? 0, cacheRead, cacheWrite };
+        if (!choice?.message) throw new ModelResponseError("OpenRouter returned no assistant message", usage);
+        let reason: StopReason;
+        try {
+            reason = stopReason(choice.finish_reason, choice.message);
+        } catch (error) {
+            throw new ModelResponseError(error instanceof Error ? error.message : String(error), usage);
+        }
         return {
             message: choice.message as Message,
-            stopReason: stopReason(choice.finish_reason, choice.message),
-            usage: { input, output: u.completion_tokens ?? 0, cacheRead, cacheWrite },
+            stopReason: reason,
+            usage,
             cacheHitRate,
         };
     }
@@ -735,16 +810,19 @@ ${list}
                     tool: tool.name,
                 });
                 this.onTool({ phase: "start", name: tool.name, args });
+                const signal = this.beginOperation("tool", operationId, call.id);
+                const active = this.active!;
                 try {
-                    content = await tool.execute(args, this.beginOperation("tool", call.id));
+                    content = await tool.execute(args, signal);
                     ok = true;
                 } catch (error) {
-                    aborted = !!this.active?.controller.signal.aborted;
-                    content = aborted
-                        ? "Operation interrupted after execution status became unknown; the tool was not replayed."
-                        : `Error: ${error instanceof Error ? error.message : error}`;
+                    content = `Error: ${error instanceof Error ? error.message : error}`;
                 }
-                this.endOperation();
+                aborted = await this.settleOperation(active);
+                if (aborted) {
+                    content = SYNTHETIC_CONTENT.interrupted;
+                    ok = false;
+                }
                 this.onTool({ phase: "end", name: tool.name, args, result: content });
                 this.onEvent({
                     type: "tool.completed",
@@ -754,7 +832,6 @@ ${list}
                     durationMs: performance.now() - started,
                     ok,
                 });
-                if (aborted) await this.recordAbort(operationId, "tool", call.id);
                 const result: Message = { role: "tool", tool_call_id: call.id, content };
                 await this.session.append({
                     kind: "entry",
@@ -786,6 +863,178 @@ ${list}
         }
     }
     async compact() {
-        throw Error("Compaction requires Phase 2b durable integration");
+        if (!this.session) throw Error("Session is required");
+        const state = await this.session.load();
+        if (state.operation.kind !== "idle") throw Error("Another session operation is active");
+        const messages = state.activeContext;
+        let cut = Math.max(messages.length - 6, 0);
+        while (cut > 0 && messages[cut]?.role !== "user") cut--;
+        if (!cut) return "Nothing to compact.";
+
+        const source = await this.messageFacts();
+        const retainedCount = messages.length - cut;
+        const retained = retainedCount ? source.slice(-retainedCount) : [];
+        const compacted = retainedCount ? source.slice(0, -retainedCount) : source;
+        if (!compacted.length || !source.length) return "Nothing to compact.";
+
+        const operationId = this.session.allocateId();
+        const resultEntryId = this.session.allocateId();
+        const inputThroughEntryId = source.at(-1)!.id;
+        await this.session.append({
+            kind: "record",
+            record: {
+                type: "compactionStarted",
+                operationId,
+                operationKind: "compaction",
+                inputThroughEntryId,
+                resultEntryId,
+                compactedEntryIds: compacted.map((item) => item.id),
+                retainedEntryIds: retained.map((item) => item.id),
+                sourceDigest: digest(source.map((item) => ({ sourceEntryId: item.id, message: item.message }))),
+            },
+        });
+        const result = await this.continueCompaction(
+            operationId,
+            { type: "startStep", stepKind: "compaction", attempt: 1, contextThroughEntryId: inputThroughEntryId },
+            buildConfiguration(this.systemPrompt, this.tools),
+        );
+        this.restoreState(await this.session.load());
+        return result;
+    }
+
+    private async continueCompaction(
+        operationId: string,
+        plan: Extract<ReturnType<typeof planRecovery>, { type: "startStep" }>,
+        configuration: ReturnType<typeof buildConfiguration>,
+    ) {
+        if (!this.session) throw Error("Session is required");
+        const state = await this.session.load();
+        if (state.operation.kind !== "compaction") throw Error("Compaction operation is not active");
+        const record = await this.compactionRecord(operationId);
+        const stepId = plan.stepId ?? this.session.allocateId();
+        const attemptId = this.session.allocateId();
+        await this.session.append({
+            kind: "record",
+            record: {
+                type: "stepAttempt",
+                operationId,
+                stepId,
+                attemptId,
+                stepKind: "compaction",
+                attempt: plan.attempt,
+                contextThroughEntryId: plan.contextThroughEntryId,
+                ...configuration,
+            },
+        });
+        try {
+            const retainedCount = record.retainedEntryIds.length;
+            const compactable = retainedCount ? state.activeContext.slice(0, -retainedCount) : state.activeContext;
+            const response = await this.runModelRequest(
+                [
+                    {
+                        role: "system",
+                        content:
+                            "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps.",
+                    },
+                    { role: "user", content: JSON.stringify(compactable) },
+                ],
+                undefined,
+                "compact",
+                operationId,
+                stepId,
+                attemptId,
+            );
+            if (!response) {
+                await this.session.append({
+                    kind: "record",
+                    record: { type: "operationFinished", operationId, operationKind: "compaction", outcome: "aborted" },
+                });
+                return "Compaction aborted.";
+            }
+            await this.session.append({ kind: "usage", operationId, attemptId, usage: response.usage });
+            const summary = response.message.content;
+            if (response.stopReason !== "stop" || !summary?.trim())
+                throw Error("Model returned an invalid compaction summary");
+            const source = await this.messageFacts(state.operation.inputThroughEntryId);
+            const retainedIds = new Set(record.retainedEntryIds);
+            const retainedTail = source
+                .filter((item) => retainedIds.has(item.id))
+                .map((item) => ({ sourceEntryId: item.id, message: item.message }));
+            await this.session.append({
+                kind: "entry",
+                id: state.operation.resultEntryId,
+                entry: {
+                    type: "compaction",
+                    operationId,
+                    summary,
+                    compactedThroughEntryId: record.compactedEntryIds.at(-1),
+                    retainedTail,
+                },
+            });
+            await this.session.append({
+                kind: "record",
+                record: {
+                    type: "operationFinished",
+                    operationId,
+                    operationKind: "compaction",
+                    outcome: "completed",
+                    finalEntryId: state.operation.resultEntryId,
+                },
+            });
+            return `Compacted ${source.length - retainedTail.length} messages (kept last ${retainedTail.length}).`;
+        } catch (error) {
+            if (error instanceof ModelResponseError) {
+                await this.session.append({ kind: "usage", operationId, attemptId, usage: error.usage });
+            }
+            const current = await this.session.load();
+            if (current.operation.kind === "compaction" && current.operation.step?.status === "attempting") {
+                const message = error instanceof Error ? error.message : String(error);
+                await this.session.append([
+                    {
+                        kind: "record",
+                        record: {
+                            type: "stepFailed",
+                            operationId,
+                            stepId,
+                            attemptId,
+                            error: { code: "model_error", message },
+                        },
+                    },
+                    {
+                        kind: "record",
+                        record: {
+                            type: "operationFinished",
+                            operationId,
+                            operationKind: "compaction",
+                            outcome: "failed",
+                            error: { code: "model_error", message },
+                        },
+                    },
+                ]);
+            }
+            throw error;
+        }
+    }
+
+    private async messageFacts(throughId?: string) {
+        if (!this.session) return [];
+        const result: { id: string; message: Message }[] = [];
+        for (const fact of await this.session.facts()) {
+            const entry = fact.entry as Record<string, unknown> | undefined;
+            if (fact.kind === "entry" && entry?.type === "message")
+                result.push({ id: String(fact.id), message: entry.message as Message });
+            if (throughId && fact.id === throughId) break;
+        }
+        return result;
+    }
+
+    private async compactionRecord(operationId: string) {
+        if (!this.session) throw Error("Session is required");
+        for (const fact of (await this.session.facts()).toReversed()) {
+            const record = fact.record as Record<string, unknown> | undefined;
+            if (record?.type === "compactionStarted" && record.operationId === operationId)
+                return record as { compactedEntryIds: string[]; retainedEntryIds: string[] };
+        }
+        throw Error(`Missing compaction record: ${operationId}`);
     }
 }
