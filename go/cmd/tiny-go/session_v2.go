@@ -7,17 +7,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
 type sessionV2Message map[string]any
 type sessionV2Usage struct {
-	Input      int `json:"input"`
-	Output     int `json:"output"`
-	CacheRead  int `json:"cacheRead"`
-	CacheWrite int `json:"cacheWrite"`
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cacheRead"`
+	CacheWrite int64 `json:"cacheWrite"`
 }
 type sessionV2ToolDeclaration struct {
 	Name         string `json:"name"`
@@ -38,6 +40,7 @@ type sessionV2Step struct {
 	Attempt               int                    `json:"attempt"`
 	StepKind              string                 `json:"stepKind"`
 	Status                string                 `json:"status"`
+	ContextThroughEntryID string                 `json:"contextThroughEntryId"`
 	ConfigurationSnapshot sessionV2Configuration `json:"configurationSnapshot"`
 	ConfigurationDigest   string                 `json:"configurationDigest"`
 }
@@ -121,6 +124,7 @@ type v2Attempt struct {
 	OperationID, StepID, AttemptID string
 	Attempt                        int
 	Kind                           string
+	ContextThroughEntryID          string
 	Closed, Failed                 bool
 	SettledEntryID                 string
 	Configuration                  sessionV2Configuration
@@ -137,16 +141,17 @@ type v2ToolInfo struct {
 }
 type v2Internal struct {
 	sessionV2State
-	NextSeq    int
-	IDs        map[string]bool
-	Reserved   map[string]string
-	Entries    map[string]v2EntryInfo
-	Records    map[string]map[string]any
-	Operations map[string]*v2OperationInfo
-	Attempts   map[string]*v2Attempt
-	Steps      map[string][]*v2Attempt
-	Tools      map[string]*v2ToolInfo
-	ToolPairs  map[string]bool
+	NextSeq                     int
+	ActiveContextThroughEntryID string
+	IDs                         map[string]bool
+	Reserved                    map[string]string
+	Entries                     map[string]v2EntryInfo
+	Records                     map[string]map[string]any
+	Operations                  map[string]*v2OperationInfo
+	Attempts                    map[string]*v2Attempt
+	Steps                       map[string][]*v2Attempt
+	Tools                       map[string]*v2ToolInfo
+	ToolPairs                   map[string]bool
 }
 
 func v2Object(v any, code string, line int, seq ...int) (map[string]any, error) {
@@ -169,13 +174,17 @@ func v2Exact(m map[string]any, keys ...string) bool {
 	return true
 }
 func v2String(v any) (string, bool) { s, ok := v.(string); return s, ok && s != "" }
-func v2Int(v any, min int) (int, bool) {
+func v2Int64(v any, min int64) (int64, bool) {
 	n, ok := v.(json.Number)
 	if !ok {
 		return 0, false
 	}
 	x, err := n.Int64()
-	return int(x), err == nil && x >= int64(min) && x <= int64(math.MaxInt)
+	return x, err == nil && x >= min && x <= 9007199254740991
+}
+func v2Int(v any, min int) (int, bool) {
+	x, ok := v2Int64(v, int64(min))
+	return int(x), ok && x <= int64(math.MaxInt)
 }
 func v2ID(v any) (string, bool) {
 	s, ok := v2String(v)
@@ -210,7 +219,162 @@ func v2Fail(code string, line int, seq int) error {
 	return corrupt(code, line)
 }
 
+var v2JSONToken = regexp.MustCompile(`^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)`)
+
+func v2ScanJSON(source []byte) error {
+	index := 0
+	space := func() {
+		for index < len(source) && strings.ContainsRune(" \t\n\r", rune(source[index])) {
+			index++
+		}
+	}
+	var scanString func() (string, error)
+	scanString = func() (string, error) {
+		if index >= len(source) || source[index] != '"' {
+			return "", fmt.Errorf("string")
+		}
+		start := index
+		index++
+		for index < len(source) && source[index] != '"' {
+			if source[index] < 0x20 {
+				return "", fmt.Errorf("control")
+			}
+			if source[index] != '\\' {
+				_, size := utf8.DecodeRune(source[index:])
+				if size == 0 || size == 1 && source[index] >= 0x80 {
+					return "", fmt.Errorf("utf8")
+				}
+				index += size
+				continue
+			}
+			index++
+			if index >= len(source) {
+				return "", fmt.Errorf("escape")
+			}
+			escape := source[index]
+			index++
+			if strings.ContainsRune(`"\\/bfnrt`, rune(escape)) {
+				continue
+			}
+			if escape != 'u' || index+4 > len(source) {
+				return "", fmt.Errorf("escape")
+			}
+			first, err := strconv.ParseUint(string(source[index:index+4]), 16, 16)
+			if err != nil {
+				return "", err
+			}
+			index += 4
+			if first >= 0xdc00 && first <= 0xdfff {
+				return "", fmt.Errorf("lone surrogate")
+			}
+			if first >= 0xd800 && first <= 0xdbff {
+				if index+6 > len(source) || string(source[index:index+2]) != `\u` {
+					return "", fmt.Errorf("lone surrogate")
+				}
+				second, err := strconv.ParseUint(string(source[index+2:index+6]), 16, 16)
+				if err != nil || second < 0xdc00 || second > 0xdfff {
+					return "", fmt.Errorf("lone surrogate")
+				}
+				index += 6
+			}
+		}
+		if index >= len(source) {
+			return "", fmt.Errorf("string")
+		}
+		index++
+		var decoded string
+		if err := json.Unmarshal(source[start:index], &decoded); err != nil {
+			return "", err
+		}
+		return decoded, nil
+	}
+	var value func() error
+	value = func() error {
+		space()
+		if index >= len(source) {
+			return fmt.Errorf("value")
+		}
+		if source[index] == '{' {
+			index++
+			space()
+			keys := map[string]bool{}
+			if index < len(source) && source[index] == '}' {
+				index++
+				return nil
+			}
+			for {
+				space()
+				key, err := scanString()
+				if err != nil || keys[key] {
+					return fmt.Errorf("duplicate or invalid key")
+				}
+				keys[key] = true
+				space()
+				if index >= len(source) || source[index] != ':' {
+					return fmt.Errorf("colon")
+				}
+				index++
+				if err := value(); err != nil {
+					return err
+				}
+				space()
+				if index < len(source) && source[index] == '}' {
+					index++
+					return nil
+				}
+				if index >= len(source) || source[index] != ',' {
+					return fmt.Errorf("comma")
+				}
+				index++
+			}
+		}
+		if source[index] == '[' {
+			index++
+			space()
+			if index < len(source) && source[index] == ']' {
+				index++
+				return nil
+			}
+			for {
+				if err := value(); err != nil {
+					return err
+				}
+				space()
+				if index < len(source) && source[index] == ']' {
+					index++
+					return nil
+				}
+				if index >= len(source) || source[index] != ',' {
+					return fmt.Errorf("comma")
+				}
+				index++
+			}
+		}
+		if source[index] == '"' {
+			_, err := scanString()
+			return err
+		}
+		match := v2JSONToken.Find(source[index:])
+		if len(match) == 0 {
+			return fmt.Errorf("value")
+		}
+		index += len(match)
+		return nil
+	}
+	if err := value(); err != nil {
+		return err
+	}
+	space()
+	if index != len(source) {
+		return fmt.Errorf("trailing")
+	}
+	return nil
+}
+
 func v2Decode(source []byte) (any, error) {
+	if err := v2ScanJSON(source); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(source))
 	dec.UseNumber()
 	var value any
@@ -618,6 +782,7 @@ func v2ApplyEntry(s *v2Internal, f map[string]any, line, seq int) error {
 		}
 		s.Transcript = append(s.Transcript, msg)
 		s.ActiveContext = append(s.ActiveContext, msg)
+		s.ActiveContextThroughEntryID = factID
 		info := v2EntryInfo{Entry: entry}
 		if role == "assistant" {
 			a := s.Attempts[entry["attemptId"].(string)]
@@ -710,6 +875,7 @@ func v2ApplyEntry(s *v2Internal, f map[string]any, line, seq int) error {
 	}
 	s.ActiveContext = []sessionV2Message{{"role": "user", "content": "[Compacted history]\n" + summary}}
 	s.ActiveContext = append(s.ActiveContext, retained...)
+	s.ActiveContextThroughEntryID = s.Operation.InputThroughEntryID
 	a := s.Attempts[s.Operation.Step.AttemptID]
 	if a == nil || a.Closed || a.Kind != "compaction" {
 		return corrupt("INVALID_TRANSITION", line, seq)
@@ -830,6 +996,9 @@ func v2ApplyRecord(s *v2Internal, f map[string]any, line, seq int) error {
 		if _, ok := s.Entries[contextID]; !ok {
 			return corrupt("INVALID_REFERENCE", line, seq)
 		}
+		if attempt == 1 && contextID != s.ActiveContextThroughEntryID {
+			return corrupt("INVALID_TRANSITION", line, seq)
+		}
 		config, e := v2Configuration(r["configurationSnapshot"], line, seq)
 		if e != nil {
 			return e
@@ -856,16 +1025,16 @@ func v2ApplyRecord(s *v2Internal, f map[string]any, line, seq int) error {
 				}
 			}
 		} else {
-			if len(prior) != 1 || prior[0].Attempt != 1 || prior[0].Closed || prior[0].Failed || prior[0].Kind != kind || prior[0].OperationID != op || prior[0].Digest != digest {
+			if len(prior) != 1 || prior[0].Attempt != 1 || prior[0].Closed || prior[0].Failed || prior[0].Kind != kind || prior[0].OperationID != op || prior[0].ContextThroughEntryID != contextID || prior[0].Digest != digest {
 				return corrupt("INVALID_TRANSITION", line, seq)
 			}
 			prior[0].Closed = true
 		}
-		a := &v2Attempt{OperationID: op, StepID: step, AttemptID: aid, Attempt: attempt, Kind: kind, Configuration: config, Digest: digest}
+		a := &v2Attempt{OperationID: op, StepID: step, AttemptID: aid, Attempt: attempt, Kind: kind, ContextThroughEntryID: contextID, Configuration: config, Digest: digest}
 		s.Attempts[aid] = a
 		s.Steps[step] = append(prior, a)
 		found.LatestStepID = step
-		s.Operation.Step = &sessionV2Step{OperationID: op, StepID: step, AttemptID: aid, Attempt: attempt, StepKind: kind, Status: "attempting", ConfigurationSnapshot: config, ConfigurationDigest: digest}
+		s.Operation.Step = &sessionV2Step{OperationID: op, StepID: step, AttemptID: aid, Attempt: attempt, StepKind: kind, Status: "attempting", ContextThroughEntryID: contextID, ConfigurationSnapshot: config, ConfigurationDigest: digest}
 		s.Records[fid] = r
 		return nil
 	}
@@ -1039,6 +1208,17 @@ func v2ApplyRecord(s *v2Internal, f map[string]any, line, seq int) error {
 				return corrupt("INVALID_REFERENCE", line, seq)
 			}
 		}
+	} else if outcome == "aborted" {
+		pendingTools := false
+		if s.Operation.Kind == "run" {
+			for _, tool := range s.Operation.ToolCalls {
+				pendingTools = pendingTools || tool.Status == "pending"
+			}
+		}
+		openAttempt := s.Operation.Step != nil && s.Operation.Step.Status == "attempting"
+		if _, ok := r["finalEntryId"]; ok || !s.Operation.AbortRequested || pendingTools || openAttempt {
+			return corrupt("INVALID_TRANSITION", line, seq)
+		}
 	} else if _, ok := r["finalEntryId"]; ok {
 		return corrupt("INVALID_FACT", line, seq)
 	}
@@ -1092,10 +1272,10 @@ func v2ApplyUsage(s *v2Internal, f map[string]any, line, seq int) error {
 	if e != nil || !v2Exact(u, "input", "output", "cacheRead", "cacheWrite") {
 		return corrupt("INVALID_FACT", line, seq)
 	}
-	vals := []*int{&s.Usage.Input, &s.Usage.Output, &s.Usage.CacheRead, &s.Usage.CacheWrite}
+	vals := []*int64{&s.Usage.Input, &s.Usage.Output, &s.Usage.CacheRead, &s.Usage.CacheWrite}
 	for i, k := range []string{"input", "output", "cacheRead", "cacheWrite"} {
-		n, ok := v2Int(u[k], 0)
-		if !ok {
+		n, ok := v2Int64(u[k], 0)
+		if !ok || *vals[i] > 9007199254740991-n {
 			return corrupt("INVALID_FACT", line, seq)
 		}
 		*vals[i] += n
@@ -1199,6 +1379,15 @@ func reduceSessionV2(data []byte) (sessionV2State, error) {
 		return sessionV2State{}, corrupt("MISSING_HEADER", 1)
 	}
 	committed := data[:last+1]
+	line := 1
+	for index := 0; index+2 < len(committed); index++ {
+		if committed[index] == '\n' {
+			line++
+		}
+		if committed[index] == 0xed && committed[index+1] >= 0xa0 && committed[index+1] <= 0xbf && committed[index+2]&0xc0 == 0x80 {
+			return sessionV2State{}, corrupt("MALFORMED_JSON", line)
+		}
+	}
 	if !utf8.Valid(committed) {
 		return sessionV2State{}, corrupt("INVALID_UTF8", 1)
 	}

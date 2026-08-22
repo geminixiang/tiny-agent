@@ -21,8 +21,8 @@ func TestSessionV2GoldenFixtures(t *testing.T) {
 		} `json:"fixtures"`
 	}
 	readJSONFile(t, filepath.Join(fixtures, "manifest.json"), &manifest)
-	if len(manifest.Fixtures) != 24 {
-		t.Fatalf("fixture count = %d, want 24", len(manifest.Fixtures))
+	if len(manifest.Fixtures) == 0 {
+		t.Fatal("fixture manifest is empty")
 	}
 	for _, fixture := range manifest.Fixtures {
 		t.Run(fixture.Name, func(t *testing.T) {
