@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { builtInTools, toolDefinitions, toolResultOK, type Tool, type ToolArgs, type ToolEvent } from "./tools.js";
+import { builtInTools, toolDefinitions, type Tool, type ToolArgs, type ToolEvent } from "./tools.js";
 
 export {
     builtInPlugins,
@@ -150,6 +150,14 @@ function stopReason(finishReason: string | null | undefined, message: Message): 
         throw Error(`Provider finish_reason: ${finishReason}`);
     if (finishReason && finishReason !== "stop") throw Error(`Unknown provider finish_reason: ${finishReason}`);
     return message.tool_calls?.length ? "toolUse" : "stop";
+}
+
+function parseToolArgs(value: string): ToolArgs {
+    const args: unknown = JSON.parse(value);
+    if (args === null || typeof args !== "object" || Array.isArray(args)) {
+        throw Error("tool arguments must be a JSON object");
+    }
+    return args as ToolArgs;
 }
 
 export class Agent {
@@ -317,7 +325,8 @@ ${list}
                 const c = answer.tool_calls[i];
                 let content: string,
                     args: ToolArgs = {},
-                    aborted = false;
+                    aborted = false,
+                    ok = false;
                 const toolStarted = performance.now();
                 this.onEvent({
                     type: "tool.started",
@@ -330,11 +339,12 @@ ${list}
                         content =
                             "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.";
                     } else {
-                        args = JSON.parse(c.function.arguments);
+                        args = parseToolArgs(c.function.arguments);
                         this.onTool({ phase: "start", name: c.function.name, args });
                         const tool = this.tools.find((candidate) => candidate.name === c.function.name);
                         if (!tool) throw Error(`unknown tool: ${c.function.name}`);
                         content = await tool.execute(args, this.beginOperation("tool", c.id));
+                        ok = true;
                     }
                 } catch (e) {
                     aborted = !!this.active?.controller.signal.aborted;
@@ -348,7 +358,7 @@ ${list}
                     toolCallId: c.id,
                     tool: c.function.name,
                     durationMs: performance.now() - toolStarted,
-                    ok: toolResultOK(content),
+                    ok,
                 });
                 const result: Message = { role: "tool", tool_call_id: c.id, content };
                 this.messages.push(result);

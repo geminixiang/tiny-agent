@@ -9,6 +9,32 @@ const run = promisify(exec),
     MAX_TOOL_OUTPUT = 50 * 1024;
 
 type ToolEdit = { oldText: string; newText: string };
+
+function requiredString(value: unknown, name: string) {
+    if (typeof value !== "string" || !value) throw Error(`${name} must be a nonempty string`);
+    return value;
+}
+
+function optionalPositiveInteger(value: unknown, name: string) {
+    if (value === undefined) return undefined;
+    if (!Number.isInteger(value) || (value as number) < 1) throw Error(`${name} must be an integer >= 1`);
+    return value as number;
+}
+
+function requiredEdits(value: unknown) {
+    if (!Array.isArray(value) || !value.length) throw Error("edits must be a nonempty array");
+    return value.map((edit: unknown, index): ToolEdit => {
+        if (edit === null || typeof edit !== "object" || Array.isArray(edit)) {
+            throw Error(`edits[${index}] must be an object`);
+        }
+        const { oldText, newText } = edit as Record<string, unknown>;
+        if (typeof oldText !== "string") throw Error(`edits[${index}].oldText must be a string`);
+        if (!oldText) throw Error(`edits[${index}].oldText must not be empty`);
+        if (typeof newText !== "string") throw Error(`edits[${index}].newText must be a string`);
+        return { oldText, newText };
+    });
+}
+
 export type ToolArgs = {
     [key: string]: unknown;
     command?: string;
@@ -93,14 +119,14 @@ const bashTool: Tool = {
     },
     async execute(args, signal) {
         if (signal?.aborted) throw Error("Operation aborted");
-        if (!args.command) throw Error("command is required");
-        const timeout = args.timeout ?? 120;
+        const command = requiredString(args.command, "command"),
+            timeout = args.timeout ?? 120;
         if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0)
             throw Error("timeout must be a positive number of seconds");
         let stdout = "",
             stderr = "";
         try {
-            ({ stdout, stderr } = await run(args.command, {
+            ({ stdout, stderr } = await run(command, {
                 cwd: root,
                 timeout: timeout * 1_000,
                 maxBuffer: 10_000_000,
@@ -168,9 +194,11 @@ const readTool: Tool = {
     },
     async execute(args, signal) {
         if (signal?.aborted) throw Error("Operation aborted");
-        if (!args.path) throw Error("path is required");
-        const text = await readFile(pathInRoot(args.path), { encoding: "utf8", signal });
-        return readLines(text, args.offset, args.limit);
+        const path = requiredString(args.path, "path"),
+            offset = optionalPositiveInteger(args.offset, "offset"),
+            limit = optionalPositiveInteger(args.limit, "limit");
+        const text = await readFile(pathInRoot(path), { encoding: "utf8", signal });
+        return readLines(text, offset, limit);
     },
 };
 
@@ -188,13 +216,13 @@ const writeTool: Tool = {
     },
     async execute(args, signal) {
         if (signal?.aborted) throw Error("Operation aborted");
-        if (!args.path) throw Error("path is required");
-        if (args.content === undefined) throw Error("content is required");
-        const path = pathInRoot(args.path);
+        const requestedPath = requiredString(args.path, "path");
+        if (typeof args.content !== "string") throw Error("content must be a string");
+        const path = pathInRoot(requestedPath);
         await mkdir(dirname(path), { recursive: true });
         if (signal?.aborted) throw Error("Operation aborted");
         await writeFile(path, args.content, { signal });
-        return `Successfully wrote ${Buffer.byteLength(args.content)} bytes to ${args.path}.`;
+        return `Successfully wrote ${Buffer.byteLength(args.content)} bytes to ${requestedPath}.`;
     },
 };
 
@@ -228,9 +256,9 @@ const editTool: Tool = {
     },
     async execute(args, signal) {
         if (signal?.aborted) throw Error("Operation aborted");
-        if (!args.path) throw Error("path is required");
-        if (!args.edits?.length) throw Error("edits must be a nonempty array");
-        const path = pathInRoot(args.path);
+        const requestedPath = requiredString(args.path, "path"),
+            edits = requiredEdits(args.edits),
+            path = pathInRoot(requestedPath);
         const original = await readFile(path, { encoding: "utf8", signal }),
             bom = original.startsWith("\uFEFF"),
             text = bom ? original.slice(1) : original,
@@ -247,14 +275,14 @@ const editTool: Tool = {
             }
             positions.push(source);
         }
-        const ranges = args.edits.map((edit, index) => {
+        const ranges = edits.map((edit, index) => {
             const oldText = edit.oldText.replace(/\r\n/g, "\n");
             if (!oldText) throw Error(`edits[${index}].oldText must not be empty`);
             const start = normalized.indexOf(oldText),
                 second = start < 0 ? -1 : normalized.indexOf(oldText, start + 1);
-            if (start < 0) throw Error(`edits[${index}].oldText was not found in ${args.path}.`);
+            if (start < 0) throw Error(`edits[${index}].oldText was not found in ${requestedPath}.`);
             if (second >= 0)
-                throw Error(`edits[${index}].oldText occurs more than once in ${args.path}; add more context.`);
+                throw Error(`edits[${index}].oldText occurs more than once in ${requestedPath}; add more context.`);
             return {
                 index,
                 start: positions[start],
@@ -274,7 +302,7 @@ const editTool: Tool = {
         if (bom) edited = "\uFEFF" + edited;
         if (signal?.aborted) throw Error("Operation aborted");
         await writeFile(path, edited, { signal });
-        return `Successfully replaced ${args.edits.length} block(s) in ${args.path}.`;
+        return `Successfully replaced ${edits.length} block(s) in ${requestedPath}.`;
     },
 };
 
@@ -286,16 +314,6 @@ export function toolDefinitions(tools: Tool[]) {
         type: "function",
         function: { name, description, parameters },
     }));
-}
-
-export function toolResultOK(content: string) {
-    return ![
-        "Error:",
-        "Operation aborted",
-        "Command exited with code",
-        "Command timed out after",
-        "Bash output exceeded the 10MB safety cap",
-    ].some((marker) => content.includes(marker));
 }
 
 export async function executeTool(name: string, args: ToolArgs, signal?: AbortSignal) {

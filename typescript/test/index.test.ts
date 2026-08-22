@@ -445,6 +445,80 @@ test("counts cache from DeepSeek-style prompt_cache_hit_tokens", async () => {
     });
 });
 
+test("validates tool argument objects and built-in field types", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const responses = [
+        {
+            choices: [
+                {
+                    message: {
+                        role: "assistant",
+                        content: null,
+                        tool_calls: [{ id: "bad", type: "function", function: { name: "read", arguments: "null" } }],
+                    },
+                },
+            ],
+            usage: {},
+        },
+        { choices: [{ message: { role: "assistant", content: "handled" } }], usage: {} },
+    ];
+    const agent = new Agent(
+        [],
+        (async () => new Response(JSON.stringify(responses.shift()), { status: 200 })) as typeof fetch,
+    );
+    assert.equal(await agent.runAgentLoop("read"), "handled");
+    assert.equal(agent.messages.at(-2)?.content, "Error: tool arguments must be a JSON object");
+    const invalid = (args: unknown) => args as Parameters<typeof executeTool>[1];
+    await assert.rejects(() => executeTool("bash", invalid({ command: 42 })), /command must be a nonempty string/);
+    await assert.rejects(() => executeTool("read", invalid({ path: 42 })), /path must be a nonempty string/);
+    await assert.rejects(() => executeTool("read", invalid({ path: "x", offset: 1.5 })), /offset must be an integer/);
+    await assert.rejects(() => executeTool("write", invalid({ path: "x", content: 42 })), /content must be a string/);
+    await assert.rejects(
+        () => executeTool("edit", invalid({ path: "x", edits: [{ oldText: "a", newText: 42 }] })),
+        /newText must be a string/,
+    );
+});
+
+test("tool monitoring uses execution status instead of result text", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const responses = [
+        {
+            choices: [
+                {
+                    message: {
+                        role: "assistant",
+                        content: null,
+                        tool_calls: [{ id: "lookup", type: "function", function: { name: "lookup", arguments: "{}" } }],
+                    },
+                },
+            ],
+            usage: {},
+        },
+        { choices: [{ message: { role: "assistant", content: "done" } }], usage: {} },
+    ];
+    const events: any[] = [];
+    const agent = new Agent(
+        [],
+        (async () => new Response(JSON.stringify(responses.shift()), { status: 200 })) as typeof fetch,
+        undefined,
+        () => {},
+        "",
+        (event) => events.push(event),
+        [
+            {
+                name: "lookup",
+                description: "Lookup logs.",
+                parameters: { type: "object", properties: {} },
+                async execute() {
+                    return "Error: found in log";
+                },
+            },
+        ],
+    );
+    assert.equal(await agent.runAgentLoop("lookup"), "done");
+    assert.equal(events.find((event) => event.type === "tool.completed")?.ok, true);
+});
+
 test("restricted tools do not advertise unavailable capabilities", () => {
     const edit = builtInTools.find((tool) => tool.name === "edit")!;
     const system = new Agent(
