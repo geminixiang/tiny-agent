@@ -49,6 +49,31 @@ def uuid(value: Any, code: str, line: int, seq: int | None = None) -> str:
     return result
 
 
+def add_usage(total: int, amount: int, line: int, seq: int) -> int:
+    if total > MAX_SAFE_INTEGER - amount:
+        fail("INVALID_FACT", line, seq)
+    return total + amount
+
+
+def has_lone_surrogate(value: Any) -> bool:
+    if isinstance(value, str):
+        return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
+    if isinstance(value, list):
+        return any(has_lone_surrogate(item) for item in value)
+    if isinstance(value, dict):
+        return any(has_lone_surrogate(key) or has_lone_surrogate(item) for key, item in value.items())
+    return False
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
 def parse_message(value: Any, line: int, seq: int) -> dict[str, Any]:
     message = obj(value, "INVALID_FACT", line, seq)
     role = message.get("role")
@@ -234,6 +259,7 @@ def apply_entry(state: dict[str, Any], fact: dict[str, Any], line: int):
             info = {"entry": entry, "operationId": started["operationId"], "stepId": started["stepId"]}
         state["transcript"].append(message)
         state["activeContext"].append(message)
+        state["activeContextThroughEntryId"] = fact["id"]
         state["entries"][fact["id"]] = info
         return
     if entry_type != "compaction":
@@ -273,6 +299,7 @@ def apply_entry(state: dict[str, Any], fact: dict[str, Any], line: int):
         fail("INVALID_REFERENCE", line, seq)
     validate_transcript(retained, line, seq)
     state["activeContext"] = [{"role": "user", "content": f"[Compacted history]\n{entry['summary']}"}, *retained]
+    state["activeContextThroughEntryId"] = operation["inputThroughEntryId"]
     attempt_id = operation.get("step", {}).get("attemptId")
     attempt = state["attempts"].get(attempt_id)
     if not attempt or attempt["closed"] or attempt["kind"] != "compaction":
@@ -324,6 +351,8 @@ def apply_record(state: dict[str, Any], fact: dict[str, Any], line: int):
         context_id = uuid(record.get("contextThroughEntryId"), "INVALID_FACT", line, seq)
         if context_id not in state["entries"]:
             fail("INVALID_REFERENCE", line, seq)
+        if number == 1 and context_id != state["activeContextThroughEntryId"]:
+            fail("INVALID_TRANSITION", line, seq)
         snapshot = configuration(record.get("configurationSnapshot"), line, seq)
         digest = record.get("configurationDigest")
         if not isinstance(digest, str) or not DIGEST.fullmatch(digest) or configuration_digest(snapshot) != digest:
@@ -340,14 +369,14 @@ def apply_record(state: dict[str, Any], fact: dict[str, Any], line: int):
                     fail("INVALID_TRANSITION", line, seq)
         else:
             first = prior[0] if prior else None
-            if len(prior) != 1 or first["attempt"] != 1 or first["closed"] or first["failed"] or first["kind"] != step_kind or first["operationId"] != operation_id or first["configurationDigest"] != digest:
+            if len(prior) != 1 or first["attempt"] != 1 or first["closed"] or first["failed"] or first["kind"] != step_kind or first["operationId"] != operation_id or first["contextThroughEntryId"] != context_id or first["configurationDigest"] != digest:
                 fail("INVALID_TRANSITION", line, seq)
             first["closed"] = True
-        attempt = {"operationId": operation_id, "stepId": step_id, "attemptId": attempt_id, "attempt": number, "kind": step_kind, "closed": False, "failed": False, "configurationSnapshot": snapshot, "configurationDigest": digest}
+        attempt = {"operationId": operation_id, "stepId": step_id, "attemptId": attempt_id, "attempt": number, "kind": step_kind, "contextThroughEntryId": context_id, "closed": False, "failed": False, "configurationSnapshot": snapshot, "configurationDigest": digest}
         state["attempts"][attempt_id] = attempt
         state["steps"][step_id] = [*prior, attempt]
         found["latestStepId"] = step_id
-        state["operation"]["step"] = {"operationId": operation_id, "stepId": step_id, "attemptId": attempt_id, "attempt": number, "stepKind": step_kind, "status": "attempting", "configurationSnapshot": snapshot, "configurationDigest": digest}
+        state["operation"]["step"] = {"operationId": operation_id, "stepId": step_id, "attemptId": attempt_id, "attempt": number, "stepKind": step_kind, "status": "attempting", "contextThroughEntryId": context_id, "configurationSnapshot": snapshot, "configurationDigest": digest}
     elif kind == "stepFailed":
         exact(record, ["type", "operationId", "stepId", "attemptId", "error"], "INVALID_FACT", line, seq)
         operation_id, _ = get_operation(state, record.get("operationId"), line, seq)
@@ -445,6 +474,11 @@ def finish_operation(state: dict[str, Any], record: dict[str, Any], line: int, s
                 fail("INVALID_REFERENCE", line, seq)
     elif "finalEntryId" in record:
         fail("INVALID_FACT", line, seq)
+    if outcome == "aborted":
+        pending_tools = operation["kind"] == "run" and any(tool["status"] == "pending" for tool in operation["toolCalls"])
+        open_attempt = operation.get("step", {}).get("status") == "attempting"
+        if not operation["abortRequested"] or pending_tools or open_attempt:
+            fail("INVALID_TRANSITION", line, seq)
     if outcome == "failed":
         error = obj(record.get("error"), "INVALID_FACT", line, seq)
         exact(error, ["code", "message"], "INVALID_FACT", line, seq)
@@ -475,7 +509,8 @@ def apply_usage(state: dict[str, Any], fact: dict[str, Any], line: int):
     usage = obj(fact.get("usage"), "INVALID_FACT", line, seq)
     exact(usage, ["input", "output", "cacheRead", "cacheWrite"], "INVALID_FACT", line, seq)
     for key in ("input", "output", "cacheRead", "cacheWrite"):
-        state["usage"][key] += safe_int(usage.get(key), "INVALID_FACT", line, seq)
+        amount = safe_int(usage.get(key), "INVALID_FACT", line, seq)
+        state["usage"][key] = add_usage(state["usage"][key], amount, line, seq)
 
 
 def apply_fact(state: dict[str, Any], value: Any, line: int):
@@ -517,6 +552,12 @@ def reduce_session_v2(data: bytes) -> dict[str, Any]:
     if last_lf < 0:
         fail("MISSING_HEADER", 1)
     committed = data[: last_lf + 1]
+    raw_line = 1
+    for index in range(len(committed) - 2):
+        if committed[index] == 0x0A:
+            raw_line += 1
+        if committed[index] == 0xED and 0xA0 <= committed[index + 1] <= 0xBF and committed[index + 2] & 0xC0 == 0x80:
+            fail("MALFORMED_JSON", raw_line)
     try:
         source = committed.decode("utf-8", "strict")
     except UnicodeDecodeError:
@@ -531,12 +572,19 @@ def reduce_session_v2(data: bytes) -> dict[str, Any]:
         if raw.endswith("\r"):
             fail("CRLF_NOT_ALLOWED", line)
         try:
-            return json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            value = json.loads(
+                raw,
+                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+                object_pairs_hook=reject_duplicate_keys,
+            )
+            if has_lone_surrogate(value):
+                raise ValueError("lone surrogate")
+            return value
         except (json.JSONDecodeError, ValueError):
             fail("MALFORMED_JSON", line)
 
     header = validate_header(parse(lines[0], 1), 1)
-    state = {"header": header, "transcript": [], "activeContext": [], "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}, "operation": {"kind": "idle"}, "repairedLength": last_lf + 1, "nextSeq": 1, "ids": set(), "reserved": {}, "entries": {}, "records": {}, "operations": {}, "attempts": {}, "steps": {}, "tools": {}, "toolPairs": set()}
+    state = {"header": header, "transcript": [], "activeContext": [], "activeContextThroughEntryId": None, "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}, "operation": {"kind": "idle"}, "repairedLength": last_lf + 1, "nextSeq": 1, "ids": set(), "reserved": {}, "entries": {}, "records": {}, "operations": {}, "attempts": {}, "steps": {}, "tools": {}, "toolPairs": set()}
     for index, raw in enumerate(lines[1:], 2):
         value = parse(raw, index)
         transaction = value if isinstance(value, list) else [value]

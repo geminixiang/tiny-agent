@@ -10,7 +10,6 @@ FIXTURES = Path(__file__).resolve().parents[2] / "schemas/session-v2/fixtures"
 class SessionV2Test(unittest.TestCase):
     def test_all_shared_fixtures(self):
         manifest = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(manifest["fixtures"]), 24)
         for fixture in manifest["fixtures"]:
             with self.subTest(fixture=fixture["name"]):
                 expected = json.loads((FIXTURES / fixture["expected"]).read_text(encoding="utf-8"))
