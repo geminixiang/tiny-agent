@@ -445,6 +445,40 @@ function operation(state: InternalState, operationId: unknown, line: number, seq
     return { key, found };
 }
 
+const SYNTHETIC_CONTENT = {
+    invalidArguments: "Error: Tool arguments were invalid; the tool was not executed.",
+    unknownTool: "Error: Unknown tool; the tool was not executed.",
+    truncated: "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.",
+    aborted: "Operation aborted before execution.",
+    interrupted: "Operation interrupted after execution status became unknown; the tool was not replayed.",
+} as const;
+type SyntheticReason = keyof typeof SYNTHETIC_CONTENT;
+
+function canonicalValue(value: unknown): string {
+    if (value === null || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
+    if (typeof value === "string") return canonicalString(value);
+    if (Array.isArray(value)) return `[${value.map(canonicalValue).join(",")}]`;
+    if (!value || typeof value !== "object") throw new Error("unsupported canonical value");
+    const item = value as JsonObject;
+    return `{${Object.keys(item)
+        .sort()
+        .map((key) => `${canonicalString(key)}:${canonicalValue(item[key])}`)
+        .join(",")}}`;
+}
+
+function sourceDigest(entries: Map<string, EntryInfo>, inputThroughEntryId: string) {
+    const source = [];
+    for (const [sourceEntryId, info] of entries) {
+        if (info.entry.type === "message") source.push({ sourceEntryId, message: info.entry.message });
+        if (sourceEntryId === inputThroughEntryId) break;
+    }
+    return `sha256:${createHash("sha256").update(canonicalValue(source)).digest("hex")}`;
+}
+
+function validateSyntheticContent(reason: SyntheticReason, content: string, line: number, seq: number) {
+    if (content !== SYNTHETIC_CONTENT[reason]) fail("INVALID_TRANSCRIPT", line, seq);
+}
+
 function applyEntry(state: InternalState, fact: Fact, line: number) {
     exact(fact, ["kind", "seq", "id", "timestamp", "entry"], "INVALID_FACT", line, fact.seq);
     const entry = object(fact.entry, "INVALID_FACT", line, fact.seq);
@@ -476,39 +510,71 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
                 state.operation.step.stopReason = stopReason as "stop" | "toolUse" | "length";
             }
         } else {
-            if (state.reservedIds.get(fact.id) !== "toolResult") fail("INVALID_REFERENCE", line, fact.seq);
-            exact(
-                entry,
-                ["type", "stepId", "message", "toolName", "toolStartedId", "result"],
-                "INVALID_FACT",
-                line,
-                fact.seq,
-            );
+            const preExecution = entry.assistantEntryId !== undefined || entry.toolIndex !== undefined;
+            const preKeys = ["type", "stepId", "assistantEntryId", "toolIndex", "message", "toolName", "result"];
+            const startedKeys = ["type", "stepId", "message", "toolName", "toolStartedId", "result"];
+            exact(entry, preExecution ? preKeys : startedKeys, "INVALID_FACT", line, fact.seq);
             const result = object(entry.result, "INVALID_FACT", line, fact.seq);
             exact(result, ["type", "reason"], "INVALID_FACT", line, fact.seq);
-            if (!["success", "error", "synthetic"].includes(String(result.type))) fail("INVALID_FACT", line, fact.seq);
-            if (result.type === "synthetic") {
-                if (
-                    !["invalidArguments", "unknownTool", "truncated", "aborted", "interrupted"].includes(
-                        String(result.reason),
-                    )
-                )
-                    fail("INVALID_FACT", line, fact.seq);
-            } else if (result.reason !== undefined) fail("INVALID_FACT", line, fact.seq);
             const stepId = id(entry.stepId, "INVALID_FACT", line, fact.seq);
-            const startedId = id(entry.toolStartedId, "INVALID_FACT", line, fact.seq);
-            const started = state.tools.get(startedId);
-            if (
-                !started ||
-                started.stepId !== stepId ||
-                started.resultEntryId !== fact.id ||
-                started.toolCallId !== message.tool_call_id ||
-                started.toolName !== entry.toolName ||
-                started.status !== "pending"
-            )
-                fail("INVALID_REFERENCE", line, fact.seq);
-            started.status = "completed";
-            state.reservedIds.delete(fact.id);
+            const toolName = string(entry.toolName, "INVALID_FACT", line, fact.seq);
+            if (preExecution) {
+                if (result.type !== "synthetic") fail("INVALID_FACT", line, fact.seq);
+                const reason = String(result.reason) as SyntheticReason;
+                if (!["invalidArguments", "unknownTool", "truncated", "aborted"].includes(reason))
+                    fail("INVALID_FACT", line, fact.seq);
+                const assistantEntryId = id(entry.assistantEntryId, "INVALID_FACT", line, fact.seq);
+                const toolIndex = safeInteger(entry.toolIndex, "INVALID_FACT", line, fact.seq);
+                const assistantInfo = state.entries.get(assistantEntryId);
+                const assistant = assistantInfo?.entry;
+                if (
+                    assistant?.type !== "message" ||
+                    assistantInfo?.stepId !== stepId ||
+                    assistantInfo.operationId !==
+                        (state.operation.kind === "run" ? state.operation.operationId : undefined)
+                )
+                    fail("INVALID_REFERENCE", line, fact.seq);
+                const assistantMessage = parseMessage(assistant.message, line, fact.seq);
+                const call =
+                    assistantMessage.role === "assistant" ? assistantMessage.tool_calls?.[toolIndex] : undefined;
+                if (!call || call.id !== message.tool_call_id || call.function.name !== toolName)
+                    fail("INVALID_REFERENCE", line, fact.seq);
+                const pair = `${assistantEntryId}:${toolIndex}`;
+                if (state.toolPairs.has(pair)) fail("INVALID_TRANSITION", line, fact.seq);
+                validateSyntheticContent(reason, message.content, line, fact.seq);
+                state.toolPairs.add(pair);
+                state.entries.set(fact.id, {
+                    entry,
+                    operationId: assistantInfo.operationId,
+                    stepId,
+                });
+            } else {
+                if (state.reservedIds.get(fact.id) !== "toolResult") fail("INVALID_REFERENCE", line, fact.seq);
+                if (!["success", "error", "synthetic"].includes(String(result.type)))
+                    fail("INVALID_FACT", line, fact.seq);
+                if (result.type === "synthetic") {
+                    if (result.reason !== "interrupted") fail("INVALID_FACT", line, fact.seq);
+                    validateSyntheticContent("interrupted", message.content, line, fact.seq);
+                } else if (result.reason !== undefined) fail("INVALID_FACT", line, fact.seq);
+                const startedId = id(entry.toolStartedId, "INVALID_FACT", line, fact.seq);
+                const started = state.tools.get(startedId);
+                if (
+                    !started ||
+                    started.stepId !== stepId ||
+                    started.resultEntryId !== fact.id ||
+                    started.toolCallId !== message.tool_call_id ||
+                    started.toolName !== toolName ||
+                    started.status !== "pending"
+                )
+                    fail("INVALID_REFERENCE", line, fact.seq);
+                started.status = "completed";
+                state.reservedIds.delete(fact.id);
+                state.entries.set(fact.id, {
+                    entry,
+                    operationId: started.operationId,
+                    stepId: started.stepId,
+                });
+            }
         }
         state.transcript.push(message);
         state.activeContext.push(message);
@@ -522,7 +588,7 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
                 stepId: attempt.stepId,
                 attemptId: attempt.attemptId,
             });
-        } else {
+        } else if (message.role === "tool" && entry.toolStartedId !== undefined) {
             const started = state.tools.get(String(entry.toolStartedId))!;
             state.entries.set(fact.id, {
                 entry,
@@ -651,8 +717,10 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         const inputIndex = sourceIds.indexOf(inputThroughEntryId);
         if (inputIndex < 0 || !structurallyEqual(partition, sourceIds.slice(0, inputIndex + 1)))
             fail("INVALID_REFERENCE", line, fact.seq);
-        const sourceDigest = String(record.sourceDigest);
-        if (!DIGEST.test(sourceDigest)) fail("INVALID_FACT", line, fact.seq);
+        const sourceDigestValue = String(record.sourceDigest);
+        if (!DIGEST.test(sourceDigestValue)) fail("INVALID_FACT", line, fact.seq);
+        if (sourceDigest(state.entries, inputThroughEntryId) !== sourceDigestValue)
+            fail("INVALID_REFERENCE", line, fact.seq);
         state.operations.set(operationId, {
             kind: "compaction",
             finished: false,

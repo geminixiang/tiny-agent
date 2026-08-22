@@ -178,6 +178,33 @@
                 }
             ]
         },
+        "startedToolMessageEntry": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "stepId", "message", "toolName", "toolStartedId", "result"],
+            "properties": {
+                "type": { "const": "message" },
+                "stepId": { "$ref": "#/$defs/uuid7" },
+                "message": { "$ref": "#/$defs/toolMessage" },
+                "toolName": { "type": "string", "minLength": 1 },
+                "toolStartedId": { "$ref": "#/$defs/uuid7" },
+                "result": { "$ref": "#/$defs/startedToolResult" }
+            }
+        },
+        "preExecutionSyntheticMessageEntry": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "stepId", "assistantEntryId", "toolIndex", "message", "toolName", "result"],
+            "properties": {
+                "type": { "const": "message" },
+                "stepId": { "$ref": "#/$defs/uuid7" },
+                "assistantEntryId": { "$ref": "#/$defs/uuid7" },
+                "toolIndex": { "$ref": "#/$defs/safeInteger" },
+                "message": { "$ref": "#/$defs/toolMessage" },
+                "toolName": { "type": "string", "minLength": 1 },
+                "result": { "$ref": "#/$defs/preExecutionSyntheticResult" }
+            }
+        },
         "messageEntry": {
             "oneOf": [
                 {
@@ -229,37 +256,10 @@
                     }
                 },
                 {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                        "type",
-                        "stepId",
-                        "message",
-                        "toolName",
-                        "toolStartedId",
-                        "result"
-                    ],
-                    "properties": {
-                        "type": {
-                            "const": "message"
-                        },
-                        "stepId": {
-                            "$ref": "#/$defs/uuid7"
-                        },
-                        "message": {
-                            "$ref": "#/$defs/toolMessage"
-                        },
-                        "toolName": {
-                            "type": "string",
-                            "minLength": 1
-                        },
-                        "toolStartedId": {
-                            "$ref": "#/$defs/uuid7"
-                        },
-                        "result": {
-                            "$ref": "#/$defs/toolResult"
-                        }
-                    }
+                    "$ref": "#/$defs/startedToolMessageEntry"
+                },
+                {
+                    "$ref": "#/$defs/preExecutionSyntheticMessageEntry"
                 }
             ]
         },
@@ -976,39 +976,35 @@
                 }
             }
         },
-        "syntheticResult": {
+        "preExecutionSyntheticResult": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-                "type",
-                "reason"
-            ],
+            "required": ["type", "reason"],
             "properties": {
-                "type": {
-                    "const": "synthetic"
-                },
-                "reason": {
-                    "enum": [
-                        "invalidArguments",
-                        "unknownTool",
-                        "truncated",
-                        "aborted",
-                        "interrupted"
-                    ]
-                }
+                "type": { "const": "synthetic" },
+                "reason": { "enum": ["invalidArguments", "unknownTool", "truncated", "aborted"] }
             }
+        },
+        "interruptedResult": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "reason"],
+            "properties": {
+                "type": { "const": "synthetic" },
+                "reason": { "const": "interrupted" }
+            }
+        },
+        "startedToolResult": {
+            "oneOf": [
+                { "$ref": "#/$defs/successResult" },
+                { "$ref": "#/$defs/errorResult" },
+                { "$ref": "#/$defs/interruptedResult" }
+            ]
         },
         "toolResult": {
             "oneOf": [
-                {
-                    "$ref": "#/$defs/successResult"
-                },
-                {
-                    "$ref": "#/$defs/errorResult"
-                },
-                {
-                    "$ref": "#/$defs/syntheticResult"
-                }
+                { "$ref": "#/$defs/startedToolResult" },
+                { "$ref": "#/$defs/preExecutionSyntheticResult" }
             ]
         }
     },

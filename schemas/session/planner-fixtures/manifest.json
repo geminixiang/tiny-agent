@@ -75,6 +75,16 @@
             "name": "abort-pending-tool",
             "input": "abort-pending-tool.json",
             "expected": "abort-pending-tool.expected.json"
+        },
+        {
+            "name": "duplicate-provider-call-id",
+            "input": "duplicate-provider-call-id.json",
+            "expected": "duplicate-provider-call-id.expected.json"
+        },
+        {
+            "name": "abort-mixed-tools",
+            "input": "abort-mixed-tools.json",
+            "expected": "abort-mixed-tools.expected.json"
         }
     ]
 }

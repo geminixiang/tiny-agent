@@ -228,6 +228,42 @@
             "file": "synthetic-aborted.jsonl",
             "expected": "synthetic-aborted.expected.json",
             "schemaValid": true
+        },
+        {
+            "name": "synthetic-invalid-arguments-wrong-content",
+            "file": "synthetic-invalid-arguments-wrong-content.jsonl",
+            "expected": "synthetic-invalid-arguments-wrong-content.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "synthetic-unknown-tool-wrong-content",
+            "file": "synthetic-unknown-tool-wrong-content.jsonl",
+            "expected": "synthetic-unknown-tool-wrong-content.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "synthetic-truncated-wrong-content",
+            "file": "synthetic-truncated-wrong-content.jsonl",
+            "expected": "synthetic-truncated-wrong-content.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "synthetic-aborted-wrong-content",
+            "file": "synthetic-aborted-wrong-content.jsonl",
+            "expected": "synthetic-aborted-wrong-content.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "synthetic-interrupted-wrong-content",
+            "file": "synthetic-interrupted-wrong-content.jsonl",
+            "expected": "synthetic-interrupted-wrong-content.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "compaction-wrong-source-digest",
+            "file": "compaction-wrong-source-digest.jsonl",
+            "expected": "compaction-wrong-source-digest.expected.json",
+            "schemaValid": true
         }
     ]
 }

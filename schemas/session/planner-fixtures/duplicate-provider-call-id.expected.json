@@ -1,0 +1,10 @@
+{
+    "type": "startTool",
+    "mode": "start",
+    "assistantEntryId": "018f0000-0000-7000-8000-000000000026",
+    "toolIndex": 0,
+    "toolName": "read",
+    "arguments": {
+        "path": "SECOND.md"
+    }
+}

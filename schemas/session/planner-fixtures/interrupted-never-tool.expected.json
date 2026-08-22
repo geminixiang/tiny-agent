@@ -2,6 +2,8 @@
     "type": "appendSynthetic",
     "results": [
         {
+            "assistantEntryId": "018f0000-0000-7000-8000-000000000008",
+            "toolIndex": 0,
             "toolCallId": "call_1",
             "toolName": "read",
             "toolStartedId": "018f0000-0000-7000-8000-000000000009",

@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { reduceSession, SessionCorruption } from "../src/session-reducer.js";
-import { planRecovery } from "../src/session-recovery.js";
+import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "../src/session-recovery.js";
 
 const fixtures = resolve(dirname(fileURLToPath(import.meta.url)), "../../schemas/session/fixtures");
 const manifestSchema = JSON.parse(await readFile(resolve(fixtures, "manifest.schema.json"), "utf8"));
@@ -141,12 +141,75 @@ for (const fixture of plannerManifest.fixtures) {
         assertSchema(input.current, currentConfigurationSchema);
         assertSchema(expected, recoveryPlanSchema);
         const state = reduceSession(await readFile(resolve(fixtures, input.fixture)));
-        if (["abort-close-attempt", "abort-pending-tool"].includes(fixture.name) && state.operation.kind !== "idle")
+        if (
+            ["abort-close-attempt", "abort-pending-tool", "abort-mixed-tools"].includes(fixture.name) &&
+            state.operation.kind !== "idle"
+        )
             state.operation.abortRequested = true;
         if (fixture.name === "attempts-exhausted" && state.operation.kind !== "idle") state.operation.step!.attempt = 2;
         assert.deepEqual(planRecovery(state, input.current), expected);
     });
 }
+function materializeSynthetic(result: SyntheticResult, stepId: string, seq: number, index: number) {
+    const id = result.resultEntryId ?? `018f0000-0000-7000-8000-${(0xf0 + index).toString(16).padStart(12, "0")}`;
+    return {
+        kind: "entry",
+        seq,
+        id,
+        timestamp: 1710000001000 + index,
+        entry: {
+            type: "message",
+            stepId,
+            ...(result.toolStartedId
+                ? { toolStartedId: result.toolStartedId }
+                : { assistantEntryId: result.assistantEntryId, toolIndex: result.toolIndex }),
+            message: { role: "tool", tool_call_id: result.toolCallId, content: result.content },
+            toolName: result.toolName,
+            result: { type: "synthetic", reason: result.reason },
+        },
+    };
+}
+
+function nextSequence(bytes: Buffer) {
+    return (
+        committedValues(bytes)
+            .slice(1)
+            .flatMap((value) => (Array.isArray(value) ? value : [value])).length + 1
+    );
+}
+
+test("every synthetic recovery action materializes as a schema-valid reducible entry", async () => {
+    for (const fixture of plannerManifest.fixtures) {
+        const input = JSON.parse(await readFile(resolve(plannerFixtures, fixture.input), "utf8"));
+        const bytes = await readFile(resolve(fixtures, input.fixture));
+        const state = reduceSession(bytes);
+        if (
+            ["abort-close-attempt", "abort-pending-tool", "abort-mixed-tools"].includes(fixture.name) &&
+            state.operation.kind !== "idle"
+        )
+            state.operation.abortRequested = true;
+        const plan = planRecovery(state, input.current);
+        if (plan.type !== "appendSynthetic") continue;
+        assert.ok(state.operation.kind === "run" && state.operation.step);
+        const seq = nextSequence(bytes);
+        const facts = plan.results.map((result, index) =>
+            materializeSynthetic(
+                result,
+                state.operation.kind === "run" ? state.operation.step!.stepId : "",
+                seq + index,
+                index,
+            ),
+        );
+        for (const fact of facts) assertSchema(fact, sessionSchema);
+        const appended = Buffer.concat([
+            bytes.subarray(0, state.repairedLength),
+            Buffer.from(`${JSON.stringify(facts)}\n`),
+        ]);
+        assert.doesNotThrow(() => reduceSession(appended), fixture.name);
+        for (const result of plan.results) assert.equal(result.content, SYNTHETIC_CONTENT[result.reason]);
+    }
+});
+
 test("session rejects a transaction without partially applying it", async () => {
     const bytes = await readFile(resolve(fixtures, "skipped-seq-transaction.jsonl"));
     assert.throws(() => reduceSession(bytes), { code: "SEQ_MISMATCH" });

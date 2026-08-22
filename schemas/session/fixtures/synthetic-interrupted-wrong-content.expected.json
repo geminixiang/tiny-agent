@@ -1,0 +1,8 @@
+{
+    "ok": false,
+    "error": {
+        "code": "INVALID_TRANSCRIPT",
+        "line": 6,
+        "seq": 6
+    }
+}

@@ -580,6 +580,9 @@ func sessionCanonicalString(value string) string {
 
 func sessionCanonical(v any) (string, error) {
 	switch x := v.(type) {
+	case nil, bool, json.Number:
+		b, err := json.Marshal(x)
+		return string(b), err
 	case string:
 		return sessionCanonicalString(x), nil
 	case []sessionToolDeclaration:
@@ -691,6 +694,59 @@ func sessionCallAt(message sessionMessage, index int) (string, string, bool) {
 	return id, name, id != "" && name != ""
 }
 
+var syntheticContent = map[string]string{
+	"invalidArguments": "Error: Tool arguments were invalid; the tool was not executed.",
+	"unknownTool":      "Error: Unknown tool; the tool was not executed.",
+	"truncated":        "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.",
+	"aborted":          "Operation aborted before execution.",
+	"interrupted":      "Operation interrupted after execution status became unknown; the tool was not replayed.",
+}
+
+func sessionCanonicalValue(v any) (string, error) {
+	switch x := v.(type) {
+	case nil, bool, json.Number:
+		b, err := json.Marshal(x)
+		return string(b), err
+	case string, []any, map[string]any:
+		return sessionCanonical(x)
+	default:
+		return "", fmt.Errorf("unsupported")
+	}
+}
+
+func sessionSourceDigest(s *sessionInternal, inputID string) (string, error) {
+	source := []any{}
+	ids := make([]string, 0, len(s.Entries))
+	for id := range s.Entries {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return sessionSeqOfEntry(s.Entries[ids[i]].Entry) < sessionSeqOfEntry(s.Entries[ids[j]].Entry)
+	})
+	for _, id := range ids {
+		entry := s.Entries[id].Entry
+		if entry["type"] == "message" {
+			source = append(source, map[string]any{"sourceEntryId": id, "message": entry["message"]})
+		}
+		if id == inputID {
+			break
+		}
+	}
+	canonical, err := sessionCanonicalValue(source)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+func validateSyntheticContent(reason, content string, line, seq int) error {
+	if syntheticContent[reason] != content {
+		return corrupt("INVALID_TRANSCRIPT", line, seq)
+	}
+	return nil
+}
+
 // apply functions mirror the TypeScript reference contract.
 func sessionApplyEntry(s *sessionInternal, f map[string]any, line, seq int) error {
 	if !sessionExact(f, "kind", "seq", "id", "timestamp", "entry") {
@@ -746,14 +802,17 @@ func sessionApplyEntry(s *sessionInternal, f map[string]any, line, seq int) erro
 				s.Operation.Step.StopReason, _ = entry["stopReason"].(string)
 			}
 		} else {
-			if s.Reserved[factID] != "toolResult" || !sessionExact(entry, "type", "stepId", "message", "toolName", "toolStartedId", "result") {
-				return corrupt("INVALID_REFERENCE", line, seq)
+			_, preAssistant := entry["assistantEntryId"]
+			_, preIndex := entry["toolIndex"]
+			preExecution := preAssistant || preIndex
+			keys := []string{"type", "stepId", "message", "toolName", "toolStartedId", "result"}
+			if preExecution {
+				keys = []string{"type", "stepId", "assistantEntryId", "toolIndex", "message", "toolName", "result"}
 			}
-			step, ok := sessionID(entry["stepId"])
-			if !ok {
+			if !sessionExact(entry, keys...) {
 				return corrupt("INVALID_FACT", line, seq)
 			}
-			startedID, ok := sessionID(entry["toolStartedId"])
+			step, ok := sessionID(entry["stepId"])
 			if !ok {
 				return corrupt("INVALID_FACT", line, seq)
 			}
@@ -761,23 +820,80 @@ func sessionApplyEntry(s *sessionInternal, f map[string]any, line, seq int) erro
 			if e != nil || !sessionExact(result, "type", "reason") {
 				return corrupt("INVALID_FACT", line, seq)
 			}
-			resultType, _ := result["type"].(string)
-			if resultType != "success" && resultType != "error" && resultType != "synthetic" {
+			name, ok := sessionString(entry["toolName"])
+			if !ok {
 				return corrupt("INVALID_FACT", line, seq)
 			}
-			started := s.Tools[startedID]
-			callID, _ := msg["tool_call_id"].(string)
-			name, _ := entry["toolName"].(string)
-			if started == nil || started.StepID != step || started.ResultEntryID != factID || started.ToolCallID != callID || started.ToolName != name || started.Status != "pending" {
-				return corrupt("INVALID_REFERENCE", line, seq)
-			}
-			started.Status = "completed"
-			for i := range s.Operation.ToolCalls {
-				if s.Operation.ToolCalls[i].ToolStartedID == startedID {
-					s.Operation.ToolCalls[i].Status = "completed"
+			if preExecution {
+				reason, _ := result["reason"].(string)
+				if result["type"] != "synthetic" || (reason != "invalidArguments" && reason != "unknownTool" && reason != "truncated" && reason != "aborted") {
+					return corrupt("INVALID_FACT", line, seq)
 				}
+				assistantID, ok := sessionID(entry["assistantEntryId"])
+				if !ok {
+					return corrupt("INVALID_FACT", line, seq)
+				}
+				idx, ok := sessionInt(entry["toolIndex"], 0)
+				if !ok {
+					return corrupt("INVALID_FACT", line, seq)
+				}
+				info := s.Entries[assistantID]
+				if info.Entry == nil || info.StepID != step || s.Operation.Kind != "run" || info.OperationID != s.Operation.OperationID {
+					return corrupt("INVALID_REFERENCE", line, seq)
+				}
+				assistant, e := sessionParseMessage(info.Entry["message"], line, seq)
+				if e != nil {
+					return e
+				}
+				callID, callName, ok := sessionCallAt(assistant, idx)
+				if !ok || callID != msg["tool_call_id"] || callName != name {
+					return corrupt("INVALID_REFERENCE", line, seq)
+				}
+				pair := assistantID + ":" + fmt.Sprint(idx)
+				if s.ToolPairs[pair] {
+					return corrupt("INVALID_TRANSITION", line, seq)
+				}
+				content, _ := msg["content"].(string)
+				if e := validateSyntheticContent(reason, content, line, seq); e != nil {
+					return e
+				}
+				s.ToolPairs[pair] = true
+			} else {
+				if s.Reserved[factID] != "toolResult" {
+					return corrupt("INVALID_REFERENCE", line, seq)
+				}
+				resultType, _ := result["type"].(string)
+				if resultType != "success" && resultType != "error" && resultType != "synthetic" {
+					return corrupt("INVALID_FACT", line, seq)
+				}
+				if resultType == "synthetic" {
+					if result["reason"] != "interrupted" {
+						return corrupt("INVALID_FACT", line, seq)
+					}
+					content, _ := msg["content"].(string)
+					if e := validateSyntheticContent("interrupted", content, line, seq); e != nil {
+						return e
+					}
+				} else if _, ok := result["reason"]; ok {
+					return corrupt("INVALID_FACT", line, seq)
+				}
+				startedID, ok := sessionID(entry["toolStartedId"])
+				if !ok {
+					return corrupt("INVALID_FACT", line, seq)
+				}
+				started := s.Tools[startedID]
+				callID, _ := msg["tool_call_id"].(string)
+				if started == nil || started.StepID != step || started.ResultEntryID != factID || started.ToolCallID != callID || started.ToolName != name || started.Status != "pending" {
+					return corrupt("INVALID_REFERENCE", line, seq)
+				}
+				started.Status = "completed"
+				for i := range s.Operation.ToolCalls {
+					if s.Operation.ToolCalls[i].ToolStartedID == startedID {
+						s.Operation.ToolCalls[i].Status = "completed"
+					}
+				}
+				delete(s.Reserved, factID)
 			}
-			delete(s.Reserved, factID)
 		}
 		s.Transcript = append(s.Transcript, msg)
 		s.ActiveContext = append(s.ActiveContext, msg)
@@ -787,8 +903,13 @@ func sessionApplyEntry(s *sessionInternal, f map[string]any, line, seq int) erro
 			a := s.Attempts[entry["attemptId"].(string)]
 			info.OperationID, info.StepID, info.AttemptID = a.OperationID, a.StepID, a.AttemptID
 		} else if role == "tool" {
-			t := s.Tools[entry["toolStartedId"].(string)]
-			info.OperationID, info.StepID = t.OperationID, t.StepID
+			if startedID, ok := entry["toolStartedId"].(string); ok {
+				t := s.Tools[startedID]
+				info.OperationID, info.StepID = t.OperationID, t.StepID
+			} else {
+				assistant := s.Entries[entry["assistantEntryId"].(string)]
+				info.OperationID, info.StepID = assistant.OperationID, assistant.StepID
+			}
 		}
 		s.Entries[factID] = info
 		return nil
@@ -943,6 +1064,14 @@ func sessionApplyRecord(s *sessionInternal, f map[string]any, line, seq int) err
 			return e
 		}
 		if _, ok := s.Entries[input]; !ok {
+			return corrupt("INVALID_REFERENCE", line, seq)
+		}
+		digest, ok := sessionDigest(r["sourceDigest"])
+		if !ok {
+			return corrupt("INVALID_FACT", line, seq)
+		}
+		expectedDigest, e := sessionSourceDigest(s, input)
+		if e != nil || digest != expectedDigest {
 			return corrupt("INVALID_REFERENCE", line, seq)
 		}
 		s.Operations[op] = &sessionOperationInfo{Kind: "compaction", InputThroughEntryID: input, ResultEntryID: result}

@@ -203,6 +203,44 @@ def validate_transcript(messages: list[dict[str, Any]], line: int, seq: int | No
             fail("INVALID_TRANSCRIPT", line, seq)
 
 
+SYNTHETIC_CONTENT = {
+    "invalidArguments": "Error: Tool arguments were invalid; the tool was not executed.",
+    "unknownTool": "Error: Unknown tool; the tool was not executed.",
+    "truncated": "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.",
+    "aborted": "Operation aborted before execution.",
+    "interrupted": "Operation interrupted after execution status became unknown; the tool was not replayed.",
+}
+
+
+def canonical_value(value: Any) -> str:
+    if value is None or isinstance(value, (bool, int, float)):
+        return json.dumps(value, separators=(",", ":"))
+    if isinstance(value, str):
+        return canonical_configuration(value)
+    if isinstance(value, list):
+        return "[" + ",".join(canonical_value(item) for item in value) + "]"
+    if not isinstance(value, dict):
+        raise ValueError("unsupported canonical value")
+    return "{" + ",".join(
+        f"{canonical_configuration(key)}:{canonical_value(value[key])}" for key in sorted(value)
+    ) + "}"
+
+
+def source_digest(state: dict[str, Any], input_entry_id: str) -> str:
+    source = []
+    for source_id, info in state["entries"].items():
+        if info["entry"].get("type") == "message":
+            source.append({"sourceEntryId": source_id, "message": info["entry"]["message"]})
+        if source_id == input_entry_id:
+            break
+    return "sha256:" + hashlib.sha256(canonical_value(source).encode()).hexdigest()
+
+
+def validate_synthetic_content(reason: str, content: str, line: int, seq: int):
+    if content != SYNTHETIC_CONTENT[reason]:
+        fail("INVALID_TRANSCRIPT", line, seq)
+
+
 def apply_entry(state: dict[str, Any], fact: dict[str, Any], line: int):
     seq = fact["seq"]
     exact(fact, ["kind", "seq", "id", "timestamp", "entry"], "INVALID_FACT", line, seq)
@@ -241,25 +279,52 @@ def apply_entry(state: dict[str, Any], fact: dict[str, Any], line: int):
                 operation["step"]["stopReason"] = stop_reason
             info = {"entry": entry, "operationId": attempt["operationId"], "stepId": step_id, "attemptId": attempt_id}
         else:
-            if state["reserved"].get(fact["id"]) != "toolResult":
-                fail("INVALID_REFERENCE", line, seq)
-            exact(entry, ["type", "stepId", "message", "toolName", "toolStartedId", "result"], "INVALID_FACT", line, seq)
+            pre_execution = "assistantEntryId" in entry or "toolIndex" in entry
+            exact(entry, ["type", "stepId", "assistantEntryId", "toolIndex", "message", "toolName", "result"] if pre_execution else ["type", "stepId", "message", "toolName", "toolStartedId", "result"], "INVALID_FACT", line, seq)
             step_id = uuid(entry.get("stepId"), "INVALID_FACT", line, seq)
-            started_id = uuid(entry.get("toolStartedId"), "INVALID_FACT", line, seq)
             result = obj(entry.get("result"), "INVALID_FACT", line, seq)
             exact(result, ["type", "reason"], "INVALID_FACT", line, seq)
-            if result.get("type") not in ("success", "error", "synthetic"):
-                fail("INVALID_FACT", line, seq)
-            if result["type"] == "synthetic" and result.get("reason") not in ("invalidArguments", "unknownTool", "truncated", "aborted", "interrupted"):
-                fail("INVALID_FACT", line, seq)
-            if result["type"] != "synthetic" and "reason" in result:
-                fail("INVALID_FACT", line, seq)
-            started = state["tools"].get(started_id)
-            if not started or started["stepId"] != step_id or started["resultEntryId"] != fact["id"] or started["toolCallId"] != message["tool_call_id"] or started["toolName"] != entry.get("toolName") or started["status"] != "pending":
-                fail("INVALID_REFERENCE", line, seq)
-            started["status"] = "completed"
-            del state["reserved"][fact["id"]]
-            info = {"entry": entry, "operationId": started["operationId"], "stepId": started["stepId"]}
+            tool_name = text(entry.get("toolName"), "INVALID_FACT", line, seq)
+            if pre_execution:
+                reason = result.get("reason")
+                if result.get("type") != "synthetic" or reason not in ("invalidArguments", "unknownTool", "truncated", "aborted"):
+                    fail("INVALID_FACT", line, seq)
+                assistant_id = uuid(entry.get("assistantEntryId"), "INVALID_FACT", line, seq)
+                tool_index = safe_int(entry.get("toolIndex"), "INVALID_FACT", line, seq)
+                assistant_info = state["entries"].get(assistant_id)
+                assistant = assistant_info.get("entry") if assistant_info else None
+                operation = state["operation"]
+                if not assistant or assistant.get("type") != "message" or assistant_info.get("stepId") != step_id or operation["kind"] != "run" or assistant_info.get("operationId") != operation["operationId"]:
+                    fail("INVALID_REFERENCE", line, seq)
+                calls = parse_message(assistant.get("message"), line, seq).get("tool_calls", [])
+                call = calls[tool_index] if tool_index < len(calls) else None
+                if not call or call["id"] != message["tool_call_id"] or call["function"]["name"] != tool_name:
+                    fail("INVALID_REFERENCE", line, seq)
+                pair = f"{assistant_id}:{tool_index}"
+                if pair in state["toolPairs"]:
+                    fail("INVALID_TRANSITION", line, seq)
+                validate_synthetic_content(reason, message["content"], line, seq)
+                state["toolPairs"].add(pair)
+                info = {"entry": entry, "operationId": assistant_info["operationId"], "stepId": step_id}
+            else:
+                if state["reserved"].get(fact["id"]) != "toolResult":
+                    fail("INVALID_REFERENCE", line, seq)
+                result_type = result.get("type")
+                if result_type not in ("success", "error", "synthetic"):
+                    fail("INVALID_FACT", line, seq)
+                if result_type == "synthetic":
+                    if result.get("reason") != "interrupted":
+                        fail("INVALID_FACT", line, seq)
+                    validate_synthetic_content("interrupted", message["content"], line, seq)
+                elif "reason" in result:
+                    fail("INVALID_FACT", line, seq)
+                started_id = uuid(entry.get("toolStartedId"), "INVALID_FACT", line, seq)
+                started = state["tools"].get(started_id)
+                if not started or started["stepId"] != step_id or started["resultEntryId"] != fact["id"] or started["toolCallId"] != message["tool_call_id"] or started["toolName"] != tool_name or started["status"] != "pending":
+                    fail("INVALID_REFERENCE", line, seq)
+                started["status"] = "completed"
+                del state["reserved"][fact["id"]]
+                info = {"entry": entry, "operationId": started["operationId"], "stepId": started["stepId"]}
         state["transcript"].append(message)
         state["activeContext"].append(message)
         state["activeContextThroughEntryId"] = fact["id"]
@@ -338,6 +403,11 @@ def apply_record(state: dict[str, Any], fact: dict[str, Any], line: int):
         input_id = uuid(record.get("inputThroughEntryId"), "INVALID_FACT", line, seq)
         result_id = reserve(state, record.get("resultEntryId"), line, seq, "compactionResult")
         if input_id not in state["entries"]:
+            fail("INVALID_REFERENCE", line, seq)
+        source_digest_value = record.get("sourceDigest")
+        if not isinstance(source_digest_value, str) or not DIGEST.fullmatch(source_digest_value):
+            fail("INVALID_FACT", line, seq)
+        if source_digest(state, input_id) != source_digest_value:
             fail("INVALID_REFERENCE", line, seq)
         state["operations"][operation_id] = {"kind": "compaction", "finished": False, "inputThroughEntryId": input_id, "resultEntryId": result_id}
         state["operation"] = {"kind": "compaction", "operationId": operation_id, "inputThroughEntryId": input_id, "resultEntryId": result_id, "abortRequested": False}

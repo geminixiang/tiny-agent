@@ -439,6 +439,7 @@ fn canonical_string(value: &str) -> Result<String> {
 
 fn canonical_configuration(value: &Value) -> Result<String> {
     match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(value.to_string()),
         Value::String(value) => canonical_string(value),
         Value::Array(values) => Ok(format!(
             "[{}]",
@@ -463,7 +464,6 @@ fn canonical_configuration(value: &Value) -> Result<String> {
                     .join(",")
             ))
         }
-        _ => fail(CorruptionCode::InvalidFact, 0, None),
     }
 }
 
@@ -618,6 +618,65 @@ fn operation_id(operation: &OperationState) -> Option<&str> {
     }
 }
 
+const SYNTHETIC_CONTENT: [(&str, &str); 5] = [
+    (
+        "invalidArguments",
+        "Error: Tool arguments were invalid; the tool was not executed.",
+    ),
+    (
+        "unknownTool",
+        "Error: Unknown tool; the tool was not executed.",
+    ),
+    (
+        "truncated",
+        "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.",
+    ),
+    ("aborted", "Operation aborted before execution."),
+    (
+        "interrupted",
+        "Operation interrupted after execution status became unknown; the tool was not replayed.",
+    ),
+];
+
+fn synthetic_content(reason: &str) -> Option<&'static str> {
+    SYNTHETIC_CONTENT
+        .iter()
+        .find(|(name, _)| *name == reason)
+        .map(|(_, content)| *content)
+}
+
+fn canonical_value(value: &Value) -> Result<String> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(value.to_string()),
+        _ => canonical_configuration(value),
+    }
+}
+
+fn source_digest(state: &InternalState, input_id: &str) -> Result<String> {
+    let mut source = Vec::new();
+    for source_id in &state.entry_order {
+        let entry = &state.entries[source_id].entry;
+        if entry.get("type").and_then(Value::as_str) == Some("message") {
+            source
+                .push(serde_json::json!({"sourceEntryId": source_id, "message": entry["message"]}));
+        }
+        if source_id == input_id {
+            break;
+        }
+    }
+    Ok(format!(
+        "sha256:{:x}",
+        Sha256::digest(canonical_value(&Value::Array(source))?.as_bytes())
+    ))
+}
+
+fn validate_synthetic_content(reason: &str, content: &str, line: usize, seq: u64) -> Result<()> {
+    if synthetic_content(reason) != Some(content) {
+        return fail(CorruptionCode::InvalidTranscript, line, Some(seq));
+    }
+    Ok(())
+}
+
 fn apply_entry(
     state: &mut InternalState,
     fact: &JsonObject,
@@ -752,11 +811,19 @@ fn apply_message_entry(
         info.step_id = Some(step_id);
         info.attempt_id = Some(attempt_id);
     } else {
-        if state.reserved_ids.get(fact_id).map(String::as_str) != Some("toolResult") {
-            return fail(CorruptionCode::InvalidReference, line, Some(seq));
-        }
-        exact(
-            &entry,
+        let pre_execution =
+            entry.contains_key("assistantEntryId") || entry.contains_key("toolIndex");
+        let keys: &[&str] = if pre_execution {
+            &[
+                "type",
+                "stepId",
+                "assistantEntryId",
+                "toolIndex",
+                "message",
+                "toolName",
+                "result",
+            ]
+        } else {
             &[
                 "type",
                 "stepId",
@@ -764,19 +831,17 @@ fn apply_message_entry(
                 "toolName",
                 "toolStartedId",
                 "result",
-            ],
-            CorruptionCode::InvalidFact,
-            line,
-            Some(seq),
-        )?;
+            ]
+        };
+        exact(&entry, keys, CorruptionCode::InvalidFact, line, Some(seq))?;
         let step_id = id(
             entry.get("stepId"),
             CorruptionCode::InvalidFact,
             line,
             Some(seq),
         )?;
-        let started_id = id(
-            entry.get("toolStartedId"),
+        let tool_name = string(
+            entry.get("toolName"),
             CorruptionCode::InvalidFact,
             line,
             Some(seq),
@@ -794,40 +859,132 @@ fn apply_message_entry(
             line,
             Some(seq),
         )?;
-        if !matches!(
-            result.get("type").and_then(Value::as_str),
-            Some("success" | "error" | "synthetic")
-        ) {
-            return fail(CorruptionCode::InvalidFact, line, Some(seq));
+        if pre_execution {
+            let reason = string(
+                result.get("reason"),
+                CorruptionCode::InvalidFact,
+                line,
+                Some(seq),
+            )?;
+            if result.get("type").and_then(Value::as_str) != Some("synthetic")
+                || !matches!(
+                    reason.as_str(),
+                    "invalidArguments" | "unknownTool" | "truncated" | "aborted"
+                )
+            {
+                return fail(CorruptionCode::InvalidFact, line, Some(seq));
+            }
+            let assistant_id = id(
+                entry.get("assistantEntryId"),
+                CorruptionCode::InvalidFact,
+                line,
+                Some(seq),
+            )?;
+            let tool_index = safe_integer(
+                entry.get("toolIndex"),
+                CorruptionCode::InvalidFact,
+                line,
+                Some(seq),
+                0,
+            )?;
+            let assistant_info = state.entries.get(&assistant_id).ok_or(SessionCorruption {
+                code: CorruptionCode::InvalidReference,
+                line,
+                seq: Some(seq),
+            })?;
+            if assistant_info.step_id.as_deref() != Some(&step_id)
+                || !matches!(&state.public.operation, OperationState::Run { operation_id, .. } if assistant_info.operation_id.as_deref() == Some(operation_id))
+            {
+                return fail(CorruptionCode::InvalidReference, line, Some(seq));
+            }
+            let assistant = parse_message(assistant_info.entry.get("message").unwrap(), line, seq)?;
+            let call = assistant
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .and_then(|calls| calls.get(tool_index as usize));
+            if call.and_then(|call| call.get("id")).and_then(Value::as_str)
+                != message.get("tool_call_id").and_then(Value::as_str)
+                || call
+                    .and_then(|call| call.pointer("/function/name"))
+                    .and_then(Value::as_str)
+                    != Some(&tool_name)
+            {
+                return fail(CorruptionCode::InvalidReference, line, Some(seq));
+            }
+            let pair = format!("{assistant_id}:{tool_index}");
+            if !state.tool_pairs.insert(pair) {
+                return fail(CorruptionCode::InvalidTransition, line, Some(seq));
+            }
+            validate_synthetic_content(
+                &reason,
+                message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                line,
+                seq,
+            )?;
+            info.operation_id = assistant_info.operation_id.clone();
+            info.step_id = Some(step_id);
+        } else {
+            if state.reserved_ids.get(fact_id).map(String::as_str) != Some("toolResult") {
+                return fail(CorruptionCode::InvalidReference, line, Some(seq));
+            }
+            let result_type = result.get("type").and_then(Value::as_str);
+            if !matches!(result_type, Some("success" | "error" | "synthetic")) {
+                return fail(CorruptionCode::InvalidFact, line, Some(seq));
+            }
+            if result_type == Some("synthetic") {
+                if result.get("reason").and_then(Value::as_str) != Some("interrupted") {
+                    return fail(CorruptionCode::InvalidFact, line, Some(seq));
+                }
+                validate_synthetic_content(
+                    "interrupted",
+                    message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    line,
+                    seq,
+                )?;
+            } else if result.contains_key("reason") {
+                return fail(CorruptionCode::InvalidFact, line, Some(seq));
+            }
+            let started_id = id(
+                entry.get("toolStartedId"),
+                CorruptionCode::InvalidFact,
+                line,
+                Some(seq),
+            )?;
+            let call_id = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let started = state.tools.get_mut(&started_id).ok_or(SessionCorruption {
+                code: CorruptionCode::InvalidReference,
+                line,
+                seq: Some(seq),
+            })?;
+            if started.step_id != step_id
+                || started.result_entry_id != fact_id
+                || started.tool_call_id != call_id
+                || started.tool_name != tool_name
+                || started.status != "pending"
+            {
+                return fail(CorruptionCode::InvalidReference, line, Some(seq));
+            }
+            started.status = "completed".into();
+            if let OperationState::Run { tool_calls, .. } = &mut state.public.operation
+                && let Some(tool) = tool_calls
+                    .iter_mut()
+                    .find(|tool| tool.tool_started_id == started_id)
+            {
+                tool.status = "completed".into();
+            }
+            state.reserved_ids.remove(fact_id);
+            info.operation_id = Some(started.operation_id.clone());
+            info.step_id = Some(step_id);
         }
-        let call_id = message
-            .get("tool_call_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let started = state.tools.get_mut(&started_id).ok_or(SessionCorruption {
-            code: CorruptionCode::InvalidReference,
-            line,
-            seq: Some(seq),
-        })?;
-        if started.step_id != step_id
-            || started.result_entry_id != fact_id
-            || started.tool_call_id != call_id
-            || entry.get("toolName").and_then(Value::as_str) != Some(started.tool_name.as_str())
-            || started.status != "pending"
-        {
-            return fail(CorruptionCode::InvalidReference, line, Some(seq));
-        }
-        started.status = "completed".into();
-        if let OperationState::Run { tool_calls, .. } = &mut state.public.operation
-            && let Some(tool) = tool_calls
-                .iter_mut()
-                .find(|tool| tool.tool_started_id == started_id)
-        {
-            tool.status = "completed".into();
-        }
-        state.reserved_ids.remove(fact_id);
-        info.operation_id = Some(started.operation_id.clone());
-        info.step_id = Some(step_id);
     }
     state.public.transcript.push(message.clone());
     state.public.active_context.push(message);
@@ -1126,6 +1283,17 @@ fn apply_compaction_started(
         "compactionResult",
     )?;
     if !state.entries.contains_key(&input_id) {
+        return fail(CorruptionCode::InvalidReference, line, Some(seq));
+    }
+    let source_digest_value = string(
+        record.get("sourceDigest"),
+        CorruptionCode::InvalidFact,
+        line,
+        Some(seq),
+    )?;
+    if !valid_digest(&source_digest_value)
+        || source_digest(state, &input_id).ok().as_deref() != Some(&source_digest_value)
+    {
         return fail(CorruptionCode::InvalidReference, line, Some(seq));
     }
     state.operations.insert(

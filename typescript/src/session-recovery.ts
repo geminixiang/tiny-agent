@@ -20,6 +20,16 @@ export type CurrentConfiguration = {
     environmentIdentity: string;
     tools: CurrentTool[];
 };
+export type SyntheticResult = {
+    assistantEntryId: string;
+    toolIndex: number;
+    toolCallId: string;
+    toolName: string;
+    toolStartedId?: string;
+    resultEntryId?: string;
+    reason: SyntheticReason;
+    content: string;
+};
 export type RecoveryPlan =
     | {
           type: "finish";
@@ -51,21 +61,14 @@ export type RecoveryPlan =
           reason: "configuration_changed" | "environment_changed" | "replay_declaration_changed" | "attempts_exhausted";
       };
 
-type SyntheticResult = {
-    toolCallId: string;
-    toolName: string;
-    toolStartedId?: string;
-    resultEntryId?: string;
-    reason: SyntheticReason;
-    content: string;
-};
-
 function toolDeclaration(current: CurrentConfiguration, name: string) {
     return current.tools.find((tool) => tool.name === name);
 }
 
-function synthetic(tool: ToolCallState, reason: SyntheticReason): SyntheticResult {
+function startedSynthetic(tool: ToolCallState, reason: "interrupted"): SyntheticResult {
     return {
+        assistantEntryId: tool.assistantEntryId,
+        toolIndex: tool.toolIndex,
         toolCallId: tool.toolCallId,
         toolName: tool.toolName,
         toolStartedId: tool.toolStartedId,
@@ -75,30 +78,61 @@ function synthetic(tool: ToolCallState, reason: SyntheticReason): SyntheticResul
     };
 }
 
-function assistantSynthetic(state: SessionState, reason: SyntheticReason): SyntheticResult[] {
-    if (state.operation.kind !== "run" || !state.operation.step?.settledEntryId) return [];
+function assistantCalls(state: SessionState) {
+    if (state.operation.kind !== "run" || !state.operation.step?.settledEntryId) return undefined;
     const message = [...state.transcript]
         .reverse()
         .find((item) => item.role === "assistant" && item.tool_calls?.length);
-    if (!message || message.role !== "assistant") return [];
-    return (message.tool_calls ?? []).map((call) => ({
-        toolCallId: call.id,
-        toolName: call.function.name,
+    if (!message || message.role !== "assistant") return undefined;
+    return { assistantEntryId: state.operation.step.settledEntryId, calls: message.tool_calls ?? [] };
+}
+
+function preExecutionSynthetic(
+    assistantEntryId: string,
+    toolIndex: number,
+    toolCallId: string,
+    toolName: string,
+    reason: Exclude<SyntheticReason, "interrupted">,
+): SyntheticResult {
+    return {
+        assistantEntryId,
+        toolIndex,
+        toolCallId,
+        toolName,
         reason,
         content: SYNTHETIC_CONTENT[reason],
-    }));
+    };
 }
 
 export function planRecovery(state: SessionState, current: CurrentConfiguration): RecoveryPlan {
     const operation = state.operation;
     if (operation.kind === "idle") return { type: "finish", outcome: "completed", completion: "normal" };
 
+    const assistant = assistantCalls(state);
     const pending = operation.kind === "run" ? operation.toolCalls.filter((tool) => tool.status === "pending") : [];
     if (operation.abortRequested) {
         if (operation.step?.status === "attempting")
             return { type: "closeAttempt", error: { code: "aborted", message: "Operation aborted" } };
-        if (pending.length)
-            return { type: "appendSynthetic", results: pending.map((tool) => synthetic(tool, "aborted")) };
+        if (operation.kind === "run" && assistant) {
+            const started = new Map(
+                operation.toolCalls.map((tool) => [`${tool.assistantEntryId}:${tool.toolIndex}`, tool]),
+            );
+            const results = assistant.calls.flatMap((call, toolIndex) => {
+                const tool = started.get(`${assistant.assistantEntryId}:${toolIndex}`);
+                if (tool?.status === "pending") return [startedSynthetic(tool, "interrupted")];
+                if (tool) return [];
+                return [
+                    preExecutionSynthetic(
+                        assistant.assistantEntryId,
+                        toolIndex,
+                        call.id,
+                        call.function.name,
+                        "aborted",
+                    ),
+                ];
+            });
+            if (results.length) return { type: "appendSynthetic", results };
+        }
         return { type: "finish", outcome: "aborted" };
     }
 
@@ -133,33 +167,36 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
     if (operation.kind === "compaction")
         return { type: "finish", outcome: "completed", finalEntryId: operation.resultEntryId };
 
-    if (step.stopReason === "length") {
-        const results = assistantSynthetic(state, "truncated");
-        if (results.length) return { type: "appendSynthetic", results };
-        return { type: "finish", outcome: "completed", completion: "truncated", finalEntryId: step.settledEntryId };
+    if (step.stopReason === "length" && assistant) {
+        return {
+            type: "appendSynthetic",
+            results: assistant.calls.map((call, toolIndex) =>
+                preExecutionSynthetic(assistant.assistantEntryId, toolIndex, call.id, call.function.name, "truncated"),
+            ),
+        };
     }
 
-    const assistant = [...state.transcript].reverse().find((message) => message.role === "assistant");
-    if (!assistant) return { type: "blocked", reason: "configuration_changed" };
-    if (!assistant.tool_calls?.length)
+    if (!assistant)
         return { type: "finish", outcome: "completed", completion: "normal", finalEntryId: step.settledEntryId };
 
-    const untouched = assistant.tool_calls.findIndex(
-        (call) => !operation.toolCalls.some((tool) => tool.toolCallId === call.id),
+    const processed = new Set(operation.toolCalls.map((tool) => `${tool.assistantEntryId}:${tool.toolIndex}`));
+    const untouched = assistant.calls.findIndex(
+        (_, toolIndex) => !processed.has(`${assistant.assistantEntryId}:${toolIndex}`),
     );
     if (untouched >= 0) {
-        const call = assistant.tool_calls[untouched];
+        const call = assistant.calls[untouched];
         const declaration = toolDeclaration(current, call.function.name);
         if (!declaration)
             return {
                 type: "appendSynthetic",
                 results: [
-                    {
-                        toolCallId: call.id,
-                        toolName: call.function.name,
-                        reason: "unknownTool",
-                        content: SYNTHETIC_CONTENT.unknownTool,
-                    },
+                    preExecutionSynthetic(
+                        assistant.assistantEntryId,
+                        untouched,
+                        call.id,
+                        call.function.name,
+                        "unknownTool",
+                    ),
                 ],
             };
         let args: unknown;
@@ -172,18 +209,19 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
             return {
                 type: "appendSynthetic",
                 results: [
-                    {
-                        toolCallId: call.id,
-                        toolName: call.function.name,
-                        reason: "invalidArguments",
-                        content: SYNTHETIC_CONTENT.invalidArguments,
-                    },
+                    preExecutionSynthetic(
+                        assistant.assistantEntryId,
+                        untouched,
+                        call.id,
+                        call.function.name,
+                        "invalidArguments",
+                    ),
                 ],
             };
         return {
             type: "startTool",
             mode: "start",
-            assistantEntryId: step.settledEntryId!,
+            assistantEntryId: assistant.assistantEntryId,
             toolIndex: untouched,
             toolName: call.function.name,
             arguments: args as Record<string, unknown>,
@@ -197,7 +235,7 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
             attempt: 1,
             contextThroughEntryId: operation.toolCalls.at(-1)!.resultEntryId,
         };
-    const tool = pending[0];
+    const tool = pending.sort((left, right) => left.toolIndex - right.toolIndex)[0];
     if (tool.environmentIdentity !== current.environmentIdentity)
         return { type: "blocked", reason: "environment_changed" };
     const declaration = toolDeclaration(current, tool.toolName);
@@ -215,5 +253,5 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
         };
     if (tool.replay === "safe" && (declaration.replay !== "safe" || declaration.replayKey !== tool.replayKey))
         return { type: "blocked", reason: "replay_declaration_changed" };
-    return { type: "appendSynthetic", results: [synthetic(tool, "interrupted")] };
+    return { type: "appendSynthetic", results: [startedSynthetic(tool, "interrupted")] };
 }

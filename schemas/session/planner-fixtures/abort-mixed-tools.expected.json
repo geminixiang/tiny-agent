@@ -10,6 +10,14 @@
             "resultEntryId": "018f0000-0000-7000-8000-00000000000a",
             "reason": "interrupted",
             "content": "Operation interrupted after execution status became unknown; the tool was not replayed."
+        },
+        {
+            "assistantEntryId": "018f0000-0000-7000-8000-000000000008",
+            "toolIndex": 1,
+            "toolCallId": "call_2",
+            "toolName": "read",
+            "reason": "aborted",
+            "content": "Operation aborted before execution."
         }
     ]
 }
