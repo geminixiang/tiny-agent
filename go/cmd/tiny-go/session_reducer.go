@@ -104,15 +104,16 @@ type sessionMessageFact struct {
 }
 
 type sessionState struct {
-	Header         sessionHeader    `json:"header"`
-	Transcript     []sessionMessage `json:"transcript"`
-	ActiveContext  []sessionMessage `json:"activeContext"`
-	Usage          sessionUsage     `json:"usage"`
-	Operation      sessionOperation `json:"operation"`
-	RepairedLength int              `json:"repairedLength"`
-	entryIDs       []string
-	resultPairs    map[string]bool
-	messageFacts   []sessionMessageFact
+	Header                      sessionHeader    `json:"header"`
+	Transcript                  []sessionMessage `json:"transcript"`
+	ActiveContext               []sessionMessage `json:"activeContext"`
+	Usage                       sessionUsage     `json:"usage"`
+	Operation                   sessionOperation `json:"operation"`
+	RepairedLength              int              `json:"repairedLength"`
+	entryIDs                    []string
+	resultPairs                 map[string]bool
+	messageFacts                []sessionMessageFact
+	activeContextThroughEntryID string
 }
 
 type sessionCorruption struct {
@@ -1682,5 +1683,5 @@ func reduceSession(data []byte) (sessionState, error) {
 			}
 		}
 	}
-	return sessionState{Header: s.Header, Transcript: clean(s.Transcript), ActiveContext: clean(s.ActiveContext), Usage: s.Usage, Operation: s.Operation, RepairedLength: s.RepairedLength, entryIDs: entryIDs, resultPairs: resultPairs, messageFacts: messageFacts}, nil
+	return sessionState{Header: s.Header, Transcript: clean(s.Transcript), ActiveContext: clean(s.ActiveContext), Usage: s.Usage, Operation: s.Operation, RepairedLength: s.RepairedLength, entryIDs: entryIDs, resultPairs: resultPairs, messageFacts: messageFacts, activeContextThroughEntryID: s.ActiveContextThroughEntryID}, nil
 }

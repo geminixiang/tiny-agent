@@ -170,6 +170,12 @@ func planRecovery(state sessionState, current currentConfiguration) recoveryPlan
 			continue
 		}
 		callID, name, rawArguments := recoveryCall(raw)
+		if step.ConfigurationDigest != current.ConfigurationDigest {
+			return recoveryPlan{"type": "blocked", "reason": "configuration_changed"}
+		}
+		if state.Header.EnvironmentIdentity != current.EnvironmentIdentity {
+			return recoveryPlan{"type": "blocked", "reason": "environment_changed"}
+		}
 		declaration := currentToolByName(current, name)
 		if declaration == nil {
 			return recoveryPlan{"type": "appendSynthetic", "results": []any{syntheticResult(assistantID, index, callID, name, "unknownTool")}}
@@ -182,8 +188,7 @@ func planRecovery(state sessionState, current currentConfiguration) recoveryPlan
 	}
 
 	if len(pending) == 0 {
-		last := operation.ToolCalls[len(operation.ToolCalls)-1]
-		return recoveryPlan{"type": "startStep", "stepKind": "assistant", "attempt": 1, "contextThroughEntryId": last.ResultEntryID}
+		return recoveryPlan{"type": "startStep", "stepKind": "assistant", "attempt": 1, "contextThroughEntryId": state.activeContextThroughEntryID}
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].ToolIndex < pending[j].ToolIndex })
 	tool := pending[0]

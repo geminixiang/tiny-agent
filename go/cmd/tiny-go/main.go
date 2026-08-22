@@ -574,6 +574,14 @@ func (a *Agent) runAgentLoop(input string) (string, error) {
 		response.StopReason = stop
 		answer := response.Message
 		finish := stop == "stop" && len(answer.ToolCalls) == 0 && strings.TrimSpace(value(answer.Content)) != ""
+		if stop == "stop" && !finish {
+			err := errors.New("Model returned an empty response (finish_reason: stop)")
+			return "", a.settleFailedAssistant(&run, response, err)
+		}
+		if stop == "length" && len(answer.ToolCalls) == 0 {
+			err := errors.New("Model response reached the token limit without tool calls")
+			return "", a.settleFailedAssistant(&run, response, err)
+		}
 		if _, err := a.settleAssistant(&run, response, finish); err != nil {
 			return "", err
 		}
@@ -590,7 +598,7 @@ func (a *Agent) runAgentLoop(input string) (string, error) {
 			return "", errors.New("Model response reached the token limit")
 		}
 		if stop == "stop" {
-			return "", errors.New("Model returned an empty response (finish_reason: stop)")
+			return "", errors.New("invalid empty stop response")
 		}
 		for index, call := range answer.ToolCalls {
 			args, err := decodeToolArguments(call.Function.Arguments)

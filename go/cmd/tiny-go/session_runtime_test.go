@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +113,124 @@ func TestDurableRunTruncationPersistsSyntheticWithoutEffect(t *testing.T) {
 	}
 	if state := session.State(); state.Operation.Kind != "idle" {
 		t.Fatalf("recovered state: %+v", state)
+	}
+}
+
+func TestSyntheticOnlyCrashPrefixResumesIdempotently(t *testing.T) {
+	for _, test := range []struct {
+		name, tool, arguments, reason string
+	}{
+		{"unknown-tool", "missing", `{}`, "unknownTool"},
+		{"invalid-arguments", "read", `{`, "invalidArguments"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			agent, session, close := durableAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{}}`))
+			})
+			defer close()
+			run, err := agent.startDurableRun("inspect")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := agent.startAttempt(&run, "assistant", 1); err != nil {
+				t.Fatal(err)
+			}
+			call := ToolCall{ID: "call_1", Type: "function", Function: ToolFunction{Name: test.tool, Arguments: test.arguments}}
+			response := ModelResponse{Message: Message{Role: "assistant", ToolCalls: []ToolCall{call}}, StopReason: "toolUse"}
+			if _, err := agent.settleAssistant(&run, response, false); err != nil {
+				t.Fatal(err)
+			}
+			if err := agent.appendSynthetic(&run, 0, call, test.reason); err != nil {
+				t.Fatal(err)
+			}
+			restored := newAgent(nil, session, "")
+			restored.Endpoint, restored.Client = agent.Endpoint, agent.Client
+			if err := restored.restoreSession(); err != nil {
+				t.Fatal(err)
+			}
+			finished, _ := os.ReadFile(session.Path)
+			if err := restored.restoreSession(); err != nil {
+				t.Fatal(err)
+			}
+			again, _ := os.ReadFile(session.Path)
+			if requests != 1 || string(finished) != string(again) || session.State().Operation.Kind != "idle" {
+				t.Fatalf("requests=%d state=%+v", requests, session.State())
+			}
+		})
+	}
+}
+
+func TestUnstartedToolMismatchBlocksWithoutAppendOrEffect(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Agent, *testing.T)
+		reason string
+	}{
+		{"configuration", func(agent *Agent, _ *testing.T) { agent.Tools[0].Description += " changed" }, "configuration_changed"},
+		{"implementation", func(agent *Agent, _ *testing.T) { agent.Tools[0].ReplayKey += ":v2" }, "configuration_changed"},
+		{"environment", func(_ *Agent, t *testing.T) { t.Setenv("TINY_AGENT_ENVIRONMENT_IDENTITY", "changed-environment") }, "environment_changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			effects := 0
+			agent, session, close := durableAgent(t, func(http.ResponseWriter, *http.Request) {})
+			defer close()
+			run, err := agent.startDurableRun("inspect")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := agent.startAttempt(&run, "assistant", 1); err != nil {
+				t.Fatal(err)
+			}
+			call := ToolCall{ID: "call_1", Type: "function", Function: ToolFunction{Name: "read", Arguments: `{"path":"x"}`}}
+			if _, err := agent.settleAssistant(&run, ModelResponse{Message: Message{Role: "assistant", ToolCalls: []ToolCall{call}}, StopReason: "toolUse"}, false); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.ReadFile(session.Path)
+			restored := newAgent(nil, session, "")
+			for index := range restored.Tools {
+				restored.Tools[index].Execute = func(context.Context, map[string]any) (string, error) { effects++; return "effect", nil }
+			}
+			test.mutate(restored, t)
+			if err := restored.restoreSession(); err == nil || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("error=%v", err)
+			}
+			after, _ := os.ReadFile(session.Path)
+			if string(before) != string(after) || effects != 0 {
+				t.Fatalf("appended=%v effects=%d", string(before) != string(after), effects)
+			}
+		})
+	}
+}
+
+func TestInvalidTerminalModelResponsesFinishDurably(t *testing.T) {
+	for _, test := range []struct{ name, content, finish, message string }{
+		{"whitespace-stop", "   ", "stop", "empty response"},
+		{"length-without-calls", "partial", "length", "token limit without tool calls"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			agent, session, close := durableAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": test.content}, "finish_reason": test.finish}}, "usage": map[string]any{"prompt_tokens": 9, "completion_tokens": 2}})
+			})
+			defer close()
+			if _, err := agent.runAgentLoop("inspect"); err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("error=%v", err)
+			}
+			state := session.State()
+			if state.Operation.Kind != "idle" || state.Usage.Input != 9 || state.Usage.Output != 2 {
+				t.Fatalf("state=%+v", state)
+			}
+			before, _ := os.ReadFile(session.Path)
+			restored := newAgent(nil, session, "")
+			if err := restored.restoreSession(); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := os.ReadFile(session.Path)
+			if string(before) != string(after) {
+				t.Fatal("idle resume appended")
+			}
+		})
 	}
 }
 

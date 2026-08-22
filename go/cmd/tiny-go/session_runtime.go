@@ -43,12 +43,15 @@ func (a *Agent) currentConfiguration() (sessionConfiguration, currentConfigurati
 	}
 	declarations := make([]sessionToolDeclaration, 0, len(a.Tools))
 	currentTools := make([]currentTool, 0, len(a.Tools))
+	implementationIdentities := make([]any, 0, len(a.Tools))
 	for _, tool := range a.Tools {
 		definition := digestValue(map[string]any{"name": tool.Name, "description": tool.Description, "parameters": tool.Parameters})
 		declarations = append(declarations, sessionToolDeclaration{Name: tool.Name, DefinitionDigest: definition})
 		currentTools = append(currentTools, currentTool{Name: tool.Name, DefinitionDigest: definition, Replay: tool.Replay, ReplayKey: tool.ReplayKey})
+		implementationIdentities = append(implementationIdentities, map[string]any{"name": tool.Name, "replayKey": tool.ReplayKey})
 	}
-	configuration := sessionConfiguration{Model: model(), SystemPromptDigest: digestValue(value(a.Messages[0].Content)), Tools: declarations, AdapterIdentity: "openrouter:chat-completions:v1", RoutingIdentity: "openrouter:" + model(), OutputOptionsDigest: zeroDigest}
+	adapterIdentity := "openrouter:chat-completions:v1;tool-implementations=" + digestValue(implementationIdentities)
+	configuration := sessionConfiguration{Model: model(), SystemPromptDigest: digestValue(value(a.Messages[0].Content)), Tools: declarations, AdapterIdentity: adapterIdentity, RoutingIdentity: "openrouter:" + model(), OutputOptionsDigest: zeroDigest}
 	digest := sessionConfigurationDigest(configuration)
 	return configuration, currentConfiguration{ConfigurationDigest: digest, EnvironmentIdentity: identity, Tools: currentTools}, nil
 }
@@ -156,6 +159,19 @@ func (a *Agent) failAttempt(run durableRun, code string, err error, finish bool)
 	return a.failOperationAttempt(run, "run", code, err, finish)
 }
 
+func (a *Agent) settleFailedAssistant(run *durableRun, response ModelResponse, err error) error {
+	if a.Session == nil {
+		return err
+	}
+	entryID := a.Session.NewID(time.Now())
+	facts := []map[string]any{
+		{"kind": "entry", "id": entryID, "entry": map[string]any{"type": "message", "stepId": run.StepID, "attemptId": run.AttemptID, "stopReason": response.StopReason, "message": messageMap(response.Message)}},
+		{"kind": "usage", "operationId": run.OperationID, "attemptId": run.AttemptID, "usage": map[string]any{"input": response.Usage.Input, "output": response.Usage.Output, "cacheRead": response.Usage.CacheRead, "cacheWrite": response.Usage.CacheWrite}},
+		{"kind": "record", "record": map[string]any{"type": "operationFinished", "operationId": run.OperationID, "operationKind": "run", "outcome": "failed", "error": map[string]any{"code": "model_error", "message": err.Error()}}},
+	}
+	return errors.Join(err, a.Session.Commit(facts))
+}
+
 func (a *Agent) settleAssistant(run *durableRun, response ModelResponse, finish bool) (string, error) {
 	if a.Session == nil {
 		return "", nil
@@ -216,7 +232,30 @@ func (a *Agent) appendSynthetic(run *durableRun, index int, call ToolCall, reaso
 	return nil
 }
 
+func (a *Agent) validateUnstartedTool() error {
+	if a.Session == nil {
+		return nil
+	}
+	state := a.Session.State()
+	_, current, err := a.currentConfiguration()
+	if err != nil {
+		return err
+	}
+	if state.Operation.Step == nil || state.Operation.Step.ConfigurationDigest != current.ConfigurationDigest {
+		return errors.New("Session recovery blocked: configuration_changed")
+	}
+	if state.Header.EnvironmentIdentity != current.EnvironmentIdentity {
+		return errors.New("Session recovery blocked: environment_changed")
+	}
+	return nil
+}
+
 func (a *Agent) executeDurableTool(run *durableRun, index int, call ToolCall, selected *Tool, args map[string]any, replay *sessionToolState) error {
+	if replay == nil {
+		if err := a.validateUnstartedTool(); err != nil {
+			return err
+		}
+	}
 	startedID, resultID := "", ""
 	if a.Session != nil {
 		identity, err := environmentIdentity()
@@ -428,8 +467,17 @@ func (a *Agent) recoverStep(plan recoveryPlan, attempt int) error {
 	if stop == "tool_calls" || stop == "function_call" {
 		stop = "toolUse"
 	}
+	if stop != "stop" && stop != "toolUse" && stop != "length" {
+		return a.failAttempt(run, "model_error", fmt.Errorf("unsupported finish_reason: %s", response.StopReason), true)
+	}
 	response.StopReason = stop
 	finish := stop == "stop" && len(response.Message.ToolCalls) == 0 && strings.TrimSpace(value(response.Message.Content)) != ""
+	if stop == "stop" && !finish {
+		return a.settleFailedAssistant(&run, response, errors.New("Model returned an empty response (finish_reason: stop)"))
+	}
+	if stop == "length" && len(response.Message.ToolCalls) == 0 {
+		return a.settleFailedAssistant(&run, response, errors.New("Model response reached the token limit without tool calls"))
+	}
 	_, err = a.settleAssistant(&run, response, finish)
 	return err
 }
