@@ -15,7 +15,7 @@ from unittest.mock import patch
 from tiny_agent import agent as tiny
 from tiny_agent import cli
 from tiny_agent.cli import Terminal
-from tiny_agent.session_reducer import configuration_digest, reduce_session
+from tiny_agent.session_reducer import configuration_digest, reduce_session, source_digest
 
 FIXTURES = Path(__file__).resolve().parents[2] / "schemas/session/fixtures"
 
@@ -144,6 +144,76 @@ class TinyAgentTest(unittest.TestCase):
             mismatch.configuration_digest = "sha256:" + "f" * 64; before = mismatch_session.path.read_bytes()
             with self.assertRaisesRegex(RuntimeError, "configuration_changed"): mismatch.resume_session()
             self.assertEqual(mismatch_session.path.read_bytes(), before); mismatch_session.close()
+
+    def _completed_conversation(self, session, turns=4):
+        replies = iter([
+            {"choices": [{"message": {"role": "assistant", "content": f"answer {index}"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 10, "completion_tokens": 2}}
+            for index in range(turns)
+        ])
+        agent = tiny.Agent(session=session, requester=lambda *_: next(replies))
+        for index in range(turns): self.assertEqual(agent.run_agent_loop(f"question {index}"), f"answer {index}")
+        return agent
+
+    def test_durable_compaction_and_idle_resume(self):
+        session = tiny.Session.create(tiny.ROOT); agent = self._completed_conversation(session)
+        agent.requester = lambda *_: {"choices": [{"message": {"role": "assistant", "content": "durable summary"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20, "completion_tokens": 3}}
+        self.assertEqual(agent.compact(), "Compacted 2 messages (kept last 6).")
+        state = session.load()
+        self.assertEqual(state["operation"]["kind"], "idle")
+        self.assertEqual(state["activeContext"][0], {"role": "user", "content": "[Compacted history]\ndurable summary"})
+        self.assertEqual(state["usage"], {"input": 60, "output": 11, "cacheRead": 0, "cacheWrite": 0})
+        facts = agent._facts()
+        self.assertEqual([fact.get("record", {}).get("type") for fact in facts if fact.get("kind") == "record"][-3:], ["compactionStarted", "stepAttempt", "operationFinished"])
+        compact = next(fact for fact in reversed(facts) if fact.get("kind") == "entry" and fact["entry"].get("type") == "compaction")
+        self.assertEqual([item["message"] for item in compact["entry"]["retainedTail"]], agent.messages[2:])
+        session_id = session.id; session.close()
+        reopened = tiny.Session.open(session_id, tiny.ROOT); restored = tiny.Agent(session=reopened); restored.resume_session()
+        self.assertEqual(restored.messages[1:], state["activeContext"]); reopened.close()
+
+    def test_durable_compaction_abort(self):
+        session = tiny.Session.create(tiny.ROOT); agent = self._completed_conversation(session)
+        started = threading.Event()
+        def hanging(_, cancelled): started.set(); cancelled.wait(); raise InterruptedError
+        agent.requester = hanging; result = []
+        thread = threading.Thread(target=lambda: result.append(agent.compact())); thread.start(); started.wait(); agent.abort(); thread.join(2)
+        self.assertEqual(result, ["Compaction aborted."])
+        self.assertEqual(session.load()["operation"]["kind"], "idle")
+        facts = agent._facts()
+        self.assertTrue(any(fact.get("record", {}).get("type") == "abortRequested" and fact["record"]["operationKind"] == "compaction" for fact in facts))
+        self.assertFalse(any(fact.get("entry", {}).get("type") == "compaction" for fact in facts)); session.close()
+
+    def test_recovers_open_and_committed_compaction_idempotently(self):
+        session = tiny.Session.create(tiny.ROOT); agent = self._completed_conversation(session)
+        state = session.load(); source = agent._message_facts(); input_id = source[-1]["id"]; compacted, retained = source[:2], source[2:]
+        operation_id, result_id = tiny.uuid7(), tiny.uuid7()
+        session.append({"kind": "record", "record": {
+            "type": "compactionStarted", "operationId": operation_id, "operationKind": "compaction",
+            "inputThroughEntryId": input_id, "resultEntryId": result_id,
+            "compactedEntryIds": [item["id"] for item in compacted], "retainedEntryIds": [item["id"] for item in retained],
+            "sourceDigest": source_digest(agent._full_state(), input_id),
+        }})
+        step_id, attempt_id = agent._attempt(operation_id, input_id, "compaction")
+        session_id = session.id; session.close()
+        blocked = tiny.Session.open(session_id, tiny.ROOT); mismatch = tiny.Agent(session=blocked)
+        before = blocked.path.read_bytes(); mismatch.configuration_digest = "sha256:" + "f" * 64
+        with self.assertRaisesRegex(RuntimeError, "configuration_changed"): mismatch.resume_session()
+        self.assertEqual(blocked.path.read_bytes(), before); blocked.close()
+
+        reopened = tiny.Session.open(session_id, tiny.ROOT)
+        recovered = tiny.Agent(session=reopened, requester=lambda *_: {"choices": [{"message": {"role": "assistant", "content": "recovered summary"}, "finish_reason": "stop"}], "usage": {}})
+        recovered.configuration = agent.configuration; recovered.configuration_digest = agent.configuration_digest
+        recovered.resume_session(); self.assertEqual(reopened.load()["operation"]["kind"], "idle")
+        before = reopened.path.read_bytes(); self.assertIsNone(recovered.resume_session()); self.assertEqual(reopened.path.read_bytes(), before)
+
+        # Simulate a crash after the compaction entry was committed but before operationFinished.
+        lines = before.splitlines(keepends=True); reopened.close()
+        path = tiny.ROOT / ".tiny-agent/sessions" / next(item.name for item in (tiny.ROOT / ".tiny-agent/sessions").iterdir() if session_id in item.name)
+        path.write_bytes(b"".join(lines[:-1]))
+        unfinished = tiny.Session.open(session_id, tiny.ROOT); finisher = tiny.Agent(session=unfinished)
+        finisher.configuration = agent.configuration; finisher.configuration_digest = agent.configuration_digest
+        finisher.resume_session(); self.assertEqual(unfinished.load()["operation"]["kind"], "idle")
+        finished = unfinished.path.read_bytes(); self.assertIsNone(finisher.resume_session()); self.assertEqual(unfinished.path.read_bytes(), finished)
+        unfinished.close()
 
     def test_model_tool_loop_cache_and_no_tui_log_in_session(self):
         replies = iter([

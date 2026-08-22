@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from .session import Session, environment_identity, uuid7
 from .session_recovery import plan_recovery
-from .session_reducer import configuration_digest
+from .session_reducer import configuration_digest, source_digest
 
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -177,7 +177,7 @@ class Agent:
         if self.cancelled and self.active and self.session and not self.active.get("abortRequested"):
             record = {
                 "type": "abortRequested", "operationId": self.active["operationId"],
-                "operationKind": "run", "phase": self.active["phase"], "reason": "escape",
+                "operationKind": self.active["operationKind"], "phase": self.active["phase"], "reason": "escape",
             }
             if self.active.get("toolCallId"): record["toolCallId"] = self.active["toolCallId"]
             self.session.append({"kind": "record", "record": record})
@@ -187,9 +187,9 @@ class Agent:
             try: self.connection.close()
             except OSError: pass
 
-    def begin(self, operation_id: str, phase: str, tool_call_id: str | None = None) -> threading.Event:
+    def begin(self, operation_id: str, phase: str, tool_call_id: str | None = None, operation_kind: str = "run") -> threading.Event:
         self.cancelled = threading.Event()
-        self.active = {"operationId": operation_id, "phase": phase, "toolCallId": tool_call_id, "abortRequested": False}
+        self.active = {"operationId": operation_id, "operationKind": operation_kind, "phase": phase, "toolCallId": tool_call_id, "abortRequested": False}
         return self.cancelled
 
     def end(self) -> None: self.cancelled = None; self.connection = None; self.active = None
@@ -246,6 +246,10 @@ class Agent:
                 self._restore_projection()
                 continue
             if action["type"] == "startStep":
+                if state["operation"]["kind"] == "compaction":
+                    self._continue_compaction(operation_id, action)
+                    self._restore_projection()
+                    continue
                 answer = self._continue_operation(operation_id, action)
                 self._restore_projection()
                 return answer
@@ -347,8 +351,8 @@ class Agent:
         }})
         return step_id, attempt_id
 
-    def _finish(self, operation_id: str, outcome: str, final_id: str | None = None, completion: str | None = None, error: Exception | None = None) -> None:
-        record = {"type": "operationFinished", "operationId": operation_id, "operationKind": "run", "outcome": outcome}
+    def _finish(self, operation_id: str, outcome: str, final_id: str | None = None, completion: str | None = None, error: Exception | None = None, operation_kind: str = "run") -> None:
+        record = {"type": "operationFinished", "operationId": operation_id, "operationKind": operation_kind, "outcome": outcome}
         if final_id: record["finalEntryId"] = final_id
         if completion: record["completion"] = completion
         if error: record["error"] = {"code": "agent_error", "message": str(error)}
@@ -443,4 +447,96 @@ class Agent:
                 self._finish(operation_id, "aborted"); return "Operation aborted."
 
     def compact(self) -> str:
-        return "Compaction is temporarily unavailable during durable session migration."
+        if not self.session: raise RuntimeError("Session is required")
+        state = self.session.load()
+        messages = state["activeContext"]
+        if not messages: return "Nothing to compact."
+        cut = max(len(messages) - 6, 0)
+        while cut > 0 and messages[cut]["role"] != "user": cut -= 1
+        if not cut: return "Nothing to compact."
+
+        source = self._message_facts()
+        input_through_id = source[-1]["id"]
+        retained_count = len(messages) - cut
+        retained = source[-retained_count:] if retained_count else []
+        compacted = source[:-retained_count] if retained_count else source
+        if not compacted: return "Nothing to compact."
+
+        operation_id, result_id = uuid7(), uuid7()
+        self.session.append({"kind": "record", "record": {
+            "type": "compactionStarted", "operationId": operation_id, "operationKind": "compaction",
+            "inputThroughEntryId": input_through_id, "resultEntryId": result_id,
+            "compactedEntryIds": [item["id"] for item in compacted],
+            "retainedEntryIds": [item["id"] for item in retained],
+            "sourceDigest": source_digest(self._full_state(), input_through_id),
+        }})
+        result = self._continue_compaction(operation_id, {
+            "attempt": 1, "contextThroughEntryId": input_through_id,
+        })
+        self._restore_projection()
+        return result
+
+    def _continue_compaction(self, operation_id: str, action: dict) -> str:
+        state = self.session.load(); operation = state["operation"]
+        step_id, attempt_id = self._attempt(
+            operation_id, action["contextThroughEntryId"], "compaction",
+            action.get("attempt", 1), action.get("stepId"),
+        )
+        source = self._message_facts(operation["inputThroughEntryId"])
+        compacted_ids = set(self._compaction_record(operation_id)["compactedEntryIds"])
+        old = [item["message"] for item in source if item["id"] in compacted_ids]
+        cancelled = self.begin(operation_id, "compact", operation_kind="compaction")
+        try:
+            summary, usage, stop_reason = self.call_model([
+                {"role": "system", "content": "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps."},
+                {"role": "user", "content": json.dumps(old, ensure_ascii=False, separators=(",", ":"))},
+            ], None, cancelled)
+            text = summary.get("content") or ""
+            if stop_reason != "stop" or not text.strip(): raise RuntimeError("Model returned an invalid compaction summary")
+        except BaseException as error:
+            aborted = cancelled.is_set(); self.end()
+            self.session.append({"kind": "record", "record": {
+                "type": "stepFailed", "operationId": operation_id, "stepId": step_id,
+                "attemptId": attempt_id, "error": {"code": "aborted" if aborted else "model_error", "message": "Operation aborted" if aborted else str(error)},
+            }})
+            self._finish(operation_id, "aborted" if aborted else "failed", error=None if aborted else error, operation_kind="compaction")
+            if aborted: return "Compaction aborted."
+            raise
+        self.end()
+        retained_ids = set(self._compaction_record(operation_id)["retainedEntryIds"])
+        retained = [{"sourceEntryId": item["id"], "message": item["message"]} for item in source if item["id"] in retained_ids]
+        result_id = operation["resultEntryId"]
+        self.session.append(
+            {"kind": "entry", "id": result_id, "entry": {
+                "type": "compaction", "operationId": operation_id, "summary": text,
+                "compactedThroughEntryId": self._compaction_record(operation_id)["compactedEntryIds"][-1],
+                "retainedTail": retained,
+            }},
+            {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage},
+        )
+        self._finish(operation_id, "completed", result_id, operation_kind="compaction")
+        return f"Compacted {len(source) - len(retained)} messages (kept last {len(retained)})."
+
+    def _facts(self) -> list[dict]:
+        facts = []
+        for raw in self.session.data.decode().splitlines()[1:]:
+            value = json.loads(raw); facts.extend(value if isinstance(value, list) else [value])
+        return facts
+
+    def _full_state(self) -> dict:
+        # source_digest needs the reducer's entry index, which is intentionally private in the public projection.
+        state = {"entries": {}}
+        for fact in self._facts():
+            if fact.get("kind") == "entry": state["entries"][fact["id"]] = {"entry": fact["entry"]}
+        return state
+
+    def _message_facts(self, through_id: str | None = None) -> list[dict]:
+        result = []
+        for fact in self._facts():
+            if fact.get("kind") == "entry" and fact["entry"].get("type") == "message":
+                result.append({"id": fact["id"], "message": fact["entry"]["message"]})
+            if through_id and fact.get("id") == through_id: break
+        return result
+
+    def _compaction_record(self, operation_id: str) -> dict:
+        return next(fact["record"] for fact in reversed(self._facts()) if fact.get("kind") == "record" and fact["record"].get("type") == "compactionStarted" and fact["record"]["operationId"] == operation_id)
