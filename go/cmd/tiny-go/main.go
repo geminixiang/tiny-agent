@@ -478,6 +478,7 @@ type Agent struct {
 	Client   *http.Client
 	Endpoint string
 	OnTool   func(ToolEvent)
+	Tools    []Tool
 	mu       sync.Mutex
 	cancel   context.CancelFunc
 }
@@ -496,7 +497,38 @@ func newAgent(skills []Skill, session *Session, instructions string) *Agent {
 		project = fmt.Sprintf("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"%s\">\n%s\n</project_instructions>\n\n</project_context>", filepath.Join(cwd, "AGENTS.md"), instructions)
 	}
 	prompt := fmt.Sprintf("You are tiny-agent, a concise coding agent in %s. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.%s\n\n<available_skills>\n%s\n</available_skills>", cwd, project, list)
-	return &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: openRouterURL, OnTool: func(ToolEvent) {}}
+	return &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: openRouterURL, OnTool: func(ToolEvent) {}, Tools: localTools()}
+}
+
+func localTools() []Tool {
+	tools := make([]Tool, 0, len(toolDefinitions))
+	for _, definition := range toolDefinitions {
+		function := definition["function"].(map[string]any)
+		name := function["name"].(string)
+		description := function["description"].(string)
+		parameters := function["parameters"].(map[string]any)
+		toolName := name
+		tools = append(tools, Tool{Name: name, Description: description, Parameters: parameters, Execute: func(ctx context.Context, args map[string]any) (string, error) {
+			stringsOnly := map[string]string{}
+			for key, value := range args {
+				text, ok := value.(string)
+				if !ok {
+					return "", fmt.Errorf("tool argument %s must be a string", key)
+				}
+				stringsOnly[key] = text
+			}
+			return executeTool(ctx, toolName, stringsOnly)
+		}})
+	}
+	return tools
+}
+
+func (a *Agent) toolDefinitions() []map[string]any {
+	definitions := make([]map[string]any, 0, len(a.Tools))
+	for _, tool := range a.Tools {
+		definitions = append(definitions, map[string]any{"type": "function", "function": map[string]any{"name": tool.Name, "description": tool.Description, "parameters": tool.Parameters}})
+	}
+	return definitions
 }
 
 func (a *Agent) abort() {
@@ -652,7 +684,7 @@ func (a *Agent) runAgentLoop(input string) (string, error) {
 		}
 	}
 	for {
-		response, err := a.modelRequest(a.Messages, toolDefinitions, "model", true)
+		response, err := a.modelRequest(a.Messages, a.toolDefinitions(), "model", true)
 		if err != nil {
 			return "", err
 		}
@@ -670,13 +702,29 @@ func (a *Agent) runAgentLoop(input string) (string, error) {
 			return value(answer.Content), nil
 		}
 		for i, call := range answer.ToolCalls {
-			args := map[string]string{}
+			args := map[string]any{}
 			err := json.Unmarshal([]byte(call.Function.Arguments), &args)
-			a.OnTool(ToolEvent{Phase: "start", Name: call.Function.Name, Args: args})
+			displayArgs := map[string]string{}
+			for key, value := range args {
+				if text, ok := value.(string); ok {
+					displayArgs[key] = text
+				}
+			}
+			a.OnTool(ToolEvent{Phase: "start", Name: call.Function.Name, Args: displayArgs})
 			ctx := a.begin()
 			result := ""
 			if err == nil {
-				result, err = executeTool(ctx, call.Function.Name, args)
+				toolFound := false
+				for _, tool := range a.Tools {
+					if tool.Name == call.Function.Name {
+						toolFound = true
+						result, err = tool.Execute(ctx, args)
+						break
+					}
+				}
+				if !toolFound {
+					err = fmt.Errorf("unknown tool: %s", call.Function.Name)
+				}
 			}
 			aborted := errors.Is(ctx.Err(), context.Canceled)
 			a.end()
@@ -689,7 +737,7 @@ func (a *Agent) runAgentLoop(input string) (string, error) {
 					result += "\nError: " + err.Error()
 				}
 			}
-			a.OnTool(ToolEvent{Phase: "end", Name: call.Function.Name, Args: args, Result: result})
+			a.OnTool(ToolEvent{Phase: "end", Name: call.Function.Name, Args: displayArgs, Result: result})
 			tool := Message{Role: "tool", Content: text(result), ToolCallID: call.ID}
 			a.Messages = append(a.Messages, tool)
 			if a.Session != nil {
@@ -1013,28 +1061,35 @@ func (t *terminal) run(agent *Agent, operation func() (string, error)) (string, 
 	}
 }
 
-func parseArgs(args []string) (sessionID string, extras []string, prompt string, err error) {
+func parseArgs(args []string) (sessionID string, extras, mcp []string, prompt string, err error) {
 	words := []string{}
 	for i := 0; i < len(args); i++ {
-		if args[i] != "--session" && args[i] != "--skill" {
+		if args[i] != "--session" && args[i] != "--skill" && args[i] != "--mcp" {
 			words = append(words, args[i])
 			continue
 		}
 		if i+1 == len(args) {
-			return "", nil, "", fmt.Errorf("%s requires a value", args[i])
+			return "", nil, nil, "", fmt.Errorf("%s requires a value", args[i])
 		}
 		if args[i] == "--session" {
 			sessionID = args[i+1]
-		} else {
+		} else if args[i] == "--skill" {
 			extras = append(extras, args[i+1])
+		} else {
+			mcp = append(mcp, args[i+1])
 		}
 		i++
 	}
-	return sessionID, extras, strings.Join(words, " "), nil
+	return sessionID, extras, splitList(mcp), strings.Join(words, " "), nil
 }
 
 func runCLI(args []string) error {
-	sessionID, extras, oneShot, err := parseArgs(args)
+	sessionID, extras, mcpAliases, oneShot, err := parseArgs(args)
+	if err != nil {
+		return err
+	}
+	home, _ := os.UserHomeDir()
+	configs, err := loadMCPConfigs(mcpAliases, currentEnvironment(), home)
 	if err != nil {
 		return err
 	}
@@ -1052,13 +1107,30 @@ func runCLI(args []string) error {
 		return err
 	}
 	agent := newAgent(skills, session, loadProjectInstructions())
+	loadedMCP := []*MCPClient{}
+	defer func() {
+		for i := len(loadedMCP) - 1; i >= 0; i-- {
+			_ = loadedMCP[i].Close()
+		}
+	}()
+	for _, config := range configs {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		loaded, loadErr := loadMCPTools(ctx, config, http.DefaultClient)
+		cancel()
+		if loadErr != nil {
+			return fmt.Errorf("MCP %s failed: %w", config.Alias, loadErr)
+		}
+		loadedMCP = append(loadedMCP, loaded)
+		agent.Tools = append(agent.Tools, loaded.tools...)
+		fmt.Printf("MCP %s: connected (%s, %d tools)\n", config.Alias, loaded.protocolVersion, len(loaded.tools))
+	}
 	out := io.Writer(os.Stdout)
 	agent.OnTool = func(event ToolEvent) {
 		color := "\x1b[2m"
 		if event.Phase == "start" {
 			color = "\x1b[33m"
 		}
-		fmt.Fprintln(out, color+formatToolEvent(event)+"\x1b[0m")
+		fmt.Fprintln(out, color+formatToolEvent(ToolEvent{Phase: event.Phase, Name: displayToolName(event.Name), Args: event.Args, Result: event.Result})+"\x1b[0m")
 	}
 	if sessionID != "" {
 		if err := agent.resumeSession(); err != nil {
@@ -1066,7 +1138,7 @@ func runCLI(args []string) error {
 		}
 	}
 	resume := func() { fmt.Fprintf(out, "\nResume: tiny-go --session %s\n", session.ID) }
-	fmt.Printf("\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: %s\nsession: %s\npath: %s", model(), session.ID, session.Path)
+	fmt.Printf("\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: %s\nsession: %s\npath: %s\ntools: %s\nmcp: %s", model(), session.ID, session.Path, displayToolList(agent.Tools), emptyList(mcpAliases))
 	if sessionID != "" {
 		fmt.Print("\nrestored: yes")
 	}
@@ -1124,6 +1196,21 @@ func runCLI(args []string) error {
 		}
 		fmt.Fprintf(out, "\x1b[36m%s\x1b[0m\n\x1b[2m%s\x1b[0m\n", answer, formatUsage(agent.Usage))
 	}
+}
+
+func displayToolList(tools []Tool) string {
+	names := make([]string, len(tools))
+	for i, tool := range tools {
+		names[i] = displayToolName(tool.Name)
+	}
+	return emptyList(names)
+}
+
+func emptyList(values []string) string {
+	if len(values) == 0 {
+		return "(none)"
+	}
+	return strings.Join(values, ", ")
 }
 
 func runSkill(tty *terminal, agent *Agent, input string) (string, error) {
