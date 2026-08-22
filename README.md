@@ -178,7 +178,9 @@ tiny-ts --session <session-id>
 tiny-ts --session <session-id> "繼續剛才的工作"
 ```
 
-Session 採 append-only records，保存 message、tool result、compaction、interruption 與 usage。正式格式見 [`schemas/session.schema.json`](schemas/session.schema.json)。
+Session 使用 canonical append-only JSONL；每一行都是完整 transaction，保存 accepted prompt、model attempt、assistant message、tool intent/result、operation outcome、compaction、interruption與獨立 usage ledger。正式格式與 recovery invariants 見 [`schemas/session.schema.json`](schemas/session.schema.json) 及 [`docs/session-design.md`](docs/session-design.md)。
+
+Process crash 後，`--session` 會先由 durable facts 重建狀態，再執行 recovery plan：不確定的 model request 最多重試一次；只有完全相同的內建 `read` 可安全 replay；`bash`、`write`、`edit`、plugin與MCP tool一律不自動重播。Configuration或environment identity不符時，resume會停止且不執行 effect。Session只承諾 process-crash durability，且同一session只允許單一process writer。
 
 ## Skills 與專案指令
 
@@ -198,7 +200,7 @@ tiny-ts "say hello"
 
 ## Compact
 
-`/compact` 將較舊對話送給目前模型摘要，active context 改為：
+`/compact` 是獨立的 durable operation：摘要目前 active context，materialize保留的tail，再以canonical source partition與digest寫入session。active context改為：
 
 ```text
 system prompt + compacted summary + 最近至少 6 則完整 turn
