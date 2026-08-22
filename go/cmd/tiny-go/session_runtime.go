@@ -1,18 +1,25 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
 const zeroDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 type durableRun struct {
-	OperationID, StepID, AttemptID, ContextEntryID string
+	OperationID, StepID, AttemptID, ContextEntryID, AssistantEntryID string
+	Attempt                                                          int
+}
+
+type activeOperation struct {
+	OperationID, Kind, Phase, ToolCallID string
 }
 
 func digestValue(value any) string {
@@ -70,18 +77,8 @@ func messageFromMap(message sessionMessage) (Message, error) {
 	return result, json.Unmarshal(encoded, &result)
 }
 
-func (a *Agent) restoreSession() error {
-	if a.Session == nil {
-		return nil
-	}
+func (a *Agent) projectSession() error {
 	state := a.Session.State()
-	if state.Operation.Kind != "idle" {
-		_, current, err := a.currentConfiguration()
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("Session recovery required: %v", planRecovery(state, current))
-	}
 	a.Messages = a.Messages[:1]
 	for _, raw := range state.ActiveContext {
 		message, err := messageFromMap(raw)
@@ -99,6 +96,19 @@ func (a *Agent) restoreSession() error {
 	return nil
 }
 
+func (a *Agent) restoreSession() error {
+	if a.Session == nil {
+		return nil
+	}
+	if err := a.projectSession(); err != nil {
+		return err
+	}
+	if a.Session.State().Operation.Kind == "idle" {
+		return nil
+	}
+	return a.recoverSession()
+}
+
 func (a *Agent) startDurableRun(input string) (durableRun, error) {
 	run := durableRun{}
 	if a.Session == nil {
@@ -112,7 +122,7 @@ func (a *Agent) startDurableRun(input string) (durableRun, error) {
 	})
 }
 
-func (a *Agent) startAttempt(run *durableRun) error {
+func (a *Agent) startAttempt(run *durableRun, kind string, attempt int) error {
 	if a.Session == nil {
 		return nil
 	}
@@ -120,31 +130,26 @@ func (a *Agent) startAttempt(run *durableRun) error {
 	if err != nil {
 		return err
 	}
-	run.StepID, run.AttemptID = a.Session.NewID(time.Now()), a.Session.NewID(time.Now().Add(time.Nanosecond))
-	return a.Session.Commit([]map[string]any{
-		{
-			"kind": "record",
-			"record": map[string]any{
-				"type": "stepAttempt", "operationId": run.OperationID,
-				"stepId": run.StepID, "attemptId": run.AttemptID,
-				"stepKind": "assistant", "attempt": 1,
-				"contextThroughEntryId": run.ContextEntryID,
-				"configurationSnapshot": configurationMap(configuration),
-				"configurationDigest":   sessionConfigurationDigest(configuration),
-			},
-		},
-	})
+	if attempt == 1 {
+		run.StepID = a.Session.NewID(time.Now())
+	}
+	run.AttemptID, run.Attempt = a.Session.NewID(time.Now().Add(time.Nanosecond)), attempt
+	return a.Session.Commit([]map[string]any{{"kind": "record", "record": map[string]any{
+		"type": "stepAttempt", "operationId": run.OperationID, "stepId": run.StepID, "attemptId": run.AttemptID,
+		"stepKind": kind, "attempt": attempt, "contextThroughEntryId": run.ContextEntryID,
+		"configurationSnapshot": configurationMap(configuration), "configurationDigest": sessionConfigurationDigest(configuration),
+	}}})
 }
 
-func (a *Agent) failAttempt(run durableRun, err error) error {
+func (a *Agent) failAttempt(run durableRun, code string, err error, finish bool) error {
 	if a.Session == nil {
 		return err
 	}
-	commitErr := a.Session.Commit([]map[string]any{
-		{"kind": "record", "record": map[string]any{"type": "stepFailed", "operationId": run.OperationID, "stepId": run.StepID, "attemptId": run.AttemptID, "error": map[string]any{"code": "model_error", "message": err.Error()}}},
-		{"kind": "record", "record": map[string]any{"type": "operationFinished", "operationId": run.OperationID, "operationKind": "run", "outcome": "failed", "completion": "error", "error": map[string]any{"code": "model_error", "message": err.Error()}}},
-	})
-	return errors.Join(err, commitErr)
+	facts := []map[string]any{{"kind": "record", "record": map[string]any{"type": "stepFailed", "operationId": run.OperationID, "stepId": run.StepID, "attemptId": run.AttemptID, "error": map[string]any{"code": code, "message": err.Error()}}}}
+	if finish {
+		facts = append(facts, map[string]any{"kind": "record", "record": map[string]any{"type": "operationFinished", "operationId": run.OperationID, "operationKind": "run", "outcome": "failed", "error": map[string]any{"code": code, "message": err.Error()}}})
+	}
+	return errors.Join(err, a.Session.Commit(facts))
 }
 
 func (a *Agent) settleAssistant(run *durableRun, response ModelResponse, finish bool) (string, error) {
@@ -162,6 +167,303 @@ func (a *Agent) settleAssistant(run *durableRun, response ModelResponse, finish 
 	if err := a.Session.Commit(facts); err != nil {
 		return "", err
 	}
-	run.ContextEntryID = entryID
+	run.ContextEntryID, run.AssistantEntryID = entryID, entryID
 	return entryID, nil
+}
+
+func findTool(tools []Tool, name string) *Tool {
+	for index := range tools {
+		if tools[index].Name == name {
+			return &tools[index]
+		}
+	}
+	return nil
+}
+
+func decodeToolArguments(raw string) (map[string]any, error) {
+	args := map[string]any{}
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil, err
+	}
+	if args == nil {
+		return nil, errors.New("tool arguments must be an object")
+	}
+	return args, nil
+}
+
+func toolResultMessage(callID, content string) Message {
+	return Message{Role: "tool", Content: text(content), ToolCallID: callID}
+}
+
+func (a *Agent) appendSynthetic(run *durableRun, index int, call ToolCall, reason string) error {
+	content := syntheticContent[reason]
+	message := toolResultMessage(call.ID, content)
+	if a.Session != nil {
+		id := a.Session.NewID(time.Now())
+		if err := a.Session.Commit([]map[string]any{{"kind": "entry", "id": id, "entry": map[string]any{
+			"type": "message", "stepId": run.StepID, "assistantEntryId": run.AssistantEntryID, "toolIndex": index,
+			"message": messageMap(message), "toolName": call.Function.Name, "result": map[string]any{"type": "synthetic", "reason": reason},
+		}}}); err != nil {
+			return err
+		}
+		run.ContextEntryID = id
+	}
+	a.Messages = append(a.Messages, message)
+	return nil
+}
+
+func (a *Agent) executeDurableTool(run *durableRun, index int, call ToolCall, selected *Tool, args map[string]any, replay *sessionToolState) error {
+	startedID, resultID := "", ""
+	if a.Session != nil {
+		identity, err := environmentIdentity()
+		if err != nil {
+			return err
+		}
+		if replay == nil {
+			startedID, resultID = a.Session.NewID(time.Now()), a.Session.NewID(time.Now().Add(time.Nanosecond))
+			fact := map[string]any{"kind": "record", "id": startedID, "record": map[string]any{
+				"type": "toolStarted", "operationId": run.OperationID, "stepId": run.StepID, "assistantEntryId": run.AssistantEntryID,
+				"toolIndex": index, "toolCallId": call.ID, "toolName": call.Function.Name, "arguments": args,
+				"replay": selected.Replay, "replayKey": selected.ReplayKey, "environmentIdentity": identity, "resultEntryId": resultID,
+			}}
+			if err := a.Session.Commit([]map[string]any{fact}); err != nil {
+				return err
+			}
+		} else {
+			startedID, resultID = replay.ToolStartedID, replay.ResultEntryID
+		}
+	}
+	a.OnTool(ToolEvent{Phase: "start", Name: call.Function.Name, Args: stringifyArgs(args)})
+	ctx := a.beginOperation(run.OperationID, "run", "tool", call.ID)
+	result, toolErr := selected.Execute(ctx, args)
+	aborted := a.endOperation(ctx)
+	if aborted {
+		return a.reconcileAbort()
+	}
+	resultType := "success"
+	if toolErr != nil {
+		result, resultType = "Error: "+toolErr.Error(), "error"
+	}
+	a.OnTool(ToolEvent{Phase: "end", Name: call.Function.Name, Result: result})
+	message := toolResultMessage(call.ID, result)
+	if a.Session != nil {
+		if err := a.Session.Commit([]map[string]any{{"kind": "entry", "id": resultID, "entry": map[string]any{
+			"type": "message", "stepId": run.StepID, "message": messageMap(message), "toolName": call.Function.Name,
+			"toolStartedId": startedID, "result": map[string]any{"type": resultType},
+		}}}); err != nil {
+			return err
+		}
+		run.ContextEntryID = resultID
+	}
+	a.Messages = append(a.Messages, message)
+	return nil
+}
+
+func stringifyArgs(args map[string]any) map[string]string {
+	out := map[string]string{}
+	for key, value := range args {
+		if text, ok := value.(string); ok {
+			out[key] = text
+		}
+	}
+	return out
+}
+
+func (a *Agent) beginOperation(operationID, kind, phase, toolCallID string) context.Context {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancel, a.active = cancel, &activeOperation{operationID, kind, phase, toolCallID}
+	return ctx
+}
+
+func (a *Agent) requestAbort() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancel == nil || a.active == nil {
+		return nil
+	}
+	active := *a.active
+	if active.OperationID == "" {
+		a.cancel()
+		return nil
+	}
+	if a.Session != nil {
+		record := map[string]any{"type": "abortRequested", "operationId": active.OperationID, "operationKind": active.Kind, "phase": active.Phase, "reason": "escape"}
+		if active.Phase == "tool" {
+			record["toolCallId"] = active.ToolCallID
+		}
+		if err := a.Session.Commit([]map[string]any{{"kind": "record", "record": record}}); err != nil {
+			return err
+		}
+	}
+	a.cancel()
+	return nil
+}
+
+func (a *Agent) abort() { _ = a.requestAbort() }
+
+func (a *Agent) reconcileAbort() error {
+	if a.Session == nil {
+		return context.Canceled
+	}
+	_, current, err := a.currentConfiguration()
+	if err != nil {
+		return err
+	}
+	for a.Session.State().Operation.Kind != "idle" {
+		plan := planRecovery(a.Session.State(), current)
+		if err := a.applyRecoveryPlan(plan); err != nil {
+			return err
+		}
+	}
+	_ = a.projectSession()
+	return context.Canceled
+}
+
+func (a *Agent) recoverSession() error {
+	_, current, err := a.currentConfiguration()
+	if err != nil {
+		return err
+	}
+	if err := a.projectSession(); err != nil {
+		return err
+	}
+	for a.Session.State().Operation.Kind != "idle" {
+		plan := planRecovery(a.Session.State(), current)
+		if plan["type"] == "blocked" {
+			return fmt.Errorf("Session recovery blocked: %s", plan["reason"])
+		}
+		if err := a.applyRecoveryPlan(plan); err != nil {
+			return err
+		}
+		if err := a.projectSession(); err != nil {
+			return err
+		}
+		_, current, err = a.currentConfiguration()
+		if err != nil {
+			return err
+		}
+	}
+	return a.projectSession()
+}
+
+func (a *Agent) applyRecoveryPlan(plan recoveryPlan) error {
+	state := a.Session.State()
+	operation := state.Operation
+	number := func(value any) int {
+		switch value := value.(type) {
+		case int:
+			return value
+		case float64:
+			return int(value)
+		}
+		return 0
+	}
+	switch plan["type"] {
+	case "appendSynthetic":
+		results := plan["results"].([]any)
+		facts := make([]map[string]any, 0, len(results))
+		for _, raw := range results {
+			result := raw.(map[string]any)
+			message := toolResultMessage(result["toolCallId"].(string), result["content"].(string))
+			entry := map[string]any{"type": "message", "stepId": operation.Step.StepID, "message": messageMap(message), "toolName": result["toolName"], "result": map[string]any{"type": "synthetic", "reason": result["reason"]}}
+			id := a.Session.NewID(time.Now())
+			if started, ok := result["toolStartedId"]; ok {
+				id, entry["toolStartedId"] = result["resultEntryId"].(string), started
+			} else {
+				entry["assistantEntryId"], entry["toolIndex"] = result["assistantEntryId"], result["toolIndex"]
+			}
+			facts = append(facts, map[string]any{"kind": "entry", "id": id, "entry": entry})
+		}
+		return a.Session.Commit(facts)
+	case "closeAttempt":
+		return a.Session.Commit([]map[string]any{{"kind": "record", "record": map[string]any{"type": "stepFailed", "operationId": operation.OperationID, "stepId": operation.Step.StepID, "attemptId": operation.Step.AttemptID, "error": plan["error"]}}})
+	case "finish":
+		record := map[string]any{"type": "operationFinished", "operationId": operation.OperationID, "operationKind": operation.Kind, "outcome": plan["outcome"]}
+		if final, ok := plan["finalEntryId"]; ok {
+			record["finalEntryId"] = final
+		}
+		if completion, ok := plan["completion"]; ok {
+			record["completion"] = completion
+		}
+		if record["outcome"] == "failed" {
+			record["error"] = plan["error"]
+		}
+		return a.Session.Commit([]map[string]any{{"kind": "record", "record": record}})
+	case "startStep":
+		if operation.Kind == "compaction" {
+			return errors.New("Compaction requires the next durable-session phase")
+		}
+		return a.recoverStep(plan, number(plan["attempt"]))
+	case "startTool":
+		return a.recoverTool(plan)
+	}
+	return fmt.Errorf("unsupported recovery plan: %v", plan)
+}
+
+func (a *Agent) recoverStep(plan recoveryPlan, attempt int) error {
+	state := a.Session.State()
+	run := durableRun{OperationID: state.Operation.OperationID, ContextEntryID: plan["contextThroughEntryId"].(string), Attempt: attempt}
+	if state.Operation.Step != nil {
+		run.StepID = state.Operation.Step.StepID
+	}
+	if err := a.startAttempt(&run, plan["stepKind"].(string), run.Attempt); err != nil {
+		return err
+	}
+	ctx := a.beginOperation(run.OperationID, state.Operation.Kind, "model", "")
+	response, err := a.callModel(ctx, a.Messages, a.toolDefinitions())
+	aborted := a.endOperation(ctx)
+	if aborted {
+		return a.reconcileAbort()
+	}
+	if err != nil {
+		return a.failAttempt(run, "model_error", err, true)
+	}
+	stop := response.StopReason
+	if stop == "tool_calls" || stop == "function_call" {
+		stop = "toolUse"
+	}
+	response.StopReason = stop
+	finish := stop == "stop" && len(response.Message.ToolCalls) == 0 && strings.TrimSpace(value(response.Message.Content)) != ""
+	_, err = a.settleAssistant(&run, response, finish)
+	return err
+}
+
+func (a *Agent) recoverTool(plan recoveryPlan) error {
+	state := a.Session.State()
+	assistantID := plan["assistantEntryId"].(string)
+	var assistant Message
+	for entryIndex, raw := range state.Transcript {
+		if entryIndex >= len(state.entryIDs) || state.entryIDs[entryIndex] != assistantID || raw["role"] != "assistant" {
+			continue
+		}
+		assistant, _ = messageFromMap(raw)
+		break
+	}
+	index := 0
+	switch value := plan["toolIndex"].(type) {
+	case int:
+		index = value
+	case float64:
+		index = int(value)
+	}
+	if index >= len(assistant.ToolCalls) {
+		return errors.New("recovery tool call missing")
+	}
+	call := assistant.ToolCalls[index]
+	selected := findTool(a.Tools, call.Function.Name)
+	if selected == nil {
+		return errors.New("recovery tool unavailable")
+	}
+	run := durableRun{OperationID: state.Operation.OperationID, StepID: state.Operation.Step.StepID, AssistantEntryID: assistantID, ContextEntryID: state.Operation.Step.ContextThroughEntryID}
+	var replay *sessionToolState
+	if plan["mode"] == "replay" {
+		for i := range state.Operation.ToolCalls {
+			if state.Operation.ToolCalls[i].ToolStartedID == plan["toolStartedId"] {
+				replay = &state.Operation.ToolCalls[i]
+			}
+		}
+	}
+	return a.executeDurableTool(&run, index, call, selected, plan["arguments"].(map[string]any), replay)
 }

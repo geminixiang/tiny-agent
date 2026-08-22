@@ -103,6 +103,8 @@ type sessionState struct {
 	Usage          sessionUsage     `json:"usage"`
 	Operation      sessionOperation `json:"operation"`
 	RepairedLength int              `json:"repairedLength"`
+	entryIDs       []string
+	resultPairs    map[string]bool
 }
 
 type sessionCorruption struct {
@@ -1302,13 +1304,22 @@ func sessionApplyRecord(s *sessionInternal, f map[string]any, line, seq int) err
 		return corrupt("INVALID_TRANSITION", line, seq)
 	}
 	if outcome == "completed" {
+		completion, _ := r["completion"].(string)
+		if found.Kind == "run" && completion != "normal" && completion != "truncated" {
+			return corrupt("INVALID_FACT", line, seq)
+		}
+		if found.Kind == "compaction" {
+			if _, ok := r["completion"]; ok {
+				return corrupt("INVALID_FACT", line, seq)
+			}
+		}
 		finalID, ok := sessionID(r["finalEntryId"])
 		if !ok {
 			return corrupt("INVALID_FACT", line, seq)
 		}
 		info := s.Entries[finalID]
 		if found.Kind == "run" {
-			if info.OperationID != op || info.Entry["type"] != "message" || info.Entry["stopReason"] != "stop" {
+			if info.OperationID != op || info.Entry["type"] != "message" || completion == "normal" && info.Entry["stopReason"] != "stop" || completion == "truncated" && info.Entry["stopReason"] != "length" {
 				return corrupt("INVALID_REFERENCE", line, seq)
 			}
 			a := s.Attempts[info.AttemptID]
@@ -1320,7 +1331,8 @@ func sessionApplyRecord(s *sessionInternal, f map[string]any, line, seq int) err
 				return e
 			}
 			content, _ := msg["content"].(string)
-			if msg["role"] != "assistant" || strings.TrimSpace(content) == "" {
+			calls, _ := msg["tool_calls"].([]any)
+			if msg["role"] != "assistant" || completion == "normal" && strings.TrimSpace(content) == "" || completion == "truncated" && len(calls) == 0 {
 				return corrupt("INVALID_TRANSCRIPT", line, seq)
 			}
 			for _, t := range s.Operation.ToolCalls {
@@ -1350,6 +1362,11 @@ func sessionApplyRecord(s *sessionInternal, f map[string]any, line, seq int) err
 		}
 	} else if _, ok := r["finalEntryId"]; ok {
 		return corrupt("INVALID_FACT", line, seq)
+	}
+	if outcome != "completed" {
+		if _, ok := r["completion"]; ok {
+			return corrupt("INVALID_FACT", line, seq)
+		}
 	}
 	if outcome == "failed" {
 		er, e := sessionObject(r["error"], "INVALID_FACT", line, seq)
@@ -1588,10 +1605,29 @@ func reduceSession(data []byte) (sessionState, error) {
 	}
 	clean := func(messages []sessionMessage) []sessionMessage {
 		out := make([]sessionMessage, len(messages))
-		for i, m := range messages {
-			out[i] = m
-		}
+		copy(out, messages)
 		return out
 	}
-	return sessionState{Header: s.Header, Transcript: clean(s.Transcript), ActiveContext: clean(s.ActiveContext), Usage: s.Usage, Operation: s.Operation, RepairedLength: s.RepairedLength}, nil
+	ids := make([]string, 0, len(s.Entries))
+	for id := range s.Entries {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return sessionSeqOfEntry(s.Entries[ids[i]].Entry) < sessionSeqOfEntry(s.Entries[ids[j]].Entry)
+	})
+	entryIDs := make([]string, 0, len(s.Transcript))
+	resultPairs := map[string]bool{}
+	for _, id := range ids {
+		entry := s.Entries[id].Entry
+		if entry["type"] != "message" {
+			continue
+		}
+		entryIDs = append(entryIDs, id)
+		if assistantID, ok := entry["assistantEntryId"].(string); ok {
+			if index, ok := sessionInt(entry["toolIndex"], 0); ok {
+				resultPairs[fmt.Sprintf("%s:%d", assistantID, index)] = true
+			}
+		}
+	}
+	return sessionState{Header: s.Header, Transcript: clean(s.Transcript), ActiveContext: clean(s.ActiveContext), Usage: s.Usage, Operation: s.Operation, RepairedLength: s.RepairedLength, entryIDs: entryIDs, resultPairs: resultPairs}, nil
 }

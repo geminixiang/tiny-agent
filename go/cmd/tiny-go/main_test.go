@@ -318,7 +318,7 @@ func TestLargeBashOutputStoresFullLog(t *testing.T) {
 	}
 }
 
-func TestCancelModelLeavesRecoverableAttempt(t *testing.T) {
+func TestCancelModelPersistsAndReconcilesAbort(t *testing.T) {
 	inTempDir(t)
 	t.Setenv("OPENROUTER_API_KEY", "test")
 	started, release := make(chan struct{}), make(chan struct{})
@@ -343,7 +343,14 @@ func TestCancelModelLeavesRecoverableAttempt(t *testing.T) {
 		t.Fatalf("answer: %q", answer)
 	}
 	state := session.State()
-	if state.Operation.Kind != "run" || state.Operation.Step == nil || state.Operation.Step.Status != "attempting" {
+	if state.Operation.Kind != "idle" {
 		t.Fatalf("operation: %+v", state.Operation)
+	}
+	data, err := os.ReadFile(session.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"type":"abortRequested"`) || !strings.Contains(string(data), `"outcome":"aborted"`) {
+		t.Fatalf("abort facts missing: %s", data)
 	}
 }

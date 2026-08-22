@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 )
 
@@ -96,6 +97,9 @@ func planRecovery(state sessionState, current currentConfiguration) recoveryPlan
 			}
 			results := []any{}
 			for index, raw := range calls {
+				if state.resultPairs[fmt.Sprintf("%s:%d", assistantID, index)] {
+					continue
+				}
 				callID, name, _ := recoveryCall(raw)
 				tool, exists := started[index]
 				if exists && tool.Status == "pending" {
@@ -135,18 +139,27 @@ func planRecovery(state sessionState, current currentConfiguration) recoveryPlan
 		return recoveryPlan{"type": "finish", "outcome": "completed", "finalEntryId": operation.ResultEntryID}
 	}
 	if step.StopReason == "length" && hasAssistant {
-		results := make([]any, len(calls))
+		results := []any{}
 		for index, raw := range calls {
+			if state.resultPairs[fmt.Sprintf("%s:%d", assistantID, index)] {
+				continue
+			}
 			callID, name, _ := recoveryCall(raw)
-			results[index] = syntheticResult(assistantID, index, callID, name, "truncated")
+			results = append(results, syntheticResult(assistantID, index, callID, name, "truncated"))
 		}
-		return recoveryPlan{"type": "appendSynthetic", "results": results}
+		if len(results) > 0 {
+			return recoveryPlan{"type": "appendSynthetic", "results": results}
+		}
+		return recoveryPlan{"type": "finish", "outcome": "completed", "completion": "truncated", "finalEntryId": step.SettledEntryID}
 	}
 	if !hasAssistant {
 		return recoveryPlan{"type": "finish", "outcome": "completed", "completion": "normal", "finalEntryId": step.SettledEntryID}
 	}
 
 	processed := map[int]bool{}
+	for index := range calls {
+		processed[index] = state.resultPairs[fmt.Sprintf("%s:%d", assistantID, index)]
+	}
 	for _, tool := range operation.ToolCalls {
 		if tool.AssistantEntryID == assistantID {
 			processed[tool.ToolIndex] = true
@@ -174,6 +187,9 @@ func planRecovery(state sessionState, current currentConfiguration) recoveryPlan
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].ToolIndex < pending[j].ToolIndex })
 	tool := pending[0]
+	if step.ConfigurationDigest != current.ConfigurationDigest {
+		return recoveryPlan{"type": "blocked", "reason": "configuration_changed"}
+	}
 	if tool.EnvironmentIdentity != current.EnvironmentIdentity {
 		return recoveryPlan{"type": "blocked", "reason": "environment_changed"}
 	}

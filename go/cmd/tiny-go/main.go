@@ -385,6 +385,7 @@ type Agent struct {
 	Tools    []Tool
 	mu       sync.Mutex
 	cancel   context.CancelFunc
+	active   *activeOperation
 }
 
 func newAgent(skills []Skill, session *SessionStore, instructions string) *Agent {
@@ -446,24 +447,15 @@ func (a *Agent) toolDefinitions() []map[string]any {
 	return definitions
 }
 
-func (a *Agent) abort() {
+func (a *Agent) begin() context.Context { return a.beginOperation("", "", "", "") }
+func (a *Agent) end()                   { a.endOperation(context.Background()) }
+
+func (a *Agent) endOperation(ctx context.Context) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.cancel != nil {
-		a.cancel()
-	}
-}
-func (a *Agent) begin() context.Context {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	ctx, cancel := context.WithCancel(context.Background())
-	a.cancel = cancel
-	return ctx
-}
-func (a *Agent) end() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.cancel = nil
+	aborted := errors.Is(ctx.Err(), context.Canceled)
+	a.cancel, a.active = nil, nil
+	return aborted
 }
 func value(s *string) string {
 	if s == nil {
@@ -557,30 +549,31 @@ func (a *Agent) runAgentLoop(input string) (string, error) {
 	}
 	a.Messages = append(a.Messages, user)
 	for {
-		if err := a.startAttempt(&run); err != nil {
+		if err := a.startAttempt(&run, "assistant", 1); err != nil {
 			return "", err
 		}
-		ctx := a.begin()
+		ctx := a.beginOperation(run.OperationID, "run", "model", "")
 		response, err := a.callModel(ctx, a.Messages, a.toolDefinitions())
-		aborted := errors.Is(ctx.Err(), context.Canceled)
-		a.end()
-		if err != nil {
-			if aborted {
-				// Phase 2b adds durable abort reconciliation before cancellation.
-				return "Operation aborted.", nil
+		aborted := a.endOperation(ctx)
+		if aborted {
+			if recoveryErr := a.reconcileAbort(); recoveryErr != nil && !errors.Is(recoveryErr, context.Canceled) {
+				return "", recoveryErr
 			}
-			return "", a.failAttempt(run, err)
+			return "Operation aborted.", nil
 		}
-		stopReason := response.StopReason
-		if stopReason == "tool_calls" || stopReason == "function_call" {
-			stopReason = "toolUse"
+		if err != nil {
+			return "", a.failAttempt(run, "model_error", err, true)
 		}
-		if stopReason != "stop" && stopReason != "toolUse" && stopReason != "length" {
-			return "", a.failAttempt(run, fmt.Errorf("unsupported finish_reason: %s", response.StopReason))
+		stop := response.StopReason
+		if stop == "tool_calls" || stop == "function_call" {
+			stop = "toolUse"
 		}
-		response.StopReason = stopReason
+		if stop != "stop" && stop != "toolUse" && stop != "length" {
+			return "", a.failAttempt(run, "model_error", fmt.Errorf("unsupported finish_reason: %s", response.StopReason), true)
+		}
+		response.StopReason = stop
 		answer := response.Message
-		finish := stopReason == "stop" && len(answer.ToolCalls) == 0 && strings.TrimSpace(value(answer.Content)) != ""
+		finish := stop == "stop" && len(answer.ToolCalls) == 0 && strings.TrimSpace(value(answer.Content)) != ""
 		if _, err := a.settleAssistant(&run, response, finish); err != nil {
 			return "", err
 		}
@@ -588,41 +581,39 @@ func (a *Agent) runAgentLoop(input string) (string, error) {
 		if finish {
 			return value(answer.Content), nil
 		}
-		// This Phase 2a checkpoint deliberately blocks before any tool effect,
-		// so canonical sessions can never mix with the removed legacy format.
-		if stopReason == "toolUse" {
-			if a.Session != nil {
-				return "", errors.New("Tool execution requires the next durable-session phase")
-			}
-			for _, call := range answer.ToolCalls {
-				args := map[string]any{}
-				if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		if stop == "length" {
+			for index, call := range answer.ToolCalls {
+				if err := a.appendSynthetic(&run, index, call, "truncated"); err != nil {
 					return "", err
 				}
-				var selected *Tool
-				for index := range a.Tools {
-					if a.Tools[index].Name == call.Function.Name {
-						selected = &a.Tools[index]
-						break
-					}
-				}
-				if selected == nil {
-					return "", fmt.Errorf("unknown tool: %s", call.Function.Name)
-				}
-				ctx := a.begin()
-				result, toolErr := selected.Execute(ctx, args)
-				a.end()
-				if toolErr != nil {
-					result = "Error: " + toolErr.Error()
-				}
-				a.Messages = append(a.Messages, Message{Role: "tool", Content: text(result), ToolCallID: call.ID})
 			}
-			continue
+			return "", errors.New("Model response reached the token limit")
 		}
-		if stopReason == "length" {
-			return "", errors.New("Model response reached the token limit; recovery is required")
+		if stop == "stop" {
+			return "", errors.New("Model returned an empty response (finish_reason: stop)")
 		}
-		return "", errors.New("Model returned an empty response (finish_reason: stop)")
+		for index, call := range answer.ToolCalls {
+			args, err := decodeToolArguments(call.Function.Arguments)
+			if err != nil {
+				if err := a.appendSynthetic(&run, index, call, "invalidArguments"); err != nil {
+					return "", err
+				}
+				continue
+			}
+			selected := findTool(a.Tools, call.Function.Name)
+			if selected == nil {
+				if err := a.appendSynthetic(&run, index, call, "unknownTool"); err != nil {
+					return "", err
+				}
+				continue
+			}
+			if err := a.executeDurableTool(&run, index, call, selected, args, nil); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return "Operation aborted.", nil
+				}
+				return "", err
+			}
+		}
 	}
 }
 

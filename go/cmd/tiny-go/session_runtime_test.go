@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,48 +53,84 @@ func TestDurableRunPersistsProviderFailure(t *testing.T) {
 	}
 }
 
-func TestDurableRunLengthAndToolUseNeverExecuteEffects(t *testing.T) {
-	for _, test := range []struct {
-		name, finish string
-	}{{"length", "length"}, {"tool", "tool_calls"}} {
-		t.Run(test.name, func(t *testing.T) {
-			calls := 0
-			agent, session, close := durableAgent(t, func(w http.ResponseWriter, _ *http.Request) {
-				message := map[string]any{"role": "assistant", "content": "truncated"}
-				if test.finish == "tool_calls" {
-					message = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{"id": "call_1", "type": "function", "function": map[string]any{"name": "write", "arguments": `{"path":"x.txt","content":"x"}`}}}}
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": message, "finish_reason": test.finish}}, "usage": map[string]any{}})
-			})
-			defer close()
-			for index := range agent.Tools {
-				original := agent.Tools[index].Execute
-				agent.Tools[index].Execute = func(ctx context.Context, args map[string]any) (string, error) {
-					calls++
-					return original(ctx, args)
-				}
-			}
-			if _, err := agent.runAgentLoop("inspect"); err == nil {
-				t.Fatal("expected phase barrier error")
-			}
-			if calls != 0 {
-				t.Fatalf("executed %d effects", calls)
-			}
-			if session.State().Operation.Kind != "run" {
-				t.Fatalf("operation: %+v", session.State().Operation)
-			}
-		})
+func TestDurableRunPersistsCanonicalToolResults(t *testing.T) {
+	requests := 0
+	agent, session, close := durableAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"missing.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{}}`))
+	})
+	defer close()
+	calls := 0
+	for index := range agent.Tools {
+		if agent.Tools[index].Name != "read" {
+			continue
+		}
+		agent.Tools[index].Execute = func(context.Context, map[string]any) (string, error) {
+			calls++
+			return "", errors.New("missing")
+		}
+	}
+	answer, err := agent.runAgentLoop("inspect")
+	if err != nil || answer != "done" || calls != 1 || requests != 2 {
+		t.Fatalf("answer=%q err=%v calls=%d requests=%d", answer, err, calls, requests)
+	}
+	state := session.State()
+	if state.Operation.Kind != "idle" || len(state.Transcript) != 4 || state.Transcript[2]["content"] != "Error: missing" {
+		t.Fatalf("state: %+v", state)
 	}
 }
 
-func TestRestoreRejectsNonIdleSessionWithRecoveryPlan(t *testing.T) {
-	agent, session, close := durableAgent(t, func(http.ResponseWriter, *http.Request) {})
+func TestDurableRunTruncationPersistsSyntheticWithoutEffect(t *testing.T) {
+	calls := 0
+	agent, session, close := durableAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"write","arguments":"{\"path\":\"x.txt\",\"content\":\"x\"}"}}]},"finish_reason":"length"}],"usage":{}}`))
+	})
+	defer close()
+	for index := range agent.Tools {
+		original := agent.Tools[index].Execute
+		agent.Tools[index].Execute = func(ctx context.Context, args map[string]any) (string, error) {
+			calls++
+			return original(ctx, args)
+		}
+	}
+	if _, err := agent.runAgentLoop("inspect"); err == nil || !strings.Contains(err.Error(), "token limit") {
+		t.Fatalf("error: %v", err)
+	}
+	state := session.State()
+	if calls != 0 || state.Operation.Kind != "run" || state.Transcript[len(state.Transcript)-1]["content"] != syntheticContent["truncated"] {
+		t.Fatalf("calls=%d state=%+v", calls, state)
+	}
+	restored := newAgent(nil, session, "")
+	restored.Endpoint, restored.Client = agent.Endpoint, agent.Client
+	if err := restored.restoreSession(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if state := session.State(); state.Operation.Kind != "idle" {
+		t.Fatalf("recovered state: %+v", state)
+	}
+}
+
+func TestRestoreExecutesNonIdleRecovery(t *testing.T) {
+	agent, session, close := durableAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}],"usage":{}}`))
+	})
 	defer close()
 	if _, err := agent.startDurableRun("inspect"); err != nil {
 		t.Fatal(err)
 	}
 	restored := newAgent(nil, session, "")
-	if err := restored.restoreSession(); err == nil || !strings.Contains(err.Error(), "Session recovery required") {
+	restored.Endpoint, restored.Client = agent.Endpoint, agent.Client
+	if err := restored.restoreSession(); err != nil {
 		t.Fatalf("restore: %v", err)
+	}
+	if state := session.State(); state.Operation.Kind != "idle" || state.Transcript[len(state.Transcript)-1]["content"] != "recovered" {
+		t.Fatalf("state: %+v", state)
+	}
+	if err := restored.restoreSession(); err != nil {
+		t.Fatalf("idempotent restore: %v", err)
 	}
 }
