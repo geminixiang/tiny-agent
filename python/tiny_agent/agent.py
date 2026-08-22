@@ -199,15 +199,17 @@ class Agent:
         prompt = self.usage["input"] + self.usage["cacheRead"] + self.usage["cacheWrite"]
         if cache_rate and prompt: self.usage["cacheHitRate"] = self.usage["cacheRead"] / prompt * 100
 
+    def _replay_declaration(self, tool: dict) -> tuple[str, str]:
+        if tool is TOOL_DEFINITIONS[1]:
+            return "safe", "builtin:read:v1"
+        return "never", f"tool:{tool['function']['name']}:v1"
+
     def _current_recovery_configuration(self) -> dict:
         declarations = []
-        for tool in self.configuration["tools"]:
-            safe = tool["name"] == "read" and any(item is TOOL_DEFINITIONS[1] for item in self.tools if item["function"]["name"] == "read")
-            declarations.append({
-                **tool,
-                "replay": "safe" if safe else "never",
-                "replayKey": "builtin:read:v1" if safe else f"tool:{tool['name']}:v1",
-            })
+        for configured in self.configuration["tools"]:
+            tool = next((item for item in self.tools if item["function"]["name"] == configured["name"]), None)
+            replay, replay_key = self._replay_declaration(tool) if tool else ("never", f"tool:{configured['name']}:v1")
+            declarations.append({**configured, "replay": replay, "replayKey": replay_key})
         return {
             "configurationDigest": self.configuration_digest,
             "environmentIdentity": environment_identity(ROOT),
@@ -287,12 +289,12 @@ class Agent:
         if action["mode"] == "start":
             call = next(message for message in reversed(state["activeContext"]) if message["role"] == "assistant")["tool_calls"][action["toolIndex"]]
             started_id, result_id = uuid7(), uuid7()
-            replay = "safe" if tool is TOOL_DEFINITIONS[1] else "never"
+            replay, replay_key = self._replay_declaration(tool)
             self.session.append({"kind": "record", "id": started_id, "record": {
                 "type": "toolStarted", "operationId": operation_id, "stepId": step_id,
                 "assistantEntryId": action["assistantEntryId"], "toolIndex": action["toolIndex"],
                 "toolCallId": call["id"], "toolName": action["toolName"], "arguments": action["arguments"],
-                "replay": replay, "replayKey": "builtin:read:v1" if replay == "safe" else f"tool:{action['toolName']}:v1",
+                "replay": replay, "replayKey": replay_key,
                 "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id,
             }})
         else:
@@ -424,8 +426,8 @@ class Agent:
                     self.session.append({"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "message": result, "toolName": name, "result": {"type": "synthetic", "reason": reason}}})
                 else:
                     started_id, result_id = uuid7(), uuid7()
-                    replay = "safe" if name == "read" else "never"
-                    self.session.append({"kind": "record", "id": started_id, "record": {"type": "toolStarted", "operationId": operation_id, "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "toolCallId": call["id"], "toolName": name, "arguments": args, "replay": replay, "replayKey": "builtin:read:v1" if replay == "safe" else f"tool:{name}:v1", "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id}})
+                    replay, replay_key = self._replay_declaration(tool)
+                    self.session.append({"kind": "record", "id": started_id, "record": {"type": "toolStarted", "operationId": operation_id, "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "toolCallId": call["id"], "toolName": name, "arguments": args, "replay": replay, "replayKey": replay_key, "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id}})
                     cancelled = self.begin(operation_id, "tool", call["id"]); aborted = False
                     try:
                         self.on_tool({"phase": "start", "name": name, "args": args})
@@ -455,11 +457,11 @@ class Agent:
         while cut > 0 and messages[cut]["role"] != "user": cut -= 1
         if not cut: return "Nothing to compact."
 
-        source = self._message_facts()
-        input_through_id = source[-1]["id"]
+        durable_source = self._message_facts()
+        input_through_id = durable_source[-1]["id"]
         retained_count = len(messages) - cut
-        retained = source[-retained_count:] if retained_count else []
-        compacted = source[:-retained_count] if retained_count else source
+        retained = durable_source[-retained_count:] if retained_count else []
+        compacted = durable_source[:-retained_count] if retained_count else durable_source
         if not compacted: return "Nothing to compact."
 
         operation_id, result_id = uuid7(), uuid7()
@@ -483,8 +485,9 @@ class Agent:
             action.get("attempt", 1), action.get("stepId"),
         )
         source = self._message_facts(operation["inputThroughEntryId"])
-        compacted_ids = set(self._compaction_record(operation_id)["compactedEntryIds"])
-        old = [item["message"] for item in source if item["id"] in compacted_ids]
+        messages = state["activeContext"]
+        retained_count = len(self._compaction_record(operation_id)["retainedEntryIds"])
+        old = messages[:-retained_count] if retained_count else messages
         cancelled = self.begin(operation_id, "compact", operation_kind="compaction")
         try:
             summary, usage, stop_reason = self.call_model([

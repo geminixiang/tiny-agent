@@ -129,6 +129,23 @@ class TinyAgentTest(unittest.TestCase):
             self.assertIn("not replayed", next(message["content"] for message in never.messages if message["role"] == "tool"))
             never_session.close()
 
+    def test_custom_read_pending_recovery_materializes_interruption(self):
+        data = (FIXTURES / "pending-never-tool.jsonl").read_bytes().replace(b"builtin:read:never:v1", b"tool:read:v1")
+        state = reduce_session(data); session_id = state["header"]["id"]
+        directory = tiny.ROOT / ".tiny-agent/sessions"; directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"fixture_{session_id}.jsonl").write_bytes(data)
+        session = tiny.Session.open(session_id, tiny.ROOT); executions = []
+        custom_read = {"type": "function", "function": {**tiny.TOOL_DEFINITIONS[1]["function"]}, "execute": lambda *_: executions.append(True)}
+        replies = iter([{"choices": [{"message": {"role": "assistant", "content": "recovered custom"}, "finish_reason": "stop"}], "usage": {}}])
+        agent = tiny.Agent(session=session, requester=lambda *_: next(replies), tools=[custom_read])
+        snapshot = state["operation"]["step"]["configurationSnapshot"]
+        agent.configuration = snapshot; agent.configuration_digest = configuration_digest(snapshot)
+        with patch.dict(os.environ, {"TINY_AGENT_ENVIRONMENT_IDENTITY": "fixture"}):
+            self.assertEqual(agent.resume_session(), "recovered custom")
+        self.assertFalse(executions)
+        self.assertIn("not replayed", next(message["content"] for message in agent.messages if message["role"] == "tool"))
+        session.close()
+
     def test_recovers_abort_and_blocks_without_writes(self):
         with patch.dict(os.environ, {"TINY_AGENT_ENVIRONMENT_IDENTITY": "fixture"}):
             aborted, aborted_session = self.recovery_agent("abort-open-attempt.jsonl")
@@ -169,6 +186,28 @@ class TinyAgentTest(unittest.TestCase):
         session_id = session.id; session.close()
         reopened = tiny.Session.open(session_id, tiny.ROOT); restored = tiny.Agent(session=reopened); restored.resume_session()
         self.assertEqual(restored.messages[1:], state["activeContext"]); reopened.close()
+
+    def test_repeated_compaction_uses_bounded_active_context(self):
+        session = tiny.Session.create(tiny.ROOT); agent = self._completed_conversation(session)
+        requests = []
+
+        def compact_reply(body, _cancelled):
+            requests.append(json.loads(body["messages"][1]["content"]))
+            summary = "first knowledge" if len(requests) == 1 else "second knowledge including first knowledge"
+            return {"choices": [{"message": {"role": "assistant", "content": summary}, "finish_reason": "stop"}], "usage": {}}
+
+        agent.requester = compact_reply
+        agent.compact()
+        agent.requester = lambda *_: {"choices": [{"message": {"role": "assistant", "content": "new answer"}, "finish_reason": "stop"}], "usage": {}}
+        for index in range(4): agent.run_agent_loop(f"new question {index}")
+        agent.requester = compact_reply
+        agent.compact()
+
+        self.assertLess(len(requests[1]), len(agent._message_facts()))
+        self.assertEqual(requests[1][0], {"role": "user", "content": "[Compacted history]\nfirst knowledge"})
+        self.assertIn("first knowledge", session.load()["activeContext"][0]["content"])
+        self.assertIn("second knowledge", session.load()["activeContext"][0]["content"])
+        session.close()
 
     def test_durable_compaction_abort(self):
         session = tiny.Session.create(tiny.ROOT); agent = self._completed_conversation(session)
@@ -284,6 +323,54 @@ class TinyAgentTest(unittest.TestCase):
             ("later", "Operation aborted before execution."),
         ])
         tool_session.close()
+
+    def test_replay_declaration_uses_exact_builtin_read(self):
+        custom_read = {"type": "function", "function": {**tiny.TOOL_DEFINITIONS[1]["function"]}, "execute": lambda *_: "custom"}
+        builtin = tiny.Agent(tools=[tiny.TOOL_DEFINITIONS[1]])
+        custom = tiny.Agent(tools=[custom_read])
+        self.assertEqual(builtin._current_recovery_configuration()["tools"][0]["replay"], "safe")
+        self.assertEqual(custom._current_recovery_configuration()["tools"][0]["replay"], "never")
+
+        responses = iter([
+            {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "read-call", "type": "function", "function": {"name": "read", "arguments": '{"path":"missing"}'}}
+            ]}, "finish_reason": "tool_calls"}], "usage": {}},
+            {"choices": [{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}], "usage": {}},
+        ])
+        session = tiny.Session.create(tiny.ROOT)
+        agent = tiny.Agent(session=session, tools=[custom_read], requester=lambda *_: next(responses))
+        agent.run_agent_loop("read")
+        started = next(fact["record"] for fact in agent._facts() if fact.get("record", {}).get("type") == "toolStarted")
+        self.assertEqual((started["replay"], started["replayKey"]), ("never", "tool:read:v1"))
+        session.close()
+
+    def test_cli_displays_recovery_through_terminal_before_continuation(self):
+        session = SimpleNamespace(id="session-id", path=Path("session.jsonl"), close=lambda: None)
+        calls = []
+
+        class FakeAgent:
+            def __init__(self, *_args, **_kwargs):
+                self.usage = {"input": 7, "output": 3, "cacheRead": 0, "cacheWrite": 0}; self.on_tool = None
+            def resume_session(self): calls.append("resume"); return "recovered answer"
+            def run_agent_loop(self, text): calls.append(f"run:{text}"); return "continued answer"
+
+        class FakeTerminal:
+            def __enter__(self): calls.append("terminal"); return self
+            def __exit__(self, *_): return None
+            def run(self, _agent, operation): calls.append("terminal.run"); return operation()
+
+        output = io.StringIO()
+        with patch.object(cli, "load_mcp_configs", return_value=[]), \
+             patch.object(cli, "load_skills", return_value=[]), \
+             patch.object(cli, "load_project_instructions", return_value=""), \
+             patch.object(cli.Session, "open", return_value=session), \
+             patch.object(cli, "Agent", FakeAgent), patch.object(cli, "Terminal", FakeTerminal), \
+             redirect_stdout(output):
+            self.assertEqual(cli.run_cli(["--session", "session-id", "continue"]), 0)
+
+        self.assertEqual(calls, ["terminal", "terminal.run", "resume", "terminal.run", "run:continue"])
+        self.assertLess(output.getvalue().index("session: session-id"), output.getvalue().index("recovered answer"))
+        self.assertIn("recovered answer\x1b[0m\n\x1b[2m↑7 ↓3", output.getvalue())
 
     def test_plugin_selection_deduplicates_assembles_mcp_and_rejects_unknown_early(self):
         remote = {"type": "function", "function": {"name": "mcp_remote", "description": "remote", "parameters": {}}}

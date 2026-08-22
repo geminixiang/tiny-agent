@@ -135,7 +135,6 @@ def run_cli(argv: list[str] | None = None) -> int:
         try:
             tools = [*local_tools, *(tool for loaded in loaded_mcp for tool in loaded.tools)]
             agent = Agent(skills, session, load_project_instructions(), tools=tools)
-            if args.session: agent.resume_session()
             def show_tool(event):
                 shown = {**event, "name": display_tool_name(event["name"])}
                 print(f"\x1b[{'33' if event['phase'] == 'start' else '2'}m{format_tool_event(shown)}\x1b[0m")
@@ -146,6 +145,10 @@ def run_cli(argv: list[str] | None = None) -> int:
             resume = lambda: print(f"\nResume: tiny-py --session {session.id}")
             try:
                 with Terminal() as terminal:
+                    if args.session:
+                        recovered = terminal.run(agent, agent.resume_session)
+                        if recovered is not None:
+                            print(f"\n\x1b[36m{recovered}\x1b[0m\n\x1b[2m{format_usage(agent.usage)}\x1b[0m")
                     if args.prompt:
                         print(f"\n{terminal.run(agent, lambda: agent.run_agent_loop(' '.join(args.prompt)))}\n\x1b[2m{format_usage(agent.usage)}\x1b[0m"); resume(); return 0
                     print("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit")

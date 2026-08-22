@@ -404,6 +404,18 @@ def apply_record(state: dict[str, Any], fact: dict[str, Any], line: int):
         result_id = reserve(state, record.get("resultEntryId"), line, seq, "compactionResult")
         if input_id not in state["entries"]:
             fail("INVALID_REFERENCE", line, seq)
+        compacted_ids = record.get("compactedEntryIds")
+        retained_ids = record.get("retainedEntryIds")
+        if not isinstance(compacted_ids, list) or not compacted_ids or not isinstance(retained_ids, list):
+            fail("INVALID_FACT", line, seq)
+        partition = [uuid(value, "INVALID_FACT", line, seq) for value in [*compacted_ids, *retained_ids]]
+        source_ids = [entry_id for entry_id, info in state["entries"].items() if info["entry"].get("type") == "message"]
+        try:
+            input_index = source_ids.index(input_id)
+        except ValueError:
+            fail("INVALID_REFERENCE", line, seq)
+        if partition != source_ids[: input_index + 1]:
+            fail("INVALID_REFERENCE", line, seq)
         source_digest_value = record.get("sourceDigest")
         if not isinstance(source_digest_value, str) or not DIGEST.fullmatch(source_digest_value):
             fail("INVALID_FACT", line, seq)
