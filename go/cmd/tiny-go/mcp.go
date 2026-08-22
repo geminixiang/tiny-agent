@@ -36,6 +36,8 @@ type Tool struct {
 	Name        string
 	Description string
 	Parameters  map[string]any
+	Replay      string
+	ReplayKey   string
 	Execute     func(context.Context, map[string]any) (string, error)
 }
 
@@ -323,7 +325,7 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 			description = fmt.Sprintf("MCP tool %s from %s.", remote.Name, config.Alias)
 		}
 		remoteName := remote.Name
-		mcp.tools = append(mcp.tools, Tool{Name: mappedName, Description: description, Parameters: inputSchema, Execute: func(callCtx context.Context, args map[string]any) (string, error) {
+		mcp.tools = append(mcp.tools, Tool{Name: mappedName, Description: description, Parameters: inputSchema, Replay: "never", ReplayKey: "mcp:" + config.Alias + ":" + remoteName + ":v1", Execute: func(callCtx context.Context, args map[string]any) (string, error) {
 			return mcp.callTool(callCtx, remoteName, args)
 		}})
 	}

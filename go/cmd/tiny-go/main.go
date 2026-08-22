@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -66,35 +65,9 @@ type ToolEvent struct {
 	Result      string
 }
 type ModelResponse struct {
-	Message Message
-	Usage   Usage
-}
-
-type SessionRecord struct {
-	Type              string     `json:"type"`
-	Version           int        `json:"version,omitempty"`
-	ID                string     `json:"id,omitempty"`
-	CreatedAt         string     `json:"createdAt,omitempty"`
-	Timestamp         string     `json:"timestamp"`
-	Cwd               string     `json:"cwd,omitempty"`
-	Provider          string     `json:"provider,omitempty"`
-	Model             string     `json:"model,omitempty"`
-	Message           *Message   `json:"message,omitempty"`
-	Usage             *UsageJSON `json:"usage,omitempty"`
-	ToolName          string     `json:"toolName,omitempty"`
-	Summary           *string    `json:"summary,omitempty"`
-	CompactedMessages int        `json:"compactedMessages,omitempty"`
-	KeptMessages      int        `json:"keptMessages,omitempty"`
-	Phase             string     `json:"phase,omitempty"`
-	Reason            string     `json:"reason,omitempty"`
-	ToolCallID        string     `json:"toolCallId,omitempty"`
-}
-
-type UsageJSON struct {
-	Input      int `json:"input"`
-	Output     int `json:"output"`
-	CacheRead  int `json:"cacheRead"`
-	CacheWrite int `json:"cacheWrite"`
+	Message    Message
+	Usage      Usage
+	StopReason string
 }
 
 func text(s string) *string { return &s }
@@ -401,80 +374,11 @@ func uuid7(now time.Time) string {
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
-type Session struct {
-	ID, Path string
-	mu       sync.Mutex
-}
-
-func createSession(now time.Time) (*Session, error) {
-	id := uuid7(now)
-	dir := filepath.Join(cwd, ".tiny-agent", "sessions")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	createdAt := now.UTC().Format("2006-01-02T15:04:05.000Z")
-	stamp := strings.NewReplacer(":", "-", ".", "-").Replace(createdAt)
-	session := &Session{ID: id, Path: filepath.Join(dir, stamp+"_"+id+".jsonl")}
-	err := session.append(SessionRecord{Type: "session", Version: 1, ID: id, CreatedAt: createdAt, Cwd: cwd, Provider: "openrouter", Model: model()})
-	return session, err
-}
-
-func openSession(id string) (*Session, error) {
-	valid := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(id)
-	if !valid {
-		return nil, fmt.Errorf("Invalid session ID: %s", id)
-	}
-	matches, _ := filepath.Glob(filepath.Join(cwd, ".tiny-agent", "sessions", "*_"+id+".jsonl"))
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("Session not found: %s", id)
-	}
-	if len(matches) > 1 {
-		return nil, fmt.Errorf("Duplicate session ID: %s", id)
-	}
-	return &Session{ID: id, Path: matches[0]}, nil
-}
-
-func (s *Session) append(record SessionRecord) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	record.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
-	b, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(s.Path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.Write(append(b, '\n'))
-	return err
-}
-
-func (s *Session) records() ([]SessionRecord, error) {
-	f, err := os.Open(s.Path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	records := []SessionRecord{}
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 12*1024*1024)
-	for scanner.Scan() {
-		var record SessionRecord
-		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	return records, scanner.Err()
-}
-
 type Agent struct {
 	Messages []Message
 	Usage    Usage
 	Skills   []Skill
-	Session  *Session
+	Session  *SessionStore
 	Client   *http.Client
 	Endpoint string
 	OnTool   func(ToolEvent)
@@ -483,7 +387,7 @@ type Agent struct {
 	cancel   context.CancelFunc
 }
 
-func newAgent(skills []Skill, session *Session, instructions string) *Agent {
+func newAgent(skills []Skill, session *SessionStore, instructions string) *Agent {
 	list := "(none)"
 	if len(skills) > 0 {
 		items := make([]string, len(skills))
@@ -515,7 +419,11 @@ func localTools(names ...string) []Tool {
 		description := function["description"].(string)
 		parameters := function["parameters"].(map[string]any)
 		toolName := name
-		tools = append(tools, Tool{Name: name, Description: description, Parameters: parameters, Execute: func(ctx context.Context, args map[string]any) (string, error) {
+		replay, replayKey := "never", "builtin:"+name+":v1"
+		if name == "read" {
+			replay = "safe"
+		}
+		tools = append(tools, Tool{Name: name, Description: description, Parameters: parameters, Replay: replay, ReplayKey: replayKey, Execute: func(ctx context.Context, args map[string]any) (string, error) {
 			stringsOnly := map[string]string{}
 			for key, value := range args {
 				text, ok := value.(string)
@@ -557,62 +465,26 @@ func (a *Agent) end() {
 	defer a.mu.Unlock()
 	a.cancel = nil
 }
-func usageJSON(u Usage) *UsageJSON { return &UsageJSON{u.Input, u.Output, u.CacheRead, u.CacheWrite} }
-
-func (a *Agent) interrupt(phase, toolCallID string) error {
-	if a.Session == nil {
-		return nil
-	}
-	return a.Session.append(SessionRecord{Type: "interruption", Phase: phase, ToolCallID: toolCallID, Reason: "escape"})
-}
-
-func (a *Agent) resumeSession() error {
-	if a.Session == nil {
-		return nil
-	}
-	records, err := a.Session.records()
-	if err != nil {
-		return err
-	}
-	for _, record := range records[1:] {
-		if record.Type == "message" {
-			a.Messages = append(a.Messages, *record.Message)
-			if record.Usage != nil {
-				a.addUsage(*record.Usage, true)
-			}
-			continue
-		}
-		if record.Type != "compaction" {
-			continue
-		}
-		recent := append([]Message{}, a.Messages[max(1, len(a.Messages)-record.KeptMessages):]...)
-		a.Messages = append([]Message{a.Messages[0], {Role: "user", Content: text("[Compacted history]\n" + value(record.Summary))}}, recent...)
-		if record.Usage != nil {
-			a.addUsage(*record.Usage, false)
-		}
-	}
-	return nil
-}
-
 func value(s *string) string {
 	if s == nil {
 		return ""
 	}
 	return *s
 }
-func (a *Agent) addUsage(u UsageJSON, cacheRate bool) {
-	a.Usage.Input += u.Input
-	a.Usage.Output += u.Output
-	a.Usage.CacheRead += u.CacheRead
-	a.Usage.CacheWrite += u.CacheWrite
-	prompt := u.Input + u.CacheRead + u.CacheWrite
-	if cacheRate && prompt > 0 {
-		rate := float64(u.CacheRead) / float64(prompt) * 100
+
+func (a *Agent) addUsage(usage Usage) {
+	a.Usage.Input += usage.Input
+	a.Usage.Output += usage.Output
+	a.Usage.CacheRead += usage.CacheRead
+	a.Usage.CacheWrite += usage.CacheWrite
+	prompt := a.Usage.Input + a.Usage.CacheRead + a.Usage.CacheWrite
+	if prompt > 0 {
+		rate := float64(a.Usage.CacheRead) / float64(prompt) * 100
 		a.Usage.CacheHitRate = &rate
 	}
 }
 
-func (a *Agent) callModel(ctx context.Context, messages []Message, tools any, updateCacheRate bool) (ModelResponse, error) {
+func (a *Agent) callModel(ctx context.Context, messages []Message, tools any) (ModelResponse, error) {
 	key := os.Getenv("OPENROUTER_API_KEY")
 	if key == "" {
 		return ModelResponse{}, errors.New("Set OPENROUTER_API_KEY")
@@ -635,12 +507,13 @@ func (a *Agent) callModel(ctx context.Context, messages []Message, tools any, up
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		b, _ := io.ReadAll(response.Body)
-		return ModelResponse{}, fmt.Errorf("OpenRouter %d: %s", response.StatusCode, b)
+		data, _ := io.ReadAll(response.Body)
+		return ModelResponse{}, fmt.Errorf("OpenRouter %d: %s", response.StatusCode, data)
 	}
 	var data struct {
 		Choices []struct {
-			Message Message `json:"message"`
+			Message      Message `json:"message"`
+			FinishReason string  `json:"finish_reason"`
 		} `json:"choices"`
 		Usage struct {
 			PromptTokens         int `json:"prompt_tokens"`
@@ -663,145 +536,98 @@ func (a *Agent) callModel(ctx context.Context, messages []Message, tools any, up
 		cacheRead = data.Usage.PromptCacheHitTokens
 	}
 	cacheWrite := data.Usage.PromptTokensDetails.CacheWriteTokens
-	usage := UsageJSON{max(0, data.Usage.PromptTokens-cacheRead-cacheWrite), data.Usage.CompletionTokens, cacheRead, cacheWrite}
-	a.addUsage(usage, updateCacheRate)
-	return ModelResponse{data.Choices[0].Message, Usage{Input: usage.Input, Output: usage.Output, CacheRead: usage.CacheRead, CacheWrite: usage.CacheWrite}}, nil
-}
-
-func (a *Agent) modelRequest(messages []Message, tools any, phase string, updateCacheRate bool) (*ModelResponse, error) {
-	ctx := a.begin()
-	response, err := a.callModel(ctx, messages, tools, updateCacheRate)
-	aborted := errors.Is(ctx.Err(), context.Canceled)
-	a.end()
-	if err == nil {
-		return &response, nil
+	usage := Usage{Input: max(0, data.Usage.PromptTokens-cacheRead-cacheWrite), Output: data.Usage.CompletionTokens, CacheRead: cacheRead, CacheWrite: cacheWrite}
+	a.addUsage(usage)
+	reason := data.Choices[0].FinishReason
+	if reason == "" {
+		if len(data.Choices[0].Message.ToolCalls) > 0 {
+			reason = "tool_calls"
+		} else {
+			reason = "stop"
+		}
 	}
-	if !aborted {
-		return nil, err
-	}
-	return nil, a.interrupt(phase, "")
+	return ModelResponse{Message: data.Choices[0].Message, Usage: usage, StopReason: reason}, nil
 }
 
 func (a *Agent) runAgentLoop(input string) (string, error) {
 	user := Message{Role: "user", Content: text(input)}
-	a.Messages = append(a.Messages, user)
-	if a.Session != nil {
-		if err := a.Session.append(SessionRecord{Type: "message", Message: &user}); err != nil {
-			return "", err
-		}
+	run, err := a.startDurableRun(input)
+	if err != nil {
+		return "", err
 	}
+	a.Messages = append(a.Messages, user)
 	for {
-		response, err := a.modelRequest(a.Messages, a.toolDefinitions(), "model", true)
-		if err != nil {
+		if err := a.startAttempt(&run); err != nil {
 			return "", err
 		}
-		if response == nil {
-			return "Operation aborted.", nil
-		}
-		answer := response.Message
-		a.Messages = append(a.Messages, answer)
-		if a.Session != nil {
-			if err := a.Session.append(SessionRecord{Type: "message", Message: &answer, Usage: usageJSON(response.Usage)}); err != nil {
-				return "", err
+		ctx := a.begin()
+		response, err := a.callModel(ctx, a.Messages, a.toolDefinitions())
+		aborted := errors.Is(ctx.Err(), context.Canceled)
+		a.end()
+		if err != nil {
+			if aborted {
+				// Phase 2b adds durable abort reconciliation before cancellation.
+				return "Operation aborted.", nil
 			}
+			return "", a.failAttempt(run, err)
 		}
-		if len(answer.ToolCalls) == 0 {
+		stopReason := response.StopReason
+		if stopReason == "tool_calls" || stopReason == "function_call" {
+			stopReason = "toolUse"
+		}
+		if stopReason != "stop" && stopReason != "toolUse" && stopReason != "length" {
+			return "", a.failAttempt(run, fmt.Errorf("unsupported finish_reason: %s", response.StopReason))
+		}
+		response.StopReason = stopReason
+		answer := response.Message
+		finish := stopReason == "stop" && len(answer.ToolCalls) == 0 && strings.TrimSpace(value(answer.Content)) != ""
+		if _, err := a.settleAssistant(&run, response, finish); err != nil {
+			return "", err
+		}
+		a.Messages = append(a.Messages, answer)
+		if finish {
 			return value(answer.Content), nil
 		}
-		for i, call := range answer.ToolCalls {
-			args := map[string]any{}
-			err := json.Unmarshal([]byte(call.Function.Arguments), &args)
-			displayArgs := map[string]string{}
-			for key, value := range args {
-				if text, ok := value.(string); ok {
-					displayArgs[key] = text
-				}
+		// This Phase 2a checkpoint deliberately blocks before any tool effect,
+		// so canonical sessions can never mix with the removed legacy format.
+		if stopReason == "toolUse" {
+			if a.Session != nil {
+				return "", errors.New("Tool execution requires the next durable-session phase")
 			}
-			a.OnTool(ToolEvent{Phase: "start", Name: call.Function.Name, Args: displayArgs})
-			ctx := a.begin()
-			result := ""
-			if err == nil {
-				toolFound := false
-				for _, tool := range a.Tools {
-					if tool.Name == call.Function.Name {
-						toolFound = true
-						result, err = tool.Execute(ctx, args)
+			for _, call := range answer.ToolCalls {
+				args := map[string]any{}
+				if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+					return "", err
+				}
+				var selected *Tool
+				for index := range a.Tools {
+					if a.Tools[index].Name == call.Function.Name {
+						selected = &a.Tools[index]
 						break
 					}
 				}
-				if !toolFound {
-					err = fmt.Errorf("unknown tool: %s", call.Function.Name)
+				if selected == nil {
+					return "", fmt.Errorf("unknown tool: %s", call.Function.Name)
 				}
-			}
-			aborted := errors.Is(ctx.Err(), context.Canceled)
-			a.end()
-			if err != nil {
-				if aborted {
-					result = "Operation aborted"
-				} else if result == "" {
-					result = "Error: " + err.Error()
-				} else {
-					result += "\nError: " + err.Error()
+				ctx := a.begin()
+				result, toolErr := selected.Execute(ctx, args)
+				a.end()
+				if toolErr != nil {
+					result = "Error: " + toolErr.Error()
 				}
+				a.Messages = append(a.Messages, Message{Role: "tool", Content: text(result), ToolCallID: call.ID})
 			}
-			a.OnTool(ToolEvent{Phase: "end", Name: call.Function.Name, Args: displayArgs, Result: result})
-			tool := Message{Role: "tool", Content: text(result), ToolCallID: call.ID}
-			a.Messages = append(a.Messages, tool)
-			if a.Session != nil {
-				if err := a.Session.append(SessionRecord{Type: "message", Message: &tool, ToolName: call.Function.Name}); err != nil {
-					return "", err
-				}
-			}
-			if !aborted {
-				continue
-			}
-			for _, pending := range answer.ToolCalls[i+1:] {
-				skipped := Message{Role: "tool", Content: text("Operation aborted before execution"), ToolCallID: pending.ID}
-				a.Messages = append(a.Messages, skipped)
-				if a.Session != nil {
-					if err := a.Session.append(SessionRecord{Type: "message", Message: &skipped, ToolName: pending.Function.Name}); err != nil {
-						return "", err
-					}
-				}
-			}
-			if err := a.interrupt("tool", call.ID); err != nil {
-				return "", err
-			}
-			return "Operation aborted.", nil
+			continue
 		}
+		if stopReason == "length" {
+			return "", errors.New("Model response reached the token limit; recovery is required")
+		}
+		return "", errors.New("Model returned an empty response (finish_reason: stop)")
 	}
 }
 
 func (a *Agent) compact() (string, error) {
-	if len(a.Messages) <= 1 {
-		return "Nothing to compact.", nil
-	}
-	cut := max(len(a.Messages)-6, 1)
-	for cut > 1 && a.Messages[cut].Role != "user" {
-		cut--
-	}
-	recent, old := append([]Message{}, a.Messages[cut:]...), a.Messages[1:cut]
-	if len(old) == 0 {
-		return "Nothing to compact.", nil
-	}
-	encoded, _ := json.Marshal(old)
-	prompt := []Message{{Role: "system", Content: text("Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps.")}, {Role: "user", Content: text(string(encoded))}}
-	response, err := a.modelRequest(prompt, nil, "compact", false)
-	if err != nil {
-		return "", err
-	}
-	if response == nil {
-		return "Compaction aborted.", nil
-	}
-	summary := value(response.Message.Content)
-	a.Messages = append([]Message{a.Messages[0], {Role: "user", Content: text("[Compacted history]\n" + summary)}}, recent...)
-	if a.Session != nil {
-		record := SessionRecord{Type: "compaction", Summary: &summary, CompactedMessages: len(old), KeptMessages: len(recent), Usage: usageJSON(response.Usage)}
-		if err := a.Session.append(record); err != nil {
-			return "", err
-		}
-	}
-	return fmt.Sprintf("Compacted %d messages (kept last %d).", len(old), len(recent)), nil
+	return "", errors.New("Compaction requires the next durable-session phase")
 }
 
 var errExit = errors.New("exit")
@@ -1116,15 +942,16 @@ func runCLI(args []string) error {
 	if err != nil {
 		return err
 	}
-	var session *Session
+	var session *SessionStore
 	if sessionID == "" {
-		session, err = createSession(time.Now())
+		session, err = createSessionStore(time.Now())
 	} else {
-		session, err = openSession(sessionID)
+		session, err = openSessionStore(sessionID)
 	}
 	if err != nil {
 		return err
 	}
+	defer session.Close()
 	agent := newAgent(skills, session, loadProjectInstructions())
 	agent.Tools = localTools(selectedPlugins...)
 	loadedMCP := []*MCPClient{}
@@ -1153,7 +980,7 @@ func runCLI(args []string) error {
 		fmt.Fprintln(out, color+formatToolEvent(ToolEvent{Phase: event.Phase, Name: displayToolName(event.Name), Args: event.Args, Result: event.Result})+"\x1b[0m")
 	}
 	if sessionID != "" {
-		if err := agent.resumeSession(); err != nil {
+		if err := agent.restoreSession(); err != nil {
 			return err
 		}
 	}

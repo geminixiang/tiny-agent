@@ -247,7 +247,7 @@ func TestModelToolLoopAndCache(t *testing.T) {
 	if calls != 2 || agent.Usage.Input != 135 || agent.Usage.CacheRead != 85 || agent.Usage.Output != 15 {
 		t.Fatalf("calls=%d usage=%+v", calls, agent.Usage)
 	}
-	if rate := *agent.Usage.CacheHitRate; rate != 50 {
+	if rate := *agent.Usage.CacheHitRate; rate != float64(85)/220*100 {
 		t.Fatalf("cache rate: %v", rate)
 	}
 	b, _ := os.ReadFile(filepath.Join(cwd, "made.txt"))
@@ -256,83 +256,46 @@ func TestModelToolLoopAndCache(t *testing.T) {
 	}
 }
 
-func TestSessionResumeAndCompactBoundary(t *testing.T) {
+func TestSessionResumeIdleProjection(t *testing.T) {
 	inTempDir(t)
 	t.Setenv("OPENROUTER_API_KEY", "test")
-	session, err := createSession(time.Date(2026, 8, 3, 3, 55, 50, 62_000_000, time.UTC))
+	session, err := createSessionStore(time.Date(2026, 8, 3, 3, 55, 50, 62_000_000, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(filepath.Base(session.Path), "2026-08-03T03-55-50-062Z_") || !strings.HasSuffix(session.Path, ".jsonl") {
-		t.Fatalf("path: %s", session.Path)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if _, ok := body["tools"]; ok {
-			t.Error("compact request included tools")
-		}
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"summary"}}],"usage":{"prompt_tokens":20,"completion_tokens":2}}`))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":2}}`))
 	}))
-	defer server.Close()
 	agent := newAgent(nil, session, "")
 	agent.Endpoint, agent.Client = server.URL, server.Client()
-	messages := []Message{
-		{Role: "user", Content: text("old")}, {Role: "assistant", Content: text("old answer")},
-		{Role: "user", Content: text("run")},
-		{Role: "assistant", Content: nil, ToolCalls: []ToolCall{{ID: "1", Type: "function", Function: ToolFunction{Name: "read", Arguments: `{"path":"a"}`}}}},
-		{Role: "tool", Content: text("data"), ToolCallID: "1"}, {Role: "assistant", Content: text("done")},
-		{Role: "user", Content: text("next")}, {Role: "assistant", Content: text("answer")},
+	if answer, err := agent.runAgentLoop("hello"); err != nil || answer != "done" {
+		t.Fatalf("run: %q %v", answer, err)
 	}
-	for i := range messages {
-		agent.Messages = append(agent.Messages, messages[i])
-		if err := session.append(SessionRecord{Type: "message", Message: &messages[i]}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	result, err := agent.compact()
-	if err != nil || result != "Compacted 2 messages (kept last 6)." {
-		t.Fatalf("compact: %q %v", result, err)
-	}
-	records, _ := session.records()
-	compact := records[len(records)-1]
-	if compact.KeptMessages != 6 || compact.CompactedMessages != 2 {
-		t.Fatalf("compact record: %+v", compact)
-	}
-	restored := newAgent(nil, session, "")
-	if err := restored.resumeSession(); err != nil {
+	id := session.ID
+	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(restored.Messages) != len(agent.Messages) || restored.Messages[2].Role != "user" || value(restored.Messages[2].Content) != "run" {
+	reopened, err := openSessionStore(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restored := newAgent(nil, reopened, "")
+	if err := restored.restoreSession(); err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.Messages) != 3 || value(restored.Messages[1].Content) != "hello" || value(restored.Messages[2].Content) != "done" {
 		t.Fatalf("restored: %#v", restored.Messages)
 	}
-	if restored.Messages[4].ToolCallID != "1" {
-		t.Fatal("tool result separated from call")
+	if restored.Usage.Input != 20 || restored.Usage.Output != 2 {
+		t.Fatalf("usage: %+v", restored.Usage)
 	}
 }
 
-func TestCompactRecordsActualRetainedMessages(t *testing.T) {
-	inTempDir(t)
-	t.Setenv("OPENROUTER_API_KEY", "test")
-	session, _ := createSession(time.Now())
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"summary"}}],"usage":{}}`))
-	}))
-	defer server.Close()
-	agent := newAgent(nil, session, "")
-	agent.Endpoint, agent.Client = server.URL, server.Client()
-	agent.Messages = append(agent.Messages,
-		Message{Role: "user", Content: text("old")}, Message{Role: "assistant", Content: text("old answer")},
-		Message{Role: "user", Content: text("keep")}, Message{Role: "assistant", Content: text("1")}, Message{Role: "assistant", Content: text("2")},
-		Message{Role: "assistant", Content: text("3")}, Message{Role: "assistant", Content: text("4")}, Message{Role: "assistant", Content: text("5")}, Message{Role: "assistant", Content: text("6")},
-	)
-	result, err := agent.compact()
-	if err != nil || !strings.Contains(result, "kept last 7") {
-		t.Fatalf("compact: %q %v", result, err)
-	}
-	records, _ := session.records()
-	if records[len(records)-1].KeptMessages != 7 {
-		t.Fatalf("record: %+v", records[len(records)-1])
+func TestCompactIsUnavailableUntilDurableCompaction(t *testing.T) {
+	agent := newAgent(nil, nil, "")
+	if _, err := agent.compact(); err == nil || !strings.Contains(err.Error(), "next durable-session phase") {
+		t.Fatalf("compact: %v", err)
 	}
 }
 
@@ -355,7 +318,7 @@ func TestLargeBashOutputStoresFullLog(t *testing.T) {
 	}
 }
 
-func TestCancelModelPersistsInterruption(t *testing.T) {
+func TestCancelModelLeavesRecoverableAttempt(t *testing.T) {
 	inTempDir(t)
 	t.Setenv("OPENROUTER_API_KEY", "test")
 	started, release := make(chan struct{}), make(chan struct{})
@@ -368,7 +331,8 @@ func TestCancelModelPersistsInterruption(t *testing.T) {
 	}))
 	defer server.Close()
 	defer close(release)
-	session, _ := createSession(time.Now())
+	session, _ := createSessionStore(time.Now())
+	defer session.Close()
 	agent := newAgent(nil, session, "")
 	agent.Endpoint, agent.Client = server.URL, server.Client()
 	done := make(chan string)
@@ -378,9 +342,8 @@ func TestCancelModelPersistsInterruption(t *testing.T) {
 	if answer := <-done; answer != "Operation aborted." {
 		t.Fatalf("answer: %q", answer)
 	}
-	records, _ := session.records()
-	last := records[len(records)-1]
-	if last.Type != "interruption" || last.Phase != "model" {
-		t.Fatalf("last record: %+v", last)
+	state := session.State()
+	if state.Operation.Kind != "run" || state.Operation.Step == nil || state.Operation.Step.Status != "attempting" {
+		t.Fatalf("operation: %+v", state.Operation)
 	}
 }
