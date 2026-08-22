@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
 import re
-import secrets
 import select
 import signal
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
+
+from .session import Session, environment_identity, uuid7
+from .session_reducer import configuration_digest
 
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -81,11 +83,6 @@ def path_in_root(path: str) -> Path:
     return full
 
 
-def uuid7(now_ms: int | None = None) -> str:
-    value = bytearray(secrets.token_bytes(16)); value[:6] = (now_ms or time.time_ns() // 1_000_000).to_bytes(6, "big")
-    value[6] = value[6] & 0x0F | 0x70; value[8] = value[8] & 0x3F | 0x80
-    h = value.hex(); return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
-
 
 def execute_bash(command: str, cancelled: threading.Event) -> str:
     process = subprocess.Popen(command, cwd=ROOT, shell=True, executable="/bin/sh", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
@@ -143,28 +140,6 @@ def execute_tool(name: str, args: dict[str, str], cancelled: threading.Event | N
     raise ValueError(f"unknown tool: {name}")
 
 
-class Session:
-    def __init__(self, session_id: str, path: Path): self.id, self.path, self.lock = session_id, path, threading.Lock()
-
-    @classmethod
-    def create(cls, cwd: Path = ROOT, now: datetime | None = None) -> Session:
-        now = now or datetime.now(timezone.utc); session_id = uuid7(int(now.timestamp() * 1000)); directory = cwd / ".tiny-agent/sessions"; directory.mkdir(parents=True, exist_ok=True)
-        stamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z"); path = directory / f"{stamp.replace(':', '-').replace('.', '-')}_{session_id}.jsonl"
-        session = cls(session_id, path); session.append({"type": "session", "version": 1, "id": session_id, "createdAt": stamp, "cwd": str(cwd), "provider": "openrouter", "model": MODEL}); return session
-
-    @classmethod
-    def open(cls, session_id: str, cwd: Path = ROOT) -> Session:
-        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", session_id, re.I): raise ValueError(f"Invalid session ID: {session_id}")
-        matches = list((cwd / ".tiny-agent/sessions").glob(f"*_{session_id}.jsonl"))
-        if len(matches) != 1: raise ValueError(f"{'Duplicate session ID' if matches else 'Session not found'}: {session_id}")
-        return cls(session_id, matches[0])
-
-    def append(self, record: dict) -> None:
-        record = {**record, "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
-        with self.lock, self.path.open("a", encoding="utf-8") as file: file.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-
-    def records(self) -> list[dict]: return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line]
-
 
 class Agent:
     def __init__(self, skills: list[dict] | None = None, session: Session | None = None, instructions: str = "", requester: Callable | None = None, on_tool: Callable = lambda event: None, tools: list[dict] | None = None):
@@ -172,43 +147,67 @@ class Agent:
         self.tools = tools if tools is not None else TOOL_DEFINITIONS
         self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
         self.cancelled: threading.Event | None = None; self.connection: http.client.HTTPConnection | None = None
+        self.active: dict | None = None
         listing = "\n".join(f"<skill>\n<name>{s['name']}</name>\n<description>{s['description']}</description>\n<location>{s['path']}</location>\n</skill>" for s in self.skills) or "(none)"
         project = f'\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="{ROOT / "AGENTS.md"}">\n{instructions}\n</project_instructions>\n\n</project_context>' if instructions else ""
         prompt = f"You are tiny-agent, a concise coding agent in {ROOT}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.{project}\n\n<available_skills>\n{listing}\n</available_skills>"
         self.messages = [{"role": "system", "content": prompt}]
+        self.configuration = self._configuration(prompt)
+        self.configuration_digest = configuration_digest(self.configuration)
+
+    def _configuration(self, prompt: str) -> dict:
+        digest = lambda value: "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+        declarations = []
+        for tool in self.tools:
+            function = tool["function"]
+            definition = json.dumps({key: function[key] for key in ("name", "description", "parameters")}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            declarations.append({"name": function["name"], "definitionDigest": digest(definition)})
+        model = os.getenv("TINY_MODEL") or DEFAULT_MODEL
+        return {
+            "model": model, "systemPromptDigest": digest(prompt), "tools": declarations,
+            "adapterIdentity": "openrouter:chat-completions:v1", "routingIdentity": f"openrouter:{model}",
+            "outputOptionsDigest": digest("{}"),
+        }
 
     @property
     def busy(self) -> bool: return self.cancelled is not None
 
     def abort(self) -> None:
+        if self.cancelled and self.active and self.session and not self.active.get("abortRequested"):
+            record = {
+                "type": "abortRequested", "operationId": self.active["operationId"],
+                "operationKind": "run", "phase": self.active["phase"], "reason": "escape",
+            }
+            if self.active.get("toolCallId"): record["toolCallId"] = self.active["toolCallId"]
+            self.session.append({"kind": "record", "record": record})
+            self.active["abortRequested"] = True
         if self.cancelled: self.cancelled.set()
         if self.connection:
             try: self.connection.close()
             except OSError: pass
 
-    def begin(self) -> threading.Event: self.cancelled = threading.Event(); return self.cancelled
-    def end(self) -> None: self.cancelled = None; self.connection = None
-    def interrupt(self, phase: str, tool_call_id: str | None = None) -> None:
-        if self.session: self.session.append({"type": "interruption", "phase": phase, "reason": "escape", **({"toolCallId": tool_call_id} if tool_call_id else {})})
+    def begin(self, operation_id: str, phase: str, tool_call_id: str | None = None) -> threading.Event:
+        self.cancelled = threading.Event()
+        self.active = {"operationId": operation_id, "phase": phase, "toolCallId": tool_call_id, "abortRequested": False}
+        return self.cancelled
 
-    def add_usage(self, usage: dict, cache_rate: bool) -> None:
+    def end(self) -> None: self.cancelled = None; self.connection = None; self.active = None
+
+    def add_usage(self, usage: dict, cache_rate: bool = True) -> None:
         for key in ("input", "output", "cacheRead", "cacheWrite"): self.usage[key] += usage.get(key, 0)
-        prompt = usage.get("input", 0) + usage.get("cacheRead", 0) + usage.get("cacheWrite", 0)
-        if cache_rate and prompt: self.usage["cacheHitRate"] = usage.get("cacheRead", 0) / prompt * 100
+        prompt = self.usage["input"] + self.usage["cacheRead"] + self.usage["cacheWrite"]
+        if cache_rate and prompt: self.usage["cacheHitRate"] = self.usage["cacheRead"] / prompt * 100
 
     def resume_session(self) -> None:
         if not self.session: return
-        for record in self.session.records()[1:]:
-            if record["type"] == "message":
-                self.messages.append(record["message"])
-                if record.get("usage"): self.add_usage(record["usage"], True)
-                continue
-            if record["type"] != "compaction": continue
-            count = record["keptMessages"]; recent = self.messages[-count:] if count else []
-            self.messages = [self.messages[0], {"role": "user", "content": f"[Compacted history]\n{record['summary']}"}, *recent]
-            self.add_usage(record["usage"], False)
+        state = self.session.load()
+        if state["operation"]["kind"] != "idle": raise RuntimeError("Session recovery required before resume")
+        self.messages = [self.messages[0], *state["activeContext"]]
+        self.usage.update(state["usage"])
+        prompt = sum(state["usage"][key] for key in ("input", "cacheRead", "cacheWrite"))
+        if prompt: self.usage["cacheHitRate"] = state["usage"]["cacheRead"] / prompt * 100
 
-    def call_model(self, messages: list[dict], tools: list | None, update_cache_rate: bool, cancelled: threading.Event) -> tuple[dict, dict]:
+    def call_model(self, messages: list[dict], tools: list | None, cancelled: threading.Event) -> tuple[dict, dict, str]:
         key = os.getenv("OPENROUTER_API_KEY")
         if not key: raise RuntimeError("Set OPENROUTER_API_KEY")
         body = {"model": os.getenv("TINY_MODEL") or DEFAULT_MODEL, "messages": messages, **({"tools": tools} if tools else {})}
@@ -226,56 +225,108 @@ class Agent:
         raw_usage = data.get("usage", {}); details = raw_usage.get("prompt_tokens_details", {})
         cache_read = details.get("cached_tokens", raw_usage.get("prompt_cache_hit_tokens", 0)); cache_write = details.get("cache_write_tokens", 0)
         usage = {"input": max(0, raw_usage.get("prompt_tokens", 0) - cache_read - cache_write), "output": raw_usage.get("completion_tokens", 0), "cacheRead": cache_read, "cacheWrite": cache_write}
-        self.add_usage(usage, update_cache_rate)
-        return data["choices"][0]["message"], usage
+        answer = data["choices"][0]["message"]
+        finish = data["choices"][0].get("finish_reason")
+        stop_reason = "length" if finish == "length" else "toolUse" if answer.get("tool_calls") else "stop"
+        self.add_usage(usage)
+        return answer, usage, stop_reason
 
-    def model_request(self, messages: list[dict], tools: list | None, phase: str, update_cache_rate: bool = True) -> tuple[dict, dict] | None:
-        cancelled = self.begin()
-        try: return self.call_model(messages, tools, update_cache_rate, cancelled)
-        except BaseException:
-            if not cancelled.is_set(): raise
-            self.interrupt(phase); return None
-        finally: self.end()
+    def _attempt(self, operation_id: str, context_id: str, kind: str = "assistant") -> tuple[str, str]:
+        step_id, attempt_id = uuid7(), uuid7()
+        self.session.append({"kind": "record", "record": {
+            "type": "stepAttempt", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id,
+            "stepKind": kind, "attempt": 1, "contextThroughEntryId": context_id,
+            "configurationSnapshot": self.configuration, "configurationDigest": self.configuration_digest,
+        }})
+        return step_id, attempt_id
+
+    def _finish(self, operation_id: str, outcome: str, final_id: str | None = None, completion: str | None = None, error: Exception | None = None) -> None:
+        record = {"type": "operationFinished", "operationId": operation_id, "operationKind": "run", "outcome": outcome}
+        if final_id: record["finalEntryId"] = final_id
+        if completion: record["completion"] = completion
+        if error: record["error"] = {"code": "agent_error", "message": str(error)}
+        self.session.append({"kind": "record", "record": record})
 
     def run_agent_loop(self, text: str) -> str:
-        user = {"role": "user", "content": text}; self.messages.append(user)
-        if self.session: self.session.append({"type": "message", "message": user})
+        if not self.session: raise RuntimeError("Session is required")
+        user = {"role": "user", "content": text}; user_id, operation_id = uuid7(), uuid7()
+        self.session.append(
+            {"kind": "entry", "id": user_id, "entry": {"type": "message", "message": user}},
+            {"kind": "record", "record": {"type": "runStarted", "operationId": operation_id, "operationKind": "run", "inputEntryId": user_id}},
+        )
+        self.messages.append(user); context_id = user_id
         model_tools = [{"type": tool["type"], "function": tool["function"]} for tool in self.tools]
         while True:
-            response = self.model_request(self.messages, model_tools, "model")
-            if not response: return "Operation aborted."
-            answer, usage = response; self.messages.append(answer)
-            if self.session: self.session.append({"type": "message", "message": answer, "usage": usage})
+            step_id, attempt_id = self._attempt(operation_id, context_id)
+            cancelled = self.begin(operation_id, "model")
+            try: answer, usage, stop_reason = self.call_model(self.messages, model_tools, cancelled)
+            except BaseException as error:
+                aborted = cancelled.is_set(); self.end()
+                self.session.append({"kind": "record", "record": {"type": "stepFailed", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id, "error": {"code": "aborted" if aborted else "model_error", "message": "Operation aborted" if aborted else str(error)}}})
+                self._finish(operation_id, "aborted" if aborted else "failed", error=None if aborted else error)
+                if aborted: return "Operation aborted."
+                raise
+            self.end(); answer_id = uuid7()
+            self.session.append(
+                {"kind": "entry", "id": answer_id, "entry": {"type": "message", "stepId": step_id, "attemptId": attempt_id, "stopReason": stop_reason, "message": answer}},
+                {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage},
+            )
+            self.messages.append(answer); context_id = answer_id
             calls = answer.get("tool_calls", [])
-            if not calls: return answer.get("content") or ""
+            if stop_reason == "length":
+                if not calls:
+                    error = RuntimeError("Model response was truncated")
+                    self._finish(operation_id, "failed", error=error)
+                    return "Model response was truncated."
+                for index, call in enumerate(calls):
+                    result = {"role": "tool", "content": "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.", "tool_call_id": call["id"]}
+                    result_id = uuid7()
+                    self.session.append({"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "message": result, "toolName": call["function"]["name"], "result": {"type": "synthetic", "reason": "truncated"}}})
+                    self.messages.append(result); context_id = result_id
+                self._finish(operation_id, "completed", answer_id, "truncated")
+                return answer.get("content") or "Model response was truncated."
+            if not calls:
+                content = answer.get("content") or ""
+                if not content.strip():
+                    error = RuntimeError("Model returned an empty response")
+                    self._finish(operation_id, "failed", error=error)
+                    raise error
+                self._finish(operation_id, "completed", answer_id, "normal")
+                return content
             for index, call in enumerate(calls):
-                args, aborted = {}, False; cancelled = self.begin()
-                try:
-                    args = json.loads(call["function"]["arguments"]); self.on_tool({"phase": "start", "name": call["function"]["name"], "args": args})
-                    name = call["function"]["name"]
-                    tool = next((item for item in self.tools if item["function"]["name"] == name), None)
-                    if not tool: raise ValueError(f"unknown tool: {name}")
-                    content = tool["execute"](args, cancelled) if "execute" in tool else execute_tool(name, args, cancelled)
-                except BaseException as error:
-                    aborted = cancelled.is_set(); content = "Operation aborted" if aborted else f"Error: {error}"
-                self.end(); self.on_tool({"phase": "end", "name": call["function"]["name"], "args": args, "result": content})
-                result = {"role": "tool", "content": content, "tool_call_id": call["id"]}; self.messages.append(result)
-                if self.session: self.session.append({"type": "message", "message": result, "toolName": call["function"]["name"]})
+                aborted = False
+                name = call["function"]["name"]
+                try: args = json.loads(call["function"]["arguments"])
+                except (json.JSONDecodeError, TypeError): args = None
+                tool = next((item for item in self.tools if item["function"]["name"] == name), None)
+                if not isinstance(args, dict) or not tool:
+                    reason = "invalidArguments" if not isinstance(args, dict) else "unknownTool"
+                    content = "Error: Tool arguments were invalid; the tool was not executed." if reason == "invalidArguments" else "Error: Unknown tool; the tool was not executed."
+                    result = {"role": "tool", "content": content, "tool_call_id": call["id"]}; result_id = uuid7()
+                    self.session.append({"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "message": result, "toolName": name, "result": {"type": "synthetic", "reason": reason}}})
+                else:
+                    started_id, result_id = uuid7(), uuid7()
+                    replay = "safe" if name == "read" else "never"
+                    self.session.append({"kind": "record", "id": started_id, "record": {"type": "toolStarted", "operationId": operation_id, "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "toolCallId": call["id"], "toolName": name, "arguments": args, "replay": replay, "replayKey": "builtin:read:v1" if replay == "safe" else f"tool:{name}:v1", "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id}})
+                    cancelled = self.begin(operation_id, "tool", call["id"]); aborted = False
+                    try:
+                        self.on_tool({"phase": "start", "name": name, "args": args})
+                        content = tool["execute"](args, cancelled) if "execute" in tool else execute_tool(name, args, cancelled)
+                        result_type = "success"
+                    except BaseException as error:
+                        aborted = cancelled.is_set(); content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
+                        result_type = "synthetic" if aborted else "error"
+                    self.end(); self.on_tool({"phase": "end", "name": name, "args": args, "result": content})
+                    result = {"role": "tool", "content": content, "tool_call_id": call["id"]}
+                    result_meta = {"type": result_type, **({"reason": "interrupted"} if aborted else {})}
+                    self.session.append({"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "message": result, "toolName": name, "toolStartedId": started_id, "result": result_meta}})
+                self.messages.append(result); context_id = result_id
                 if not aborted: continue
-                for pending in calls[index + 1:]:
-                    skipped = {"role": "tool", "content": "Operation aborted before execution", "tool_call_id": pending["id"]}; self.messages.append(skipped)
-                    if self.session: self.session.append({"type": "message", "message": skipped, "toolName": pending["function"]["name"]})
-                self.interrupt("tool", call["id"]); return "Operation aborted."
+                for pending_index, pending in enumerate(calls[index + 1:], index + 1):
+                    skipped = {"role": "tool", "content": "Operation aborted before execution.", "tool_call_id": pending["id"]}; skipped_id = uuid7()
+                    self.session.append({"kind": "entry", "id": skipped_id, "entry": {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": pending_index, "message": skipped, "toolName": pending["function"]["name"], "result": {"type": "synthetic", "reason": "aborted"}}})
+                    self.messages.append(skipped); context_id = skipped_id
+                self._finish(operation_id, "aborted"); return "Operation aborted."
 
     def compact(self) -> str:
-        if len(self.messages) <= 1: return "Nothing to compact."
-        cut = max(len(self.messages) - 6, 1)
-        while cut > 1 and self.messages[cut]["role"] != "user": cut -= 1
-        recent, old = self.messages[cut:], self.messages[1:cut]
-        if not old: return "Nothing to compact."
-        response = self.model_request([{"role": "system", "content": "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps."}, {"role": "user", "content": json.dumps(old, ensure_ascii=False, separators=(",", ":"))}], None, "compact", False)
-        if not response: return "Compaction aborted."
-        summary, usage = response; text = summary.get("content")
-        self.messages = [self.messages[0], {"role": "user", "content": f"[Compacted history]\n{text}"}, *recent]
-        if self.session: self.session.append({"type": "compaction", "summary": text, "compactedMessages": len(old), "keptMessages": len(recent), "usage": usage})
-        return f"Compacted {len(old)} messages (kept last {len(recent)})."
+        return "Compaction is temporarily unavailable during durable session migration."

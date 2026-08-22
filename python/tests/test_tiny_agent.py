@@ -64,28 +64,30 @@ class TinyAgentTest(unittest.TestCase):
         system = tiny.Agent(skills, instructions=tiny.load_project_instructions()).messages[0]["content"]
         self.assertIn("Always be brief.", system); self.assertIn(str(path), system); self.assertNotIn("SECRET", system)
 
-    def test_session_schema_shape_resume_and_compaction(self):
-        now = datetime(2026, 8, 3, 3, 55, 50, 62000, timezone.utc); session = tiny.Session.create(tiny.ROOT, now)
+    def test_session_shape_and_idle_resume(self):
+        now = datetime(2026, 8, 3, 3, 55, 50, 62000, timezone.utc)
+        session = tiny.Session.create(tiny.ROOT, now)
         self.assertRegex(session.id, r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
-        self.assertTrue(session.path.name.startswith("2026-08-03T03-55-50-062Z_"))
-        agent = tiny.Agent(
-            session=session,
-            requester=lambda body, _: {"choices": [{"message": {"role": "assistant", "content": "summary"}}], "usage": {}},
+        replies = iter([{"choices": [{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 10, "completion_tokens": 2}}])
+        agent = tiny.Agent(session=session, requester=lambda *_: next(replies))
+        self.assertEqual(agent.run_agent_loop("work"), "done")
+        session_id = session.id; session.close()
+        reopened = tiny.Session.open(session_id, tiny.ROOT)
+        restored = tiny.Agent(session=reopened); restored.resume_session()
+        self.assertEqual(restored.messages[1:], [{"role": "user", "content": "work"}, {"role": "assistant", "content": "done"}])
+        self.assertEqual(restored.usage["input"], 10)
+        reopened.close()
+
+    def test_non_idle_resume_requires_recovery(self):
+        session = tiny.Session.create(tiny.ROOT)
+        user_id, operation_id = tiny.uuid7(), tiny.uuid7()
+        session.append(
+            {"kind": "entry", "id": user_id, "entry": {"type": "message", "message": {"role": "user", "content": "work"}}},
+            {"kind": "record", "record": {"type": "runStarted", "operationId": operation_id, "operationKind": "run", "inputEntryId": user_id}},
         )
-        messages = [
-            {"role": "user", "content": "old"}, {"role": "assistant", "content": "old answer"},
-            {"role": "user", "content": "run"},
-            {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {"name": "read", "arguments": '{"path":"a"}'}}]},
-            {"role": "tool", "content": "data", "tool_call_id": "1"}, {"role": "assistant", "content": "done"},
-            {"role": "user", "content": "next"}, {"role": "assistant", "content": "answer"},
-        ]
-        for message in messages: agent.messages.append(message); session.append({"type": "message", "message": message})
-        self.assertEqual(agent.compact(), "Compacted 2 messages (kept last 6).")
-        restored = tiny.Agent(session=session); restored.resume_session(); self.assertEqual(restored.messages, agent.messages)
-        records = session.records(); compact = records[-1]
-        self.assertEqual((compact["compactedMessages"], compact["keptMessages"]), (2, 6))
-        allowed = {"session", "message", "compaction", "interruption"}
-        self.assertTrue(all(record["type"] in allowed and "timestamp" in record for record in records))
+        with self.assertRaisesRegex(RuntimeError, "recovery required"):
+            tiny.Agent(session=session).resume_session()
+        session.close()
 
     def test_model_tool_loop_cache_and_no_tui_log_in_session(self):
         replies = iter([
@@ -100,11 +102,35 @@ class TinyAgentTest(unittest.TestCase):
 
         session = tiny.Session.create(tiny.ROOT); agent = tiny.Agent(session=session, requester=request, on_tool=events.append)
         self.assertEqual(agent.run_agent_loop("make it"), "done")
-        self.assertEqual(agent.usage, {"input": 135, "output": 15, "cacheRead": 85, "cacheWrite": 0, "cacheHitRate": 50})
+        self.assertAlmostEqual(agent.usage["cacheHitRate"], 85 / 220 * 100)
+        self.assertEqual({key: agent.usage[key] for key in ("input", "output", "cacheRead", "cacheWrite")}, {"input": 135, "output": 15, "cacheRead": 85, "cacheWrite": 0})
         self.assertEqual((tiny.ROOT / "made.txt").read_text(encoding="utf-8"), "yes")
         self.assertEqual([event["phase"] for event in events], ["start", "end"])
-        self.assertFalse(any(record["type"] == "tool_log" or record.get("phase") in ("start", "end") for record in session.records()))
+        self.assertFalse(any(fact.get("kind") == "tool_log" for line in session.path.read_text().splitlines()[1:] for fact in (json.loads(line) if isinstance(json.loads(line), list) else [json.loads(line)])))
         self.assertEqual(requests[0]["model"], os.getenv("TINY_MODEL") or tiny.DEFAULT_MODEL)
+        session.close()
+
+    def test_model_failure_and_length_are_terminal(self):
+        session = tiny.Session.create(tiny.ROOT)
+        agent = tiny.Agent(session=session, requester=lambda *_: (_ for _ in ()).throw(RuntimeError("provider failed")))
+        with self.assertRaisesRegex(RuntimeError, "provider failed"):
+            agent.run_agent_loop("fail")
+        self.assertEqual(session.load()["operation"]["kind"], "idle")
+        session.close()
+
+        session = tiny.Session.create(tiny.ROOT)
+        response = {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": None, "tool_calls": [{"id": "cut", "type": "function", "function": {"name": "read", "arguments": '{"path":"README.md"}'}}]},
+            }],
+            "usage": {},
+        }
+        agent = tiny.Agent(session=session, requester=lambda *_: response)
+        self.assertEqual(agent.run_agent_loop("truncate"), "Model response was truncated.")
+        self.assertEqual(agent.messages[-1]["content"], "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.")
+        self.assertEqual(session.load()["operation"]["kind"], "idle")
+        session.close()
 
     def test_model_and_tool_abort_keep_legal_transcript(self):
         started = threading.Event()
@@ -114,25 +140,29 @@ class TinyAgentTest(unittest.TestCase):
         session = tiny.Session.create(tiny.ROOT); agent = tiny.Agent(session=session, requester=hanging); result = []
         thread = threading.Thread(target=lambda: result.append(agent.run_agent_loop("wait")))
         thread.start(); started.wait(); agent.abort(); thread.join()
-        self.assertEqual(result, ["Operation aborted."]); self.assertEqual(session.records()[-1]["phase"], "model")
+        self.assertEqual(result, ["Operation aborted."]); self.assertEqual(session.load()["operation"]["kind"], "idle")
+        session.close()
 
         replies = iter([{"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
             {"id": "slow", "type": "function", "function": {"name": "bash", "arguments": '{"command":"sleep 30"}'}},
             {"id": "later", "type": "function", "function": {"name": "write", "arguments": '{"path":"never","content":"no"}'}},
         ]}}], "usage": {}}])
-        agent = tiny.Agent(session=tiny.Session.create(tiny.ROOT), requester=lambda *_: next(replies)); result = []
+        tool_session = tiny.Session.create(tiny.ROOT)
+        agent = tiny.Agent(session=tool_session, requester=lambda *_: next(replies)); result = []
         thread = threading.Thread(target=lambda: result.append(agent.run_agent_loop("run"))); thread.start()
         while not agent.busy: time.sleep(0.01)
         time.sleep(0.05); agent.abort(); thread.join(2)
         tools = [message for message in agent.messages if message["role"] == "tool"]
         self.assertEqual([(m["tool_call_id"], m["content"]) for m in tools], [
-            ("slow", "Operation aborted"), ("later", "Operation aborted before execution"),
+            ("slow", "Operation interrupted after execution status became unknown; the tool was not replayed."),
+            ("later", "Operation aborted before execution."),
         ])
+        tool_session.close()
 
     def test_plugin_selection_deduplicates_assembles_mcp_and_rejects_unknown_early(self):
         remote = {"type": "function", "function": {"name": "mcp_remote", "description": "remote", "parameters": {}}}
         loaded = SimpleNamespace(tools=[remote], protocol_version="test", close=lambda: None)
-        session = SimpleNamespace(id="session-id", path=Path("session.jsonl"))
+        session = SimpleNamespace(id="session-id", path=Path("session.jsonl"), close=lambda: None)
         captured = {}
 
         class FakeAgent:
