@@ -316,6 +316,11 @@ const editTool: Tool = {
     },
 };
 
+export function durableToolReplay(tool: Tool) {
+    if (tool === readTool) return { replay: "safe" as const, replayKey: "builtin:read:v1" };
+    return { replay: "never" as const, replayKey: tool.replayKey ?? `tool:${tool.name}:v1` };
+}
+
 export const builtInTools: Tool[] = [bashTool, readTool, writeTool, editTool];
 export const builtInPlugins: Plugin[] = builtInTools.map((tool) => ({ name: tool.name, tools: [tool] }));
 

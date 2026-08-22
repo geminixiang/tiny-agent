@@ -3,7 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
 import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
-import { builtInTools, toolDefinitions, type Tool, type ToolArgs, type ToolEvent } from "./tools.js";
+import { builtInTools, durableToolReplay, toolDefinitions, type Tool, type ToolArgs, type ToolEvent } from "./tools.js";
 
 export { loadMcpConfigs, type McpServerCatalog } from "./mcp-config.js";
 export { displayToolName, loadMcpTools, type LoadedMcpTools, type McpConfig } from "./mcp.js";
@@ -19,6 +19,7 @@ export { reduceSession, SessionCorruption, type SessionCorruptionCode, type Sess
 export {
     builtInPlugins,
     builtInTools,
+    durableToolReplay,
     executeTool,
     formatToolEvent,
     type Plugin,
@@ -376,8 +377,7 @@ ${list}
                     const tool = this.tools.find((candidate) => candidate.name === snapshot.name)!;
                     return {
                         ...snapshot,
-                        replay: tool.replay ?? "never",
-                        replayKey: tool.replayKey ?? `tool:${tool.name}:v1`,
+                        ...durableToolReplay(tool),
                     };
                 }),
             };
@@ -547,8 +547,7 @@ ${list}
                     toolCallId: this.recoveryToolCallId(state, plan.assistantEntryId, plan.toolIndex),
                     toolName: plan.toolName,
                     arguments: plan.arguments,
-                    replay: tool.replay ?? "never",
-                    replayKey: tool.replayKey ?? `tool:${tool.name}:v1`,
+                    ...durableToolReplay(tool),
                     environmentIdentity: state.header.environmentIdentity,
                     resultEntryId,
                 },
@@ -686,6 +685,9 @@ ${list}
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
                 await this.session.append([
+                    ...(error instanceof ModelResponseError
+                        ? [{ kind: "usage" as const, operationId, attemptId, usage: error.usage }]
+                        : []),
                     {
                         kind: "record",
                         record: {
@@ -793,8 +795,7 @@ ${list}
                         toolCallId: call.id,
                         toolName: tool.name,
                         arguments: args,
-                        replay: tool.replay ?? "never",
-                        replayKey: tool.replayKey ?? `tool:${tool.name}:v1`,
+                        ...durableToolReplay(tool),
                         environmentIdentity: environment,
                         resultEntryId,
                     },
