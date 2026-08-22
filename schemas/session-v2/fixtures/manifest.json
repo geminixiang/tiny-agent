@@ -1,0 +1,149 @@
+{
+    "version": 1,
+    "fixtures": [
+        {
+            "name": "header-only",
+            "file": "header-only.jsonl",
+            "expected": "header-only.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "run-accepted",
+            "file": "run-accepted.jsonl",
+            "expected": "run-accepted.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "open-attempt",
+            "file": "open-attempt.jsonl",
+            "expected": "open-attempt.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "pending-safe-tool",
+            "file": "pending-safe-tool.jsonl",
+            "expected": "pending-safe-tool.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "completed-tool-run",
+            "file": "completed-tool-run.jsonl",
+            "expected": "completed-tool-run.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "completed-compaction",
+            "file": "completed-compaction.jsonl",
+            "expected": "completed-compaction.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "torn-tail",
+            "file": "torn-tail.jsonl",
+            "expected": "torn-tail.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "v1-rejected",
+            "file": "v1-rejected.jsonl",
+            "expected": "v1-rejected.expected.json",
+            "schemaValid": false
+        },
+        {
+            "name": "skipped-seq-transaction",
+            "file": "skipped-seq-transaction.jsonl",
+            "expected": "skipped-seq-transaction.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "invalid-reference",
+            "file": "invalid-reference.jsonl",
+            "expected": "invalid-reference.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "malformed-complete-line",
+            "file": "malformed-complete-line.jsonl",
+            "expected": "malformed-complete-line.expected.json",
+            "schemaValid": false
+        },
+        {
+            "name": "blank-line",
+            "file": "blank-line.jsonl",
+            "expected": "blank-line.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "crlf",
+            "file": "crlf.jsonl",
+            "expected": "crlf.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "configuration-order-equivalent",
+            "file": "configuration-order-equivalent.jsonl",
+            "expected": "configuration-order-equivalent.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "cross-operation-final",
+            "file": "cross-operation-final.jsonl",
+            "expected": "cross-operation-final.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "replay-mismatch",
+            "file": "replay-mismatch.jsonl",
+            "expected": "replay-mismatch.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "missing-compaction-middle",
+            "file": "missing-compaction-middle.jsonl",
+            "expected": "missing-compaction-middle.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "overlapping-step",
+            "file": "overlapping-step.jsonl",
+            "expected": "overlapping-step.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "retry-after-settle",
+            "file": "retry-after-settle.jsonl",
+            "expected": "retry-after-settle.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "retry-after-step-failed",
+            "file": "retry-after-step-failed.jsonl",
+            "expected": "retry-after-step-failed.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "digest-mismatch",
+            "file": "digest-mismatch.jsonl",
+            "expected": "digest-mismatch.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "duplicate-attempt",
+            "file": "duplicate-attempt.jsonl",
+            "expected": "duplicate-attempt.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "duplicate-result-reservation",
+            "file": "duplicate-result-reservation.jsonl",
+            "expected": "duplicate-result-reservation.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "cross-operation-usage",
+            "file": "cross-operation-usage.jsonl",
+            "expected": "cross-operation-usage.expected.json",
+            "schemaValid": true
+        }
+    ]
+}

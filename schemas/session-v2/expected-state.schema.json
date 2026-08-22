@@ -1,0 +1,184 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://tiny-agent.local/schemas/session-v2/expected-state.schema.json",
+    "title": "tiny-agent session v2 golden fixture expectation",
+    "oneOf": [
+        {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ok", "state"],
+            "properties": {
+                "ok": { "const": true },
+                "state": { "$ref": "#/$defs/state" }
+            }
+        },
+        {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ok", "error"],
+            "properties": {
+                "ok": { "const": false },
+                "error": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["code", "line"],
+                    "properties": {
+                        "code": {
+                            "enum": [
+                                "INVALID_UTF8",
+                                "MISSING_HEADER",
+                                "INVALID_HEADER",
+                                "UNSUPPORTED_VERSION",
+                                "BLANK_LINE",
+                                "CRLF_NOT_ALLOWED",
+                                "MALFORMED_JSON",
+                                "EMPTY_TRANSACTION",
+                                "INVALID_FACT",
+                                "SEQ_MISMATCH",
+                                "DUPLICATE_ID",
+                                "INVALID_REFERENCE",
+                                "INVALID_TRANSITION",
+                                "INVALID_TRANSCRIPT"
+                            ]
+                        },
+                        "line": { "type": "integer", "minimum": 1 },
+                        "seq": { "type": "integer", "minimum": 1 }
+                    }
+                }
+            }
+        }
+    ],
+    "$defs": {
+        "usage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["input", "output", "cacheRead", "cacheWrite"],
+            "properties": {
+                "input": { "type": "integer", "minimum": 0 },
+                "output": { "type": "integer", "minimum": 0 },
+                "cacheRead": { "type": "integer", "minimum": 0 },
+                "cacheWrite": { "type": "integer", "minimum": 0 }
+            }
+        },
+        "toolCall": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "type", "function"],
+            "properties": {
+                "id": { "type": "string" },
+                "type": { "const": "function" },
+                "function": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "arguments"],
+                    "properties": { "name": { "type": "string" }, "arguments": { "type": "string" } }
+                }
+            }
+        },
+        "message": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "content"],
+            "properties": {
+                "role": { "enum": ["user", "assistant", "tool"] },
+                "content": { "type": ["string", "null"] },
+                "tool_call_id": { "type": "string" },
+                "tool_calls": { "type": "array", "items": { "$ref": "#/$defs/toolCall" } }
+            }
+        },
+        "step": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["operationId", "stepId", "attemptId", "attempt", "stepKind", "status", "configurationSnapshot", "configurationDigest"],
+            "properties": {
+                "operationId": { "type": "string" },
+                "stepId": { "type": "string" },
+                "attemptId": { "type": "string" },
+                "attempt": { "type": "integer" },
+                "stepKind": { "enum": ["assistant", "compaction"] },
+                "status": { "enum": ["attempting", "settled", "failed"] },
+                "configurationSnapshot": { "type": "object" },
+                "configurationDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+            }
+        },
+        "toolState": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["operationId", "toolStartedId", "stepId", "assistantEntryId", "toolIndex", "toolCallId", "toolName", "arguments", "replay", "replayKey", "resultEntryId", "status"],
+            "properties": {
+                "operationId": { "type": "string" },
+                "toolStartedId": { "type": "string" },
+                "stepId": { "type": "string" },
+                "assistantEntryId": { "type": "string" },
+                "toolIndex": { "type": "integer" },
+                "toolCallId": { "type": "string" },
+                "toolName": { "type": "string" },
+                "arguments": { "type": "object" },
+                "replay": { "enum": ["safe", "never"] },
+                "replayKey": { "type": "string" },
+                "resultEntryId": { "type": "string" },
+                "status": { "enum": ["pending", "completed"] }
+            }
+        },
+        "operation": {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": { "kind": { "const": "idle" } }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "operationId", "inputEntryId", "toolCalls", "abortRequested"],
+                    "properties": {
+                        "kind": { "const": "run" },
+                        "operationId": { "type": "string" },
+                        "inputEntryId": { "type": "string" },
+                        "step": { "$ref": "#/$defs/step" },
+                        "toolCalls": { "type": "array", "items": { "$ref": "#/$defs/toolState" } },
+                        "abortRequested": { "type": "boolean" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "operationId", "inputThroughEntryId", "resultEntryId", "abortRequested"],
+                    "properties": {
+                        "kind": { "const": "compaction" },
+                        "operationId": { "type": "string" },
+                        "inputThroughEntryId": { "type": "string" },
+                        "resultEntryId": { "type": "string" },
+                        "step": { "$ref": "#/$defs/step" },
+                        "abortRequested": { "type": "boolean" }
+                    }
+                }
+            ]
+        },
+        "state": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["header", "transcript", "activeContext", "usage", "operation", "repairedLength"],
+            "properties": {
+                "header": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id", "createdAt", "cwd", "provider", "model"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "createdAt": { "type": "integer" },
+                        "cwd": { "type": "string" },
+                        "provider": { "type": "string" },
+                        "model": { "type": "string" }
+                    }
+                },
+                "transcript": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+                "activeContext": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+                "usage": { "$ref": "#/$defs/usage" },
+                "operation": { "$ref": "#/$defs/operation" },
+                "repairedLength": { "type": "integer", "minimum": 1 }
+            }
+        }
+    }
+}

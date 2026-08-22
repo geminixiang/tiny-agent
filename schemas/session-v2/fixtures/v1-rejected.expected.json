@@ -1,0 +1,7 @@
+{
+    "ok": false,
+    "error": {
+        "code": "INVALID_HEADER",
+        "line": 1
+    }
+}

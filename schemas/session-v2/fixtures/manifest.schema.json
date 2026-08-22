@@ -1,0 +1,26 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://tiny-agent.local/schemas/session-v2/fixtures/manifest.schema.json",
+    "title": "tiny-agent session v2 golden fixture manifest",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["version", "fixtures"],
+    "properties": {
+        "version": { "const": 1 },
+        "fixtures": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "file", "expected", "schemaValid"],
+                "properties": {
+                    "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+                    "file": { "type": "string", "pattern": "^[a-z0-9-]+\\.jsonl$" },
+                    "expected": { "type": "string", "pattern": "^[a-z0-9-]+\\.expected\\.json$" },
+                    "schemaValid": { "type": "boolean" }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,8 @@
+{
+    "ok": false,
+    "error": {
+        "code": "SEQ_MISMATCH",
+        "line": 2,
+        "seq": 3
+    }
+}

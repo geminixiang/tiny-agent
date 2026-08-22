@@ -1,0 +1,60 @@
+{
+    "ok": true,
+    "state": {
+        "header": {
+            "id": "018f0000-0000-7000-8000-000000000001",
+            "createdAt": 1710000000000,
+            "cwd": "/workspace",
+            "provider": "openrouter",
+            "model": "test/model"
+        },
+        "transcript": [
+            {
+                "role": "user",
+                "content": "inspect"
+            }
+        ],
+        "activeContext": [
+            {
+                "role": "user",
+                "content": "inspect"
+            }
+        ],
+        "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+        },
+        "operation": {
+            "kind": "run",
+            "operationId": "018f0000-0000-7000-8000-000000000004",
+            "inputEntryId": "018f0000-0000-7000-8000-000000000002",
+            "toolCalls": [],
+            "abortRequested": false,
+            "step": {
+                "operationId": "018f0000-0000-7000-8000-000000000004",
+                "stepId": "018f0000-0000-7000-8000-000000000005",
+                "attemptId": "018f0000-0000-7000-8000-000000000006",
+                "attempt": 1,
+                "stepKind": "assistant",
+                "status": "attempting",
+                "configurationSnapshot": {
+                    "model": "test/model",
+                    "systemPromptDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "tools": [
+                        {
+                            "name": "read",
+                            "schemaDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                            "replay": "safe",
+                            "replayKey": "builtin:read:v1"
+                        }
+                    ],
+                    "environmentIdentity": "fixture"
+                },
+                "configurationDigest": "sha256:05d9db443504d31c9fbf1285dfa0fdc2c62d83c7072dc6b13b1ad22cd547f224"
+            }
+        },
+        "repairedLength": 1399
+    }
+}

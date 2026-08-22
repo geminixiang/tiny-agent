@@ -1,0 +1,8 @@
+{
+    "ok": false,
+    "error": {
+        "code": "DUPLICATE_ID",
+        "line": 5,
+        "seq": 5
+    }
+}

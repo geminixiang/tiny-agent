@@ -1,0 +1,7 @@
+{
+    "ok": false,
+    "error": {
+        "code": "CRLF_NOT_ALLOWED",
+        "line": 1
+    }
+}

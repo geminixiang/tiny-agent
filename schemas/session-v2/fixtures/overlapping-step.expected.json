@@ -1,0 +1,8 @@
+{
+    "ok": false,
+    "error": {
+        "code": "INVALID_TRANSITION",
+        "line": 4,
+        "seq": 4
+    }
+}
