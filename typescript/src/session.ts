@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readFile, readdir, realpath, truncate } from "node:fs/promises";
-import { resolve } from "node:path";
+import { constants } from "node:fs";
+import { mkdir, open, readdir, realpath } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { reduceSession, type SessionState } from "./session-reducer.js";
 
 export type SessionFact = Record<string, unknown>;
@@ -38,9 +39,10 @@ export class SessionStore {
 
     static async create(cwd: string, model: string, now = new Date()) {
         const id = uuid7(now.getTime());
-        const directory = resolve(cwd, ".tiny-agent/sessions");
+        const requestedDirectory = resolve(cwd, ".tiny-agent/sessions");
+        await mkdir(requestedDirectory, { recursive: true });
+        const directory = await realpath(requestedDirectory);
         const path = resolve(directory, `${now.toISOString().replace(/[:.]/g, "-")}_${id}.jsonl`);
-        await mkdir(directory, { recursive: true });
         const header = `${JSON.stringify({
             kind: "header",
             version: 2,
@@ -54,10 +56,11 @@ export class SessionStore {
         const handle = await open(path, "wx", 0o600);
         try {
             await handle.writeFile(header);
-            await chmod(path, 0o600);
+            await handle.chmod(0o600);
             const bytes = Buffer.from(header);
+            const state = reduceSession(bytes);
             writers.add(path);
-            return new SessionStore(id, path, handle, bytes, 1, reduceSession(bytes));
+            return new SessionStore(id, path, handle, bytes, 1, state);
         } catch (error) {
             await handle.close();
             throw error;
@@ -67,22 +70,41 @@ export class SessionStore {
     static async open(id: string, cwd: string) {
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))
             throw Error(`Invalid session ID: ${id}`);
-        const directory = resolve(cwd, ".tiny-agent/sessions");
-        const matches = (await readdir(directory).catch(() => [])).filter((file) => file.endsWith(`_${id}.jsonl`));
+        const requestedDirectory = resolve(cwd, ".tiny-agent/sessions");
+        const directory = await realpath(requestedDirectory).catch(() => {
+            throw Error(`Session not found: ${id}`);
+        });
+        const matches = (await readdir(directory, { withFileTypes: true })).filter(
+            (entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(`_${id}.jsonl`),
+        );
         if (matches.length !== 1)
             throw Error(matches.length ? `Duplicate session ID: ${id}` : `Session not found: ${id}`);
-        const path = resolve(directory, matches[0]);
+        const path = resolve(directory, matches[0].name);
+        if (dirname(await realpath(path)) !== directory) throw Error(`Unsafe session path: ${id}`);
         if (writers.has(path)) throw Error(`Session is already open for writing: ${id}`);
-        let bytes = await readFile(path);
-        const state = reduceSession(bytes);
-        if (state.repairedLength !== bytes.length) {
-            await truncate(path, state.repairedLength);
-            bytes = bytes.subarray(0, state.repairedLength);
-        }
-        const handle = await open(path, "a", 0o600);
-        await chmod(path, 0o600);
         writers.add(path);
-        return new SessionStore(id, path, handle, bytes, countFacts(bytes) + 1, reduceSession(bytes));
+        let handle: Awaited<ReturnType<typeof open>>;
+        try {
+            handle = await open(path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
+        } catch (error) {
+            writers.delete(path);
+            throw error;
+        }
+        try {
+            let bytes = await handle.readFile();
+            const state = reduceSession(bytes);
+            if (state.header.id !== id) throw Error("session filename does not match header");
+            if (state.repairedLength !== bytes.length) {
+                await handle.truncate(state.repairedLength);
+                bytes = bytes.subarray(0, state.repairedLength);
+            }
+            await handle.chmod(0o600);
+            return new SessionStore(id, path, handle, bytes, countFacts(bytes) + 1, reduceSession(bytes));
+        } catch (error) {
+            writers.delete(path);
+            await handle.close();
+            throw error;
+        }
     }
 
     allocateId() {

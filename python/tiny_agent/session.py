@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 
 from .session_reducer import reduce_session
 
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 ROOT = Path.cwd().resolve()
+_WRITERS: set[Path] = set()
+_WRITERS_LOCK = threading.Lock()
 
 
 def uuid7(now_ms: int | None = None) -> str:
@@ -21,12 +25,18 @@ def uuid7(now_ms: int | None = None) -> str:
 
 
 def environment_identity(cwd: Path = ROOT) -> str:
-    return os.getenv("TINY_AGENT_ENVIRONMENT_IDENTITY") or str(cwd.resolve())
+    override = os.getenv("TINY_AGENT_ENVIRONMENT_IDENTITY", "").strip()
+    return override or str(cwd.resolve())
+
+
+def _open_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
+    return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), mode)
 
 
 class Session:
-    def __init__(self, session_id: str, path: Path, next_seq: int = 1):
-        self.id, self.path, self.next_seq, self.lock = session_id, path, next_seq, threading.Lock()
+    def __init__(self, session_id: str, path: Path, file: BinaryIO, data: bytes, state: dict, next_seq: int = 1):
+        self.id, self.path, self.file, self.data = session_id, path, file, data
+        self.state, self.next_seq, self.lock, self.closed = state, next_seq, threading.Lock(), False
 
     @classmethod
     def create(cls, cwd: Path = ROOT, now: datetime | None = None) -> Session:
@@ -34,6 +44,7 @@ class Session:
         session_id = uuid7(int(now.timestamp() * 1000))
         directory = cwd / ".tiny-agent/sessions"
         directory.mkdir(parents=True, exist_ok=True)
+        directory = directory.resolve(strict=True)
         stamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
         path = directory / f"{stamp.replace(':', '-').replace('.', '-')}_{session_id}.jsonl"
         header = {
@@ -42,52 +53,85 @@ class Session:
             "provider": "openrouter", "model": os.getenv("TINY_MODEL") or DEFAULT_MODEL,
             "environmentIdentity": environment_identity(cwd),
         }
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as file:
-            file.write(json.dumps(header, ensure_ascii=False, separators=(",", ":")) + "\n")
-        return cls(session_id, path)
+        data = (json.dumps(header, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        fd = _open_nofollow(path, os.O_RDWR | os.O_CREAT | os.O_EXCL)
+        file = os.fdopen(fd, "r+b", buffering=0)
+        try:
+            file.write(data)
+            os.fchmod(fd, 0o600)
+            state = reduce_session(data)
+            with _WRITERS_LOCK:
+                _WRITERS.add(path)
+            return cls(session_id, path, file, data, state)
+        except Exception:
+            file.close()
+            path.unlink(missing_ok=True)
+            raise
 
     @classmethod
     def open(cls, session_id: str, cwd: Path = ROOT) -> Session:
-        import re
         if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", session_id, re.I):
             raise ValueError(f"Invalid session ID: {session_id}")
-        matches = list((cwd / ".tiny-agent/sessions").glob(f"*_{session_id}.jsonl"))
+        directory = (cwd / ".tiny-agent/sessions").resolve(strict=True)
+        matches = [entry for entry in os.scandir(directory) if entry.is_file(follow_symlinks=False) and entry.name.endswith(f"_{session_id}.jsonl")]
         if len(matches) != 1:
             raise ValueError(f"{'Duplicate session ID' if matches else 'Session not found'}: {session_id}")
-        path = matches[0]
-        data = path.read_bytes()
-        state = reduce_session(data)
-        repaired = state["repairedLength"]
-        if repaired != len(data):
-            with path.open("r+b") as file: file.truncate(repaired)
-        return cls(session_id, path, _next_seq(data[:repaired]))
+        path = Path(matches[0].path)
+        if path.parent.resolve(strict=True) != directory:
+            raise ValueError(f"Unsafe session path: {session_id}")
+        with _WRITERS_LOCK:
+            if path in _WRITERS:
+                raise ValueError(f"Session is already open for writing: {session_id}")
+        fd = _open_nofollow(path, os.O_RDWR | os.O_APPEND)
+        file = os.fdopen(fd, "r+b", buffering=0)
+        try:
+            file.seek(0); data = file.read(); state = reduce_session(data)
+            if state["header"]["id"] != session_id:
+                raise ValueError("session filename does not match header")
+            repaired = state["repairedLength"]
+            if repaired != len(data):
+                file.truncate(repaired); data = data[:repaired]
+            os.fchmod(fd, 0o600); file.seek(0, os.SEEK_END)
+            with _WRITERS_LOCK:
+                if path in _WRITERS:
+                    raise ValueError(f"Session is already open for writing: {session_id}")
+                _WRITERS.add(path)
+            return cls(session_id, path, file, data, reduce_session(data), _next_seq(data))
+        except Exception:
+            file.close()
+            raise
 
     def load(self) -> dict:
-        return reduce_session(self.path.read_bytes())
+        with self.lock:
+            if self.closed: raise ValueError("Session is closed")
+            return self.state
 
     def append(self, *facts: dict) -> list[dict]:
-        if not facts: return []
+        if not facts: raise ValueError("Session transaction must not be empty")
         with self.lock:
+            if self.closed: raise ValueError("Session is closed")
             timestamp = time.time_ns() // 1_000_000
-            committed = []
-            for fact in facts:
-                committed.append({**fact, "seq": self.next_seq, "id": fact.get("id", uuid7()), "timestamp": timestamp})
-                self.next_seq += 1
-            line: object = committed[0] if len(committed) == 1 else committed
-            with self.path.open("a", encoding="utf-8", newline="\n") as file:
-                file.write(json.dumps(line, ensure_ascii=False, separators=(",", ":")) + "\n")
+            committed = [{**fact, "seq": self.next_seq + index, "id": fact.get("id", uuid7()), "timestamp": timestamp} for index, fact in enumerate(facts)]
+            value: object = committed[0] if len(committed) == 1 else committed
+            line = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+            candidate = self.data + line
+            state = reduce_session(candidate)
+            self.file.write(line)
+            self.data, self.state, self.next_seq = candidate, state, self.next_seq + len(committed)
             return committed
 
     def close(self) -> None:
-        pass
+        with self.lock:
+            if self.closed: return
+            self.closed = True
+            try: self.file.close()
+            finally:
+                with _WRITERS_LOCK: _WRITERS.discard(self.path)
 
 
 def _next_seq(data: bytes) -> int:
-    lines = data.decode("utf-8").splitlines()[1:]
     last = 0
-    for line in lines:
-        value = json.loads(line)
-        facts = value if isinstance(value, list) else [value]
+    for line in data.decode("utf-8").splitlines()[1:]:
+        value = json.loads(line); facts = value if isinstance(value, list) else [value]
         if facts: last = facts[-1]["seq"]
     return last + 1

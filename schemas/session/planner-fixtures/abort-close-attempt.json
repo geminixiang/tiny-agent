@@ -1,5 +1,4 @@
 {
-    "fixture": "open-attempt.jsonl",
     "current": {
         "configurationDigest": "sha256:83d5da8892d877c5f94a6ff60ea8babcd1138107dcb80ed8f747372346bb5f75",
         "environmentIdentity": "fixture",
@@ -11,5 +10,6 @@
                 "replayKey": "builtin:read:v1"
             }
         ]
-    }
+    },
+    "sessionFile": "abort-open-attempt.jsonl"
 }

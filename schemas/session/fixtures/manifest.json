@@ -264,6 +264,30 @@
             "file": "compaction-wrong-source-digest.jsonl",
             "expected": "compaction-wrong-source-digest.expected.json",
             "schemaValid": true
+        },
+        {
+            "name": "abort-open-attempt",
+            "file": "abort-open-attempt.jsonl",
+            "expected": "abort-open-attempt.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "abort-pending-never-tool",
+            "file": "abort-pending-never-tool.jsonl",
+            "expected": "abort-pending-never-tool.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "abort-mixed-tools-requested",
+            "file": "abort-mixed-tools-requested.jsonl",
+            "expected": "abort-mixed-tools-requested.expected.json",
+            "schemaValid": true
+        },
+        {
+            "name": "attempts-exhausted",
+            "file": "attempts-exhausted.jsonl",
+            "expected": "attempts-exhausted.expected.json",
+            "schemaValid": true
         }
     ]
 }

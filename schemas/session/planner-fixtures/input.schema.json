@@ -1,0 +1,11 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://tiny-agent.local/schemas/session/planner-fixtures/input.schema.json",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["sessionFile", "current"],
+    "properties": {
+        "sessionFile": { "type": "string", "pattern": "^[a-z0-9-]+\\.jsonl$" },
+        "current": { "type": "object" }
+    }
+}

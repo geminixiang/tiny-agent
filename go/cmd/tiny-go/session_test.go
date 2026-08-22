@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,9 @@ func TestSessionStoreCreateModeCollisionAndClose(t *testing.T) {
 	store, err := createSessionStoreWithID(now, id)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := openSessionStore(id); err == nil || !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("second writer=%v", err)
 	}
 	info, err := os.Stat(store.Path)
 	if err != nil || info.Mode().Perm() != 0o600 {
@@ -100,6 +104,15 @@ func TestSessionStoreInvalidCommitIsAtomic(t *testing.T) {
 	if len(store.state.Transcript) != 0 {
 		t.Fatal("invalid commit mutated state")
 	}
+	if err := store.Commit(nil); err == nil {
+		t.Fatal("empty commit succeeded")
+	}
+	if err := store.Commit(validUserTransaction("valid")); err != nil {
+		t.Fatal(err)
+	}
+	if store.state.Transcript[0]["content"] != "valid" {
+		t.Fatalf("sequence/state not reusable: %v", store.state.Transcript)
+	}
 }
 
 func TestSessionStoreConcurrentCommitOrdering(t *testing.T) {
@@ -154,6 +167,62 @@ func bytesLines(data []byte) [][]byte {
 		}
 	}
 	return lines
+}
+
+func TestSessionStoreIdentityPermissionsSymlinkAndTrimmedEnvironment(t *testing.T) {
+	dir := inTempDir(t)
+	store, err := createSessionStore(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, path := store.ID, store.Path
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	var header map[string]any
+	if err := json.Unmarshal(bytesLines(data)[0], &header); err != nil {
+		t.Fatal(err)
+	}
+	header["id"] = uuid7(time.Now())
+	bad, _ := json.Marshal(header)
+	bad = append(bad, '\n')
+	if err := os.WriteFile(path, bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openSessionStore(id); err == nil || !strings.Contains(err.Error(), "filename does not match header") {
+		t.Fatalf("identity=%v", err)
+	}
+	header["id"] = id
+	good, _ := json.Marshal(header)
+	good = append(good, '\n')
+	if err := os.WriteFile(path, good, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openSessionStore(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%v", info.Mode().Perm())
+	}
+	_ = reopened.Close()
+	linkID := uuid7(time.Now().Add(time.Second))
+	outside := filepath.Join(dir, "outside.jsonl")
+	if err := os.WriteFile(outside, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, ".tiny-agent", "sessions", "only_"+linkID+".jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openSessionStore(linkID); err == nil || !strings.Contains(err.Error(), "Session not found") {
+		t.Fatalf("symlink=%v", err)
+	}
+	t.Setenv("TINY_AGENT_ENVIRONMENT_IDENTITY", " job-123 ")
+	if got, _ := environmentIdentity(); got != "job-123" {
+		t.Fatalf("identity=%q", got)
+	}
 }
 
 func TestEnvironmentIdentity(t *testing.T) {

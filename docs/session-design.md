@@ -515,6 +515,10 @@ function planRecovery(state: SessionState, current: CurrentConfiguration): Recov
 
 The session format remains single-writer. Cross-process leases are explicitly deferred.
 
+Candidate transactions are reduced before append, and rejected candidates leave disk bytes, sequence, and in-memory state unchanged. Session lookup accepts only regular files under the canonical sessions directory; Unix implementations additionally open with `O_NOFOLLOW`. Platforms without no-follow support retain the canonical-parent and non-symlink checks as best-effort protection.
+
+The current language file APIs do not expose a shared portable short-write injection seam. Adding a test-only filesystem abstraction is deferred until production integration needs fault injection; this milestone tests invalid-candidate consistency instead.
+
 ## Format cutover
 
 Session is a clean break:

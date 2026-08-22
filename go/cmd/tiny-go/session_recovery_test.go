@@ -26,23 +26,17 @@ func TestSessionRecoveryPlannerFixtures(t *testing.T) {
 	for _, fixture := range manifest.Fixtures {
 		t.Run(fixture.Name, func(t *testing.T) {
 			var input struct {
-				Fixture string               `json:"fixture"`
-				Current currentConfiguration `json:"current"`
+				SessionFile string               `json:"sessionFile"`
+				Current     currentConfiguration `json:"current"`
 			}
 			readJSONFile(t, filepath.Join(directory, fixture.Input), &input)
-			data, err := os.ReadFile(filepath.Join(root, "schemas", "session", "fixtures", input.Fixture))
+			data, err := os.ReadFile(filepath.Join(root, "schemas", "session", "fixtures", input.SessionFile))
 			if err != nil {
 				t.Fatal(err)
 			}
 			state, err := reduceSession(data)
 			if err != nil {
 				t.Fatal(err)
-			}
-			if (fixture.Name == "abort-close-attempt" || fixture.Name == "abort-pending-tool" || fixture.Name == "abort-mixed-tools") && state.Operation.Kind != "idle" {
-				state.Operation.AbortRequested = true
-			}
-			if fixture.Name == "attempts-exhausted" && state.Operation.Kind != "idle" && state.Operation.Step != nil {
-				state.Operation.Step.Attempt = 2
 			}
 			var expected any
 			readJSONFile(t, filepath.Join(directory, fixture.Expected), &expected)

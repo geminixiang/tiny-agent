@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -64,8 +64,14 @@ test("session store validates a candidate before append and preserves bytes on r
         () => store.append({ kind: "record", record: { type: "runStarted" } }),
         /INVALID_FACT|INVALID_REFERENCE|INVALID_TRANSITION/,
     );
+    await assert.rejects(() => store.append([]), /must not be empty/);
     assert.deepEqual(await readFile(store.path), before);
     assert.equal((await store.load()).operation.kind, "idle");
+    const committed = await store.append({
+        kind: "entry",
+        entry: { type: "message", message: { role: "user", content: "valid" } },
+    });
+    assert.equal(committed[0].seq, 1);
     await store.close();
 });
 
@@ -123,6 +129,30 @@ test("session store repairs a torn tail before admitting appends", async () => {
         },
     });
     assert.equal((await reopened.load()).operation.kind, "run");
+    await reopened.close();
+});
+
+test("session store rejects mismatched identities and symlink session files", async () => {
+    const cwd = await workspace();
+    const store = await SessionStore.create(cwd, MODEL);
+    const id = store.id;
+    const path = store.path;
+    await store.close();
+
+    const header = JSON.parse((await readFile(path, "utf8")).split("\n")[0]);
+    await writeFile(path, `${JSON.stringify({ ...header, id: "018f0000-0000-7000-8000-000000000099" })}\n`);
+    await assert.rejects(() => SessionStore.open(id, cwd), /filename does not match header/);
+
+    const target = join(cwd, "outside.jsonl");
+    await writeFile(target, `${JSON.stringify(header)}\n`);
+    const symlinkId = store.allocateId();
+    await symlink(target, join(cwd, ".tiny-agent/sessions", `only_${symlinkId}.jsonl`));
+    await assert.rejects(() => SessionStore.open(symlinkId, cwd), /Session not found/);
+
+    await writeFile(path, `${JSON.stringify(header)}\n`);
+    await chmod(path, 0o666);
+    const reopened = await SessionStore.open(id, cwd);
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
     await reopened.close();
 });
 

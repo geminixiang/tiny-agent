@@ -57,6 +57,7 @@ impl SessionStore {
         let id = uuid7_at(millis);
         let directory = cwd.join(".tiny-agent/sessions");
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let directory = fs::canonicalize(directory).map_err(|error| error.to_string())?;
         let stamp = timestamp_filename(millis);
         let path = directory.join(format!("{stamp}_{id}.jsonl"));
         let header = serde_json::json!({
@@ -103,12 +104,18 @@ impl SessionStore {
         if !valid_session_id(id) {
             return Err(format!("Invalid session ID: {id}"));
         }
-        let directory = cwd.join(".tiny-agent/sessions");
+        let directory = fs::canonicalize(cwd.join(".tiny-agent/sessions"))
+            .map_err(|_| format!("Session not found: {id}"))?;
         let suffix = format!("_{id}.jsonl");
         let mut matches = fs::read_dir(&directory)
             .map(|entries| {
                 entries
                     .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_type()
+                            .is_ok_and(|kind| kind.is_file() && !kind.is_symlink())
+                    })
                     .map(|entry| entry.path())
                     .filter(|path| {
                         path.file_name()
@@ -125,43 +132,56 @@ impl SessionStore {
             });
         }
         let path = matches.remove(0);
-        if writers().lock().unwrap().contains(&path) {
-            return Err(format!("Session is already open for writing: {id}"));
+        let canonical = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+        if canonical.parent() != Some(directory.as_path()) {
+            return Err(format!("Unsafe session path: {id}"));
         }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|error| error.to_string())?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
-        let state = reduce_session(&bytes).map_err(|error| error.to_string())?;
-        if state.header.id != id {
-            return Err("session filename does not match header".into());
+        {
+            let mut open = writers().lock().unwrap();
+            if !open.insert(canonical.clone()) {
+                return Err(format!("Session is already open for writing: {id}"));
+            }
         }
-        if state.repaired_length != bytes.len() {
-            file.set_len(state.repaired_length as u64)
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&canonical)
                 .map_err(|error| error.to_string())?;
-            bytes.truncate(state.repaired_length);
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            let state = reduce_session(&bytes).map_err(|error| error.to_string())?;
+            if state.header.id != id {
+                return Err("session filename does not match header".into());
+            }
+            if state.repaired_length != bytes.len() {
+                file.set_len(state.repaired_length as u64)
+                    .map_err(|error| error.to_string())?;
+                bytes.truncate(state.repaired_length);
+            }
+            file.seek(SeekFrom::End(0))
+                .map_err(|error| error.to_string())?;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+            let next_seq = count_facts(&bytes)? + 1;
+            Ok(Self {
+                id: id.to_string(),
+                path: canonical.clone(),
+                inner: Mutex::new(StoreInner {
+                    file: Some(file),
+                    bytes,
+                    next_seq,
+                    state,
+                    closed: false,
+                }),
+            })
+        })();
+        if result.is_err() {
+            writers().lock().unwrap().remove(&canonical);
         }
-        file.seek(SeekFrom::End(0))
-            .map_err(|error| error.to_string())?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| error.to_string())?;
-        let next_seq = count_facts(&bytes)? + 1;
-        writers().lock().unwrap().insert(path.clone());
-        Ok(Self {
-            id: id.to_string(),
-            path,
-            inner: Mutex::new(StoreInner {
-                file: Some(file),
-                bytes,
-                next_seq,
-                state,
-                closed: false,
-            }),
-        })
+        result
     }
 
     pub fn allocate_id(&self) -> String {

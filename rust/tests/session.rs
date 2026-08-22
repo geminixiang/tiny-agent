@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -57,6 +58,61 @@ fn store_creates_exclusive_0600_file_and_closes_idempotently() {
 }
 
 #[test]
+fn store_rejects_identity_mismatch_and_symlink_and_repairs_permissions() {
+    let root = workspace();
+    let store = SessionStore::create_new(&root, "test/model").unwrap();
+    let id = store.id.clone();
+    let path = store.path.clone();
+    store.close().unwrap();
+    let data = fs::read(&path).unwrap();
+    let mut header: Value =
+        serde_json::from_slice(data.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
+    header["id"] = json!(tiny_agent_rust::uuid7());
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&header).unwrap()),
+    )
+    .unwrap();
+    let error = match SessionStore::open(&id, &root) {
+        Ok(_) => panic!("mismatched header opened"),
+        Err(error) => error,
+    };
+    assert!(error.contains("filename does not match header"));
+    header["id"] = json!(id);
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&header).unwrap()),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    let reopened = SessionStore::open(&id, &root).unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    reopened.close().unwrap();
+
+    let link_id = tiny_agent_rust::uuid7();
+    let outside = root.join("outside.jsonl");
+    fs::write(
+        &outside,
+        format!("{}\n", serde_json::to_string(&header).unwrap()),
+    )
+    .unwrap();
+    symlink(
+        &outside,
+        root.join(".tiny-agent/sessions")
+            .join(format!("only_{link_id}.jsonl")),
+    )
+    .unwrap();
+    let error = match SessionStore::open(&link_id, &root) {
+        Ok(_) => panic!("symlink session opened"),
+        Err(error) => error,
+    };
+    assert!(error.contains("Session not found"));
+}
+
+#[test]
 fn store_validates_before_append_and_preserves_bytes() {
     let root = workspace();
     let store = SessionStore::create_new(&root, "test/model").unwrap();
@@ -73,6 +129,16 @@ fn store_validates_before_append_and_preserves_bytes() {
         store.load().unwrap().operation,
         tiny_agent_rust::session_reducer::OperationState::Idle
     ));
+    assert!(
+        store
+            .append(Vec::new())
+            .unwrap_err()
+            .contains("must not be empty")
+    );
+    let committed = store
+        .append(vec![fact(json!({"kind":"entry","entry":{"type":"message","message":{"role":"user","content":"valid"}}}))])
+        .unwrap();
+    assert_eq!(committed[0]["seq"], json!(1));
     store.close().unwrap();
 }
 
@@ -160,37 +226,10 @@ fn matches_all_shared_recovery_planner_fixtures() {
             serde_json::from_slice(&fs::read(planner.join(&fixture.input)).unwrap()).unwrap();
         let bytes = fs::read(
             root.join("fixtures")
-                .join(input["fixture"].as_str().unwrap()),
+                .join(input["sessionFile"].as_str().unwrap()),
         )
         .unwrap();
-        let mut state = reduce_session(&bytes).unwrap();
-        if matches!(
-            fixture.name.as_str(),
-            "abort-close-attempt" | "abort-pending-tool" | "abort-mixed-tools"
-        ) {
-            match &mut state.operation {
-                tiny_agent_rust::session_reducer::OperationState::Run {
-                    abort_requested, ..
-                }
-                | tiny_agent_rust::session_reducer::OperationState::Compaction {
-                    abort_requested,
-                    ..
-                } => *abort_requested = true,
-                _ => {}
-            }
-        }
-        if fixture.name == "attempts-exhausted" {
-            match &mut state.operation {
-                tiny_agent_rust::session_reducer::OperationState::Run {
-                    step: Some(step), ..
-                }
-                | tiny_agent_rust::session_reducer::OperationState::Compaction {
-                    step: Some(step),
-                    ..
-                } => step.attempt = 2,
-                _ => {}
-            }
-        }
+        let state = reduce_session(&bytes).unwrap();
         let current: CurrentConfiguration =
             serde_json::from_value(input["current"].clone()).unwrap();
         let expected: Value =

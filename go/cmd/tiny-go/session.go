@@ -8,9 +8,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
+
+var sessionWriters = struct {
+	sync.Mutex
+	paths map[string]bool
+}{paths: map[string]bool{}}
 
 // SessionStore owns canonical session framing and commits. Runtime integration
 // supplies domain facts; the store supplies fact identity, sequence, and time.
@@ -26,7 +33,7 @@ type SessionStore struct {
 }
 
 func environmentIdentity() (string, error) {
-	if identity := os.Getenv("TINY_AGENT_ENVIRONMENT_IDENTITY"); identity != "" {
+	if identity := strings.TrimSpace(os.Getenv("TINY_AGENT_ENVIRONMENT_IDENTITY")); identity != "" {
 		return identity, nil
 	}
 	absolute, err := filepath.Abs(cwd)
@@ -51,6 +58,10 @@ func createSessionStoreWithID(now time.Time, id string) (*SessionStore, error) {
 	}
 	dir := filepath.Join(cwd, ".tiny-agent", "sessions")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
 		return nil, err
 	}
 	stamp := now.UTC().Format("2006-01-02T15-04-05-000Z")
@@ -85,6 +96,14 @@ func createSessionStoreWithID(now time.Time, id string) (*SessionStore, error) {
 		_ = os.Remove(path)
 		return nil, err
 	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	sessionWriters.Lock()
+	sessionWriters.paths[path] = true
+	sessionWriters.Unlock()
 	return &SessionStore{ID: id, Path: path, file: file, data: encoded, state: state, nextSeq: 1}, nil
 }
 
@@ -92,9 +111,19 @@ func openSessionStore(id string) (*SessionStore, error) {
 	if _, ok := sessionID(id); !ok {
 		return nil, fmt.Errorf("Invalid session ID: %s", id)
 	}
-	matches, err := filepath.Glob(filepath.Join(cwd, ".tiny-agent", "sessions", "*_"+id+".jsonl"))
+	dir, err := filepath.EvalSymlinks(filepath.Join(cwd, ".tiny-agent", "sessions"))
+	if err != nil {
+		return nil, fmt.Errorf("Session not found: %s", id)
+	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
+	}
+	matches := []string{}
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink == 0 && entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), "_"+id+".jsonl") {
+			matches = append(matches, filepath.Join(dir, entry.Name()))
+		}
 	}
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("Session not found: %s", id)
@@ -102,10 +131,34 @@ func openSessionStore(id string) (*SessionStore, error) {
 	if len(matches) > 1 {
 		return nil, fmt.Errorf("Duplicate session ID: %s", id)
 	}
-	file, err := os.OpenFile(matches[0], os.O_RDWR, 0)
+	path := matches[0]
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil || filepath.Dir(realPath) != dir {
+		return nil, fmt.Errorf("Unsafe session path: %s", id)
+	}
+	sessionWriters.Lock()
+	if sessionWriters.paths[realPath] {
+		sessionWriters.Unlock()
+		return nil, fmt.Errorf("Session is already open for writing: %s", id)
+	}
+	sessionWriters.paths[realPath] = true
+	sessionWriters.Unlock()
+	file, err := os.OpenFile(realPath, os.O_RDWR|os.O_APPEND|syscall.O_NOFOLLOW, 0)
 	if err != nil {
+		sessionWriters.Lock()
+		delete(sessionWriters.paths, realPath)
+		sessionWriters.Unlock()
 		return nil, err
 	}
+	failed := true
+	defer func() {
+		if failed {
+			_ = file.Close()
+			sessionWriters.Lock()
+			delete(sessionWriters.paths, realPath)
+			sessionWriters.Unlock()
+		}
+	}()
 	data, err := io.ReadAll(file)
 	if err != nil {
 		_ = file.Close()
@@ -131,7 +184,12 @@ func openSessionStore(id string) (*SessionStore, error) {
 		_ = file.Close()
 		return nil, err
 	}
-	return &SessionStore{ID: id, Path: matches[0], file: file, data: data, state: state, nextSeq: nextSessionSeq(data)}, nil
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	failed = false
+	return &SessionStore{ID: id, Path: realPath, file: file, data: data, state: state, nextSeq: nextSessionSeq(data)}, nil
 }
 
 func (s *SessionStore) NewID(now time.Time) string { return uuid7(now) }
@@ -211,5 +269,9 @@ func (s *SessionStore) Close() error {
 		return nil
 	}
 	s.closed = true
-	return s.file.Close()
+	err := s.file.Close()
+	sessionWriters.Lock()
+	delete(sessionWriters.paths, s.Path)
+	sessionWriters.Unlock()
+	return err
 }

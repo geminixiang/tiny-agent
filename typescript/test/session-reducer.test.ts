@@ -18,6 +18,8 @@ const plannerFixtures = resolve(fixtures, "../planner-fixtures");
 const plannerManifest = JSON.parse(await readFile(resolve(plannerFixtures, "manifest.json"), "utf8")) as {
     fixtures: { name: string; input: string; expected: string }[];
 };
+const plannerInputSchema = JSON.parse(await readFile(resolve(plannerFixtures, "input.schema.json"), "utf8"));
+const plannerManifestSchema = JSON.parse(await readFile(resolve(plannerFixtures, "manifest.schema.json"), "utf8"));
 const currentConfigurationSchema = JSON.parse(
     await readFile(resolve(plannerFixtures, "../current-configuration.schema.json"), "utf8"),
 );
@@ -134,19 +136,26 @@ for (const fixture of manifest.fixtures) {
     });
 }
 
+test("planner fixture metadata matches its JSON schemas", async () => {
+    assertSchema(plannerManifest, plannerManifestSchema);
+    for (const fixture of plannerManifest.fixtures) {
+        const input = JSON.parse(await readFile(resolve(plannerFixtures, fixture.input), "utf8"));
+        assertSchema(input, plannerInputSchema);
+        assertSchema(input.current, currentConfigurationSchema);
+        assertSchema(
+            JSON.parse(await readFile(resolve(plannerFixtures, fixture.expected), "utf8")),
+            recoveryPlanSchema,
+        );
+    }
+});
+
 for (const fixture of plannerManifest.fixtures) {
     test(`session recovery plan: ${fixture.name}`, async () => {
         const input = JSON.parse(await readFile(resolve(plannerFixtures, fixture.input), "utf8"));
         const expected = JSON.parse(await readFile(resolve(plannerFixtures, fixture.expected), "utf8"));
         assertSchema(input.current, currentConfigurationSchema);
         assertSchema(expected, recoveryPlanSchema);
-        const state = reduceSession(await readFile(resolve(fixtures, input.fixture)));
-        if (
-            ["abort-close-attempt", "abort-pending-tool", "abort-mixed-tools"].includes(fixture.name) &&
-            state.operation.kind !== "idle"
-        )
-            state.operation.abortRequested = true;
-        if (fixture.name === "attempts-exhausted" && state.operation.kind !== "idle") state.operation.step!.attempt = 2;
+        const state = reduceSession(await readFile(resolve(fixtures, input.sessionFile)));
         assert.deepEqual(planRecovery(state, input.current), expected);
     });
 }
@@ -181,13 +190,8 @@ function nextSequence(bytes: Buffer) {
 test("every synthetic recovery action materializes as a schema-valid reducible entry", async () => {
     for (const fixture of plannerManifest.fixtures) {
         const input = JSON.parse(await readFile(resolve(plannerFixtures, fixture.input), "utf8"));
-        const bytes = await readFile(resolve(fixtures, input.fixture));
+        const bytes = await readFile(resolve(fixtures, input.sessionFile));
         const state = reduceSession(bytes);
-        if (
-            ["abort-close-attempt", "abort-pending-tool", "abort-mixed-tools"].includes(fixture.name) &&
-            state.operation.kind !== "idle"
-        )
-            state.operation.abortRequested = true;
         const plan = planRecovery(state, input.current);
         if (plan.type !== "appendSynthetic") continue;
         assert.ok(state.operation.kind === "run" && state.operation.step);
