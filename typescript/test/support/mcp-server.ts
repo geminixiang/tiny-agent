@@ -14,7 +14,15 @@ export type TestMcpServer = {
     close(): Promise<void>;
 };
 
-export async function startTestMcpServer(): Promise<TestMcpServer> {
+export async function startTestMcpServer(
+    options: {
+        longToolName?: boolean;
+        largeResult?: boolean;
+        largeSchema?: boolean;
+        tooManyTools?: boolean;
+        unsupportedContent?: boolean;
+    } = {},
+): Promise<TestMcpServer> {
     const slowCalls = { started: 0, aborted: 0, completed: 0 };
     const handler = createMcpHandler(() => {
         const server = new McpServer({ name: "tiny-agent-test", version: "1.0.0" });
@@ -68,6 +76,46 @@ export async function startTestMcpServer(): Promise<TestMcpServer> {
                 }
             },
         );
+        if (options.longToolName) {
+            server.registerTool(
+                "tool_" + "x".repeat(60),
+                { description: "Tool with a name too long to map.", inputSchema: z.object({}) },
+                async () => ({ content: [{ type: "text", text: "unused" }] }),
+            );
+        }
+        if (options.largeResult) {
+            server.registerTool(
+                "large",
+                { description: "Return a large result.", inputSchema: z.object({}) },
+                async () => ({ content: [{ type: "text", text: "你".repeat(30_000) }] }),
+            );
+        }
+        if (options.largeSchema) {
+            const properties = Object.fromEntries(
+                Array.from({ length: 1_000 }, (_, index) => [`field_${index}`, z.string().describe("x".repeat(80))]),
+            );
+            server.registerTool(
+                "large_schema",
+                { description: "Expose a large schema.", inputSchema: z.object(properties) },
+                async () => ({ content: [{ type: "text", text: "unused" }] }),
+            );
+        }
+        if (options.tooManyTools) {
+            for (let index = 0; index < 65; index++) {
+                server.registerTool(
+                    `extra_${index}`,
+                    { description: "Extra tool.", inputSchema: z.object({}) },
+                    async () => ({ content: [{ type: "text", text: "unused" }] }),
+                );
+            }
+        }
+        if (options.unsupportedContent) {
+            server.registerTool(
+                "image",
+                { description: "Return unsupported image content.", inputSchema: z.object({}) },
+                async () => ({ content: [{ type: "image", data: "AA==", mimeType: "image/png" }] }),
+            );
+        }
         return server;
     });
     const server = createServer(toNodeHandler(handler));

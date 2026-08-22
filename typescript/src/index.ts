@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { builtInTools, toolDefinitions, type Tool, type ToolArgs, type ToolEvent } from "./tools.js";
 
+export { loadMcpTools, type LoadedMcpTools, type McpConfig } from "./mcp.js";
 export {
     builtInPlugins,
     builtInTools,
