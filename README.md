@@ -43,17 +43,12 @@ messages → model → tool calls → tool results → model
 
 - OpenRouter與可覆寫的 `TINY_MODEL`
 - Agent loop與 `bash`、`read`、`write`、`edit`
-- `AGENTS.md`、漸進載入 skills、compaction
-- Append-only JSONL session與 `--session`恢復
-- Model/tool/compaction cancellation
-- Token與prompt-cache usage
-
-TypeScript參考實作另外支援：
-
-- Injectable `Tool[]`與trusted local `--plugin` allowlist
-- `--json` structured run monitoring
+- `AGENTS.md`、skills、compaction與JSONL session
+- Cancellation、token與prompt-cache usage
 - Trusted named Streamable HTTP MCP servers
-- MCP tool discovery、calling、timeouts、bounds與cleanup
+- MCP discovery、calling、timeouts、bounds與cleanup
+
+TypeScript另外提供injectable `Tool[]`、local `--plugin` allowlist與`--json` structured monitoring。
 
 核心實作：[`typescript/src/index.ts`](typescript/src/index.ts)、[`typescript/src/tools.ts`](typescript/src/tools.ts)、[`typescript/src/mcp.ts`](typescript/src/mcp.ts)、[`typescript/src/cli.ts`](typescript/src/cli.ts)、[`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)、[`python/tiny_agent/agent.py`](python/tiny_agent/agent.py)、[`python/tiny_agent/cli.py`](python/tiny_agent/cli.py)、[`rust/src/lib.rs`](rust/src/lib.rs)、[`rust/src/terminal.rs`](rust/src/terminal.rs)。共用的 skills、session schema與文件留在repo root。
 
@@ -85,9 +80,9 @@ tiny-rs
 TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 ```
 
-### MCP（目前僅 TypeScript）
+### MCP
 
-`tiny-ts` 可從可信的 user/server catalog 載入 MCP tools。預設 catalog 位於：
+四個CLI都能從trusted catalog載入MCP tools。預設位置：
 
 ```text
 ~/.tiny-agent/mcp.json
@@ -106,14 +101,17 @@ TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 }
 ```
 
-執行：
+執行任一版本：
 
 ```bash
 export TINY_MCP_TOKEN_SENTRY=...
-tiny-ts --mcp sentry --plugin read "調查 issue"
+tiny-ts --mcp sentry "調查 issue"
+tiny-go --mcp sentry "調查 issue"
+tiny-py --mcp sentry "調查 issue"
+tiny-rs --mcp sentry "調查 issue"
 ```
 
-`--mcp`可重複或以逗號分隔；`--plugin`仍是獨立的local capability allowlist。啟動後會顯示實際可用能力：
+`--mcp`可重複或用逗號分隔。啟動後會顯示實際能力：
 
 ```text
 MCP sentry: connected (2026-07-28, 2 tools)
@@ -121,9 +119,9 @@ tools: read, mcp:sentry/search_issues, mcp:sentry/get_issue
 mcp: sentry
 ```
 
-設定檔只保存token的環境變數名稱，不保存token；部署或測試可用 `TINY_MCP_CONFIG=/trusted/path/mcp.json` 指定可信catalog。Tiny-agent不會讀取repository內的MCP設定，也不接受CLI傳入URL、header或token。多租戶環境應連到trusted gateway，tenant ACL與長效credential不應放進agent job。
+Catalog只保存token的環境變數名稱。`TINY_MCP_CONFIG=/trusted/path/mcp.json`可指定其他trusted catalog；不會讀取repository config，也不接受CLI傳入URL、header或token。
 
-目前範圍是Streamable HTTP、`tools/list`與`tools/call`。MCP是Tool adapter，不是sandbox或authorization boundary。
+目前支援modern Streamable HTTP、`tools/list`與`tools/call`。多租戶部署應連到trusted gateway；MCP不是sandbox或authorization boundary。
 
 單次執行：
 
@@ -224,14 +222,14 @@ make build
 
 ## 四語言狀態
 
-| CLI | 核心agent | Session / skills / compact | MCP |
+| CLI | Agent / session / skills | MCP | Structured monitoring |
 |---|---:|---:|---:|
-| `tiny-ts` | ✓ | ✓ | ✓ reference |
-| `tiny-go` | ✓ | ✓ | 移植中 |
-| `tiny-py` | ✓ | ✓ | 移植中 |
-| `tiny-rs` | ✓ | ✓ | 移植中 |
+| `tiny-ts` | ✓ | ✓ | `--json` |
+| `tiny-go` | ✓ | ✓ | — |
+| `tiny-py` | ✓ | ✓ | — |
+| `tiny-rs` | ✓ | ✓ | — |
 
-MCP移植以TypeScript行為為contract；各語言應維持相同CLI、catalog、validation、tool result與cleanup語意。
+四種實作共用CLI、catalog、validation、tool result與cleanup語意。
 
 Rust 版使用 `ureq`（blocking HTTP）、`libc` + `unicode-width`（raw terminal 與 CJK 顯示寬度）、`serde`（session/JSON）。model request 設有 connect/read/write timeout；按 Esc 會立即停止前景等待，但 `ureq` 的 blocking transport thread 可能在 timeout 前繼續完成。Bash 工具則會清除整個 process group。
 
