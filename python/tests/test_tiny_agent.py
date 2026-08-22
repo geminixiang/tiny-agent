@@ -297,6 +297,84 @@ class TinyAgentTest(unittest.TestCase):
         self.assertEqual(session.load()["operation"]["kind"], "idle")
         session.close()
 
+    def assert_aborted_reopens_idempotently(self, session, expected):
+        self.assertEqual(session.load()["operation"]["kind"], "idle")
+        facts = [fact for line in session.path.read_text().splitlines()[1:] for fact in (json.loads(line) if isinstance(json.loads(line), list) else [json.loads(line)])]
+        abort_index = next(index for index, fact in enumerate(facts) if fact.get("record", {}).get("type") == "abortRequested")
+        self.assertFalse(any(fact.get("record", {}).get("outcome") == "completed" for fact in facts[abort_index:]))
+        session_id = session.id; session.close()
+        reopened = tiny.Session.open(session_id, tiny.ROOT); restored = tiny.Agent(session=reopened)
+        before = reopened.path.read_bytes()
+        self.assertIsNone(restored.resume_session()); self.assertEqual(reopened.path.read_bytes(), before)
+        self.assertEqual(restored.messages[-1].get("content"), expected)
+        reopened.close()
+
+    def test_abort_after_successful_model_return_discards_answer(self):
+        session = tiny.Session.create(tiny.ROOT); agent = None
+        def reply(*_):
+            agent.abort()
+            self.assertTrue(session.load()["operation"]["abortRequested"])
+            return {"choices": [{"message": {"role": "assistant", "content": "must be discarded"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 8, "completion_tokens": 2}}
+        agent = tiny.Agent(session=session, requester=reply)
+        self.assertEqual(agent.run_agent_loop("race"), "Operation aborted.")
+        self.assertNotIn("must be discarded", [message.get("content") for message in agent.messages])
+        self.assert_aborted_reopens_idempotently(session, "race")
+
+    def test_abort_race_after_model_settlement_does_not_create_durable_abort(self):
+        session = tiny.Session.create(tiny.ROOT); agent = None
+        original = session.append_if_active
+        def settle_then_abort(operation_id, cancelled, *facts):
+            committed = original(operation_id, cancelled, *facts)
+            agent.abort()
+            return committed
+        session.append_if_active = settle_then_abort
+        agent = tiny.Agent(session=session, requester=lambda *_: {"choices": [{"message": {"role": "assistant", "content": "settled"}, "finish_reason": "stop"}], "usage": {}})
+        self.assertEqual(agent.run_agent_loop("race"), "settled")
+        self.assertFalse(any(fact.get("record", {}).get("type") == "abortRequested" for fact in agent._facts()))
+        session_id = session.id; session.close()
+        reopened = tiny.Session.open(session_id, tiny.ROOT); self.assertIsNone(tiny.Agent(session=reopened).resume_session()); reopened.close()
+
+    def test_concurrent_abort_is_serialized_with_settlement(self):
+        session = tiny.Session.create(tiny.ROOT); agent = None
+        original = session.request_abort; entered = threading.Event(); release = threading.Event(); errors = []
+        def delayed_abort(*args):
+            entered.set(); release.wait(); return original(*args)
+        session.request_abort = delayed_abort
+        def reply(*_):
+            thread = threading.Thread(target=lambda: self._capture_error(errors, agent.abort)); thread.start(); entered.wait()
+            threading.Thread(target=lambda: (time.sleep(0.01), release.set())).start()
+            return {"choices": [{"message": {"role": "assistant", "content": "settled"}, "finish_reason": "stop"}], "usage": {}}
+        agent = tiny.Agent(session=session, requester=reply)
+        self.assertEqual(agent.run_agent_loop("race"), "settled")
+        time.sleep(0.01)
+        self.assertFalse(errors)
+        self.assertFalse(any(fact.get("record", {}).get("type") == "abortRequested" for fact in agent._facts()))
+        session_id = session.id; session.close()
+        reopened = tiny.Session.open(session_id, tiny.ROOT); self.assertIsNone(tiny.Agent(session=reopened).resume_session()); reopened.close()
+
+    def test_abort_after_successful_tool_return_materializes_interruption(self):
+        session = tiny.Session.create(tiny.ROOT); agent = None
+        tool = {"type": "function", "function": {"name": "race", "description": "race", "parameters": {"type": "object", "properties": {}, "required": []}}}
+        def execute(*_): agent.abort(); return "must be discarded"
+        tool["execute"] = execute
+        response = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "race-call", "type": "function", "function": {"name": "race", "arguments": "{}"}}
+        ]}, "finish_reason": "tool_calls"}], "usage": {}}
+        agent = tiny.Agent(session=session, tools=[tool], requester=lambda *_: response)
+        self.assertEqual(agent.run_agent_loop("race"), "Operation aborted.")
+        self.assertEqual(agent.messages[-1]["content"], "Operation interrupted after execution status became unknown; the tool was not replayed.")
+        self.assert_aborted_reopens_idempotently(session, "Operation interrupted after execution status became unknown; the tool was not replayed.")
+
+    def test_abort_after_successful_compaction_return_discards_summary(self):
+        session = tiny.Session.create(tiny.ROOT); agent = self._completed_conversation(session); agent.requester = None
+        def reply(*_):
+            agent.abort()
+            return {"choices": [{"message": {"role": "assistant", "content": "must be discarded"}, "finish_reason": "stop"}], "usage": {}}
+        agent.requester = reply
+        self.assertEqual(agent.compact(), "Compaction aborted.")
+        self.assertFalse(any(fact.get("entry", {}).get("type") == "compaction" for fact in agent._facts()))
+        self.assert_aborted_reopens_idempotently(session, "answer 3")
+
     def test_model_and_tool_abort_keep_legal_transcript(self):
         started = threading.Event()
 

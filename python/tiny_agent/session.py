@@ -110,15 +110,43 @@ class Session:
         if not facts: raise ValueError("Session transaction must not be empty")
         with self.lock:
             if self.closed: raise ValueError("Session is closed")
-            timestamp = time.time_ns() // 1_000_000
-            committed = [{**fact, "seq": self.next_seq + index, "id": fact.get("id", uuid7()), "timestamp": timestamp} for index, fact in enumerate(facts)]
-            value: object = committed[0] if len(committed) == 1 else committed
-            line = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
-            candidate = self.data + line
-            state = reduce_session(candidate)
-            self.file.write(line)
-            self.data, self.state, self.next_seq = candidate, state, self.next_seq + len(committed)
-            return committed
+            return self._append_locked(facts)
+
+    def request_abort(self, operation_id: str, cancelled: threading.Event, fact: dict) -> bool:
+        with self.lock:
+            if self.closed: raise ValueError("Session is closed")
+            operation = self.state["operation"]
+            if operation["kind"] == "idle" or operation.get("operationId") != operation_id or operation.get("abortRequested"):
+                return False
+            record = fact.get("record", {})
+            phase = record.get("phase")
+            if phase in ("model", "compact") and operation.get("step", {}).get("status") != "attempting":
+                return False
+            if phase == "tool" and not any(tool["status"] == "pending" and tool["toolCallId"] == record.get("toolCallId") for tool in operation.get("toolCalls", [])):
+                return False
+            self._append_locked((fact,))
+            cancelled.set()
+            return True
+
+    def append_if_active(self, operation_id: str, cancelled: threading.Event, *facts: dict) -> list[dict] | None:
+        if not facts: raise ValueError("Session transaction must not be empty")
+        with self.lock:
+            if self.closed: raise ValueError("Session is closed")
+            operation = self.state["operation"]
+            if cancelled.is_set() or operation["kind"] == "idle" or operation.get("operationId") != operation_id or operation.get("abortRequested"):
+                return None
+            return self._append_locked(facts)
+
+    def _append_locked(self, facts: tuple[dict, ...]) -> list[dict]:
+        timestamp = time.time_ns() // 1_000_000
+        committed = [{**fact, "seq": self.next_seq + index, "id": fact.get("id", uuid7()), "timestamp": timestamp} for index, fact in enumerate(facts)]
+        value: object = committed[0] if len(committed) == 1 else committed
+        line = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        candidate = self.data + line
+        state = reduce_session(candidate)
+        self.file.write(line)
+        self.data, self.state, self.next_seq = candidate, state, self.next_seq + len(committed)
+        return committed
 
     def close(self) -> None:
         with self.lock:

@@ -148,7 +148,7 @@ class Agent:
         self.tools = tools if tools is not None else TOOL_DEFINITIONS
         self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
         self.cancelled: threading.Event | None = None; self.connection: http.client.HTTPConnection | None = None
-        self.active: dict | None = None
+        self.active: dict | None = None; self.activity_lock = threading.Lock()
         listing = "\n".join(f"<skill>\n<name>{s['name']}</name>\n<description>{s['description']}</description>\n<location>{s['path']}</location>\n</skill>" for s in self.skills) or "(none)"
         project = f'\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="{ROOT / "AGENTS.md"}">\n{instructions}\n</project_instructions>\n\n</project_context>' if instructions else ""
         prompt = f"You are tiny-agent, a concise coding agent in {ROOT}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.{project}\n\n<available_skills>\n{listing}\n</available_skills>"
@@ -174,25 +174,42 @@ class Agent:
     def busy(self) -> bool: return self.cancelled is not None
 
     def abort(self) -> None:
-        if self.cancelled and self.active and self.session and not self.active.get("abortRequested"):
-            record = {
-                "type": "abortRequested", "operationId": self.active["operationId"],
-                "operationKind": self.active["operationKind"], "phase": self.active["phase"], "reason": "escape",
-            }
-            if self.active.get("toolCallId"): record["toolCallId"] = self.active["toolCallId"]
-            self.session.append({"kind": "record", "record": record})
-            self.active["abortRequested"] = True
-        if self.cancelled: self.cancelled.set()
+        with self.activity_lock:
+            active, cancelled = self.active, self.cancelled
+            if cancelled and active and self.session and not active.get("abortRequested"):
+                record = {
+                    "type": "abortRequested", "operationId": active["operationId"],
+                    "operationKind": active["operationKind"], "phase": active["phase"], "reason": "escape",
+                }
+                if active.get("toolCallId"): record["toolCallId"] = active["toolCallId"]
+                active["abortRequested"] = self.session.request_abort(
+                    active["operationId"], cancelled, {"kind": "record", "record": record},
+                )
+            elif cancelled:
+                cancelled.set()
         if self.connection:
             try: self.connection.close()
             except OSError: pass
 
     def begin(self, operation_id: str, phase: str, tool_call_id: str | None = None, operation_kind: str = "run") -> threading.Event:
-        self.cancelled = threading.Event()
-        self.active = {"operationId": operation_id, "operationKind": operation_kind, "phase": phase, "toolCallId": tool_call_id, "abortRequested": False}
-        return self.cancelled
+        with self.activity_lock:
+            self.cancelled = threading.Event()
+            self.active = {"operationId": operation_id, "operationKind": operation_kind, "phase": phase, "toolCallId": tool_call_id, "abortRequested": False}
+            return self.cancelled
 
-    def end(self) -> None: self.cancelled = None; self.connection = None; self.active = None
+    def end(self) -> None:
+        with self.activity_lock:
+            self.cancelled = None; self.connection = None; self.active = None
+
+    def _is_aborted(self, operation_id: str, cancelled: threading.Event) -> bool:
+        operation = self.session.load()["operation"]
+        return cancelled.is_set() or (operation.get("operationId") == operation_id and operation.get("abortRequested", False))
+
+    def _fail_aborted_attempt(self, operation_id: str, step_id: str, attempt_id: str) -> None:
+        self.session.append({"kind": "record", "record": {
+            "type": "stepFailed", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id,
+            "error": {"code": "aborted", "message": "Operation aborted"},
+        }})
 
     def add_usage(self, usage: dict, cache_rate: bool = True) -> None:
         for key in ("input", "output", "cacheRead", "cacheWrite"): self.usage[key] += usage.get(key, 0)
@@ -302,20 +319,26 @@ class Agent:
             pending = next(item for item in state["operation"]["toolCalls"] if item["toolStartedId"] == started_id)
             result_id, call = pending["resultEntryId"], {"id": pending["toolCallId"]}
         cancelled = self.begin(operation_id, "tool", call["id"])
+        aborted = False
         try:
             self.on_tool({"phase": "start", "name": action["toolName"], "args": action["arguments"]})
             content = tool["execute"](action["arguments"], cancelled) if "execute" in tool else execute_tool(action["toolName"], action["arguments"], cancelled)
             result = {"type": "success"}
         except BaseException as error:
-            aborted = cancelled.is_set()
+            aborted = self._is_aborted(operation_id, cancelled)
             content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
             result = {"type": "synthetic", "reason": "interrupted"} if aborted else {"type": "error"}
-        self.end(); self.on_tool({"phase": "end", "name": action["toolName"], "args": action["arguments"], "result": content})
-        self.session.append({"kind": "entry", "id": result_id, "entry": {
+        entry = lambda value, meta: {"kind": "entry", "id": result_id, "entry": {
             "type": "message", "stepId": step_id,
-            "message": {"role": "tool", "content": content, "tool_call_id": call["id"]},
-            "toolName": action["toolName"], "toolStartedId": started_id, "result": result,
-        }})
+            "message": {"role": "tool", "content": value, "tool_call_id": call["id"]},
+            "toolName": action["toolName"], "toolStartedId": started_id, "result": meta,
+        }}
+        if not aborted and self.session.append_if_active(operation_id, cancelled, entry(content, result)) is None:
+            aborted = True
+        if aborted:
+            content = "Operation interrupted after execution status became unknown; the tool was not replayed."
+            self.session.append(entry(content, {"type": "synthetic", "reason": "interrupted"}))
+        self.end(); self.on_tool({"phase": "end", "name": action["toolName"], "args": action["arguments"], "result": content})
 
     def _continue_operation(self, operation_id: str, action: dict) -> str:
         return self._run_operation(operation_id, action["contextThroughEntryId"], action)
@@ -341,7 +364,6 @@ class Agent:
         answer = data["choices"][0]["message"]
         finish = data["choices"][0].get("finish_reason")
         stop_reason = "length" if finish == "length" else "toolUse" if answer.get("tool_calls") else "stop"
-        self.add_usage(usage)
         return answer, usage, stop_reason
 
     def _attempt(self, operation_id: str, context_id: str, kind: str = "assistant", attempt: int = 1, step_id: str | None = None) -> tuple[str, str]:
@@ -381,16 +403,23 @@ class Agent:
             cancelled = self.begin(operation_id, "model")
             try: answer, usage, stop_reason = self.call_model(self.messages, model_tools, cancelled)
             except BaseException as error:
-                aborted = cancelled.is_set(); self.end()
+                aborted = self._is_aborted(operation_id, cancelled); self.end()
                 self.session.append({"kind": "record", "record": {"type": "stepFailed", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id, "error": {"code": "aborted" if aborted else "model_error", "message": "Operation aborted" if aborted else str(error)}}})
                 self._finish(operation_id, "aborted" if aborted else "failed", error=None if aborted else error)
                 if aborted: return "Operation aborted."
                 raise
-            self.end(); answer_id = uuid7()
-            self.session.append(
+            answer_id = uuid7()
+            committed = self.session.append_if_active(
+                operation_id, cancelled,
                 {"kind": "entry", "id": answer_id, "entry": {"type": "message", "stepId": step_id, "attemptId": attempt_id, "stopReason": stop_reason, "message": answer}},
                 {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage},
             )
+            self.end()
+            if committed is None:
+                self._fail_aborted_attempt(operation_id, step_id, attempt_id)
+                self._finish(operation_id, "aborted")
+                return "Operation aborted."
+            self.add_usage(usage)
             self.messages.append(answer); context_id = answer_id
             calls = answer.get("tool_calls", [])
             if stop_reason == "length":
@@ -434,12 +463,19 @@ class Agent:
                         content = tool["execute"](args, cancelled) if "execute" in tool else execute_tool(name, args, cancelled)
                         result_type = "success"
                     except BaseException as error:
-                        aborted = cancelled.is_set(); content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
+                        aborted = self._is_aborted(operation_id, cancelled); content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
                         result_type = "synthetic" if aborted else "error"
+                    if not aborted:
+                        success = {"role": "tool", "content": content, "tool_call_id": call["id"]}
+                        committed = self.session.append_if_active(operation_id, cancelled, {"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "message": success, "toolName": name, "toolStartedId": started_id, "result": {"type": result_type}}})
+                        aborted = committed is None
+                    if aborted:
+                        content = "Operation interrupted after execution status became unknown; the tool was not replayed."
+                        result = {"role": "tool", "content": content, "tool_call_id": call["id"]}
+                        self.session.append({"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "message": result, "toolName": name, "toolStartedId": started_id, "result": {"type": "synthetic", "reason": "interrupted"}}})
+                    else:
+                        result = success
                     self.end(); self.on_tool({"phase": "end", "name": name, "args": args, "result": content})
-                    result = {"role": "tool", "content": content, "tool_call_id": call["id"]}
-                    result_meta = {"type": result_type, **({"reason": "interrupted"} if aborted else {})}
-                    self.session.append({"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "message": result, "toolName": name, "toolStartedId": started_id, "result": result_meta}})
                 self.messages.append(result); context_id = result_id
                 if not aborted: continue
                 for pending_index, pending in enumerate(calls[index + 1:], index + 1):
@@ -497,7 +533,7 @@ class Agent:
             text = summary.get("content") or ""
             if stop_reason != "stop" or not text.strip(): raise RuntimeError("Model returned an invalid compaction summary")
         except BaseException as error:
-            aborted = cancelled.is_set(); self.end()
+            aborted = self._is_aborted(operation_id, cancelled); self.end()
             self.session.append({"kind": "record", "record": {
                 "type": "stepFailed", "operationId": operation_id, "stepId": step_id,
                 "attemptId": attempt_id, "error": {"code": "aborted" if aborted else "model_error", "message": "Operation aborted" if aborted else str(error)},
@@ -505,11 +541,11 @@ class Agent:
             self._finish(operation_id, "aborted" if aborted else "failed", error=None if aborted else error, operation_kind="compaction")
             if aborted: return "Compaction aborted."
             raise
-        self.end()
         retained_ids = set(self._compaction_record(operation_id)["retainedEntryIds"])
         retained = [{"sourceEntryId": item["id"], "message": item["message"]} for item in source if item["id"] in retained_ids]
         result_id = operation["resultEntryId"]
-        self.session.append(
+        committed = self.session.append_if_active(
+            operation_id, cancelled,
             {"kind": "entry", "id": result_id, "entry": {
                 "type": "compaction", "operationId": operation_id, "summary": text,
                 "compactedThroughEntryId": self._compaction_record(operation_id)["compactedEntryIds"][-1],
@@ -517,6 +553,12 @@ class Agent:
             }},
             {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage},
         )
+        self.end()
+        if committed is None:
+            self._fail_aborted_attempt(operation_id, step_id, attempt_id)
+            self._finish(operation_id, "aborted", operation_kind="compaction")
+            return "Compaction aborted."
+        self.add_usage(usage, cache_rate=False)
         self._finish(operation_id, "completed", result_id, operation_kind="compaction")
         return f"Compacted {len(source) - len(retained)} messages (kept last {len(retained)})."
 
