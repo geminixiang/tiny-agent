@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from mcp_fixture import McpFixture
-from tiny_agent.mcp import McpConfig, display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases
+from tiny_agent.mcp import McpConfig, _encode_mcp_param_value, display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases
 
 
 class McpTest(unittest.TestCase):
@@ -23,14 +23,15 @@ class McpTest(unittest.TestCase):
             path.write_text(json.dumps({"servers": {"fixture": {"url": "https://example.com", "tokenEnv": "TOKEN"}}}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "environment variable is not set"): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
 
-    def test_json_and_sse_list_call_auth_normalization_and_errors(self):
+    def test_modern_json_and_sse_list_call_auth_normalization_and_errors(self):
         for sse in (False, True):
             with self.subTest(sse=sse):
                 fixture = McpFixture(sse=sse, token="secret")
                 try:
                     loaded = load_mcp_tools(McpConfig("fixture", fixture.url, {"Authorization": "Bearer secret"}))
                     self.addCleanup(loaded.close)
-                    self.assertEqual(loaded.protocol_version, "2025-06-18")
+                    self.assertEqual(loaded.protocol_era, "modern")
+                    self.assertEqual(loaded.protocol_version, "2026-07-28")
                     self.assertEqual(display_tool_name(loaded.tools[0]["function"]["name"]), "mcp:fixture/echo")
                     self.assertEqual(loaded.tools[0]["execute"]({"message": "hello"}), "hello")
                     self.assertEqual(loaded.tools[1]["execute"]({}), 'count: 2\n\nStructured content:\n{"count":2}')
@@ -38,9 +39,127 @@ class McpTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: image"): loaded.tools[3]["execute"]({})
                     self.assertTrue(all(call["authorization"] == "Bearer secret" for call in fixture.calls))
                     loaded.close(); loaded.close()
-                    self.assertEqual(fixture.deleted_sessions, ["fixture-session"])
+                    self.assertEqual(fixture.deleted_sessions, [])
                     with self.assertRaisesRegex(RuntimeError, "connection is closed"): loaded.tools[0]["execute"]({"message": "x"})
                 finally: fixture.close()
+
+    def test_strict_legacy_fallback_and_session_cleanup(self):
+        fixture = McpFixture(era="legacy")
+        try:
+            loaded = load_mcp_tools(McpConfig("fixture", fixture.url))
+            self.assertEqual(loaded.protocol_era, "legacy")
+            self.assertEqual(loaded.protocol_version, "2025-11-25")
+            self.assertEqual(loaded.tools[0]["execute"]({"message": "legacy"}), "legacy")
+            self.assertEqual([call["request"]["method"] for call in fixture.calls[:4]], [
+                "server/discover", "initialize", "notifications/initialized", "tools/list",
+            ])
+            loaded.close()
+            self.assertEqual(fixture.deleted_sessions, ["fixture-session"])
+        finally: fixture.close()
+
+    def test_http_errors_are_sanitized_and_do_not_fallback_when_unsafe(self):
+        canary = "SECRET-CANARY-DO-NOT-LEAK"
+        for status in (401, 503):
+            with self.subTest(status=status):
+                fixture = McpFixture(http_error=status, error_body=canary)
+                try:
+                    with self.assertRaises(RuntimeError) as raised:
+                        load_mcp_tools(McpConfig("fixture", fixture.url))
+                    self.assertIn(f"MCP HTTP {status}", str(raised.exception))
+                    self.assertNotIn(canary, str(raised.exception))
+                    self.assertEqual([call["request"]["method"] for call in fixture.calls], ["server/discover"])
+                finally: fixture.close()
+
+    def test_non_auth_client_http_failure_falls_back_to_legacy(self):
+        fixture = McpFixture(http_error=404, error_body="SECRET-CANARY")
+        try:
+            with self.assertRaises(RuntimeError) as raised:
+                load_mcp_tools(McpConfig("fixture", fixture.url))
+            self.assertNotIn("SECRET-CANARY", str(raised.exception))
+            self.assertEqual([call["request"]["method"] for call in fixture.calls], ["server/discover", "initialize"])
+        finally: fixture.close()
+
+    def test_json_rpc_errors_are_sanitized_for_json_and_sse(self):
+        canary = "SECRET-RPC-CANARY"
+        error = {"code": -32603, "message": canary, "data": {"secret": canary}}
+        for sse in (False, True):
+            for method in ("server/discover", "tools/list", "tools/call"):
+                with self.subTest(sse=sse, method=method):
+                    fixture = McpFixture(sse=sse, rpc_errors={method: error})
+                    try:
+                        with self.assertRaises(RuntimeError) as raised:
+                            loaded = load_mcp_tools(McpConfig("fixture", fixture.url))
+                            self.addCleanup(loaded.close)
+                            loaded.tools[0]["execute"]({"message": "hello"})
+                        self.assertNotIn(canary, str(raised.exception))
+                    finally: fixture.close()
+
+    def test_negotiation_error_classifier_and_corrective_retry(self):
+        mutual = {"code": -32022, "message": "retry", "data": {"supported": ["2026-07-28"]}}
+        fixture = McpFixture(rpc_errors={"server/discover": [mutual, None]})
+        try:
+            loaded = load_mcp_tools(McpConfig("fixture", fixture.url)); loaded.close()
+            self.assertEqual(fixture.method_counts["server/discover"], 2)
+        finally: fixture.close()
+
+        cases = [
+            ({"code": -32022, "data": {"supported": ["2027-01-01"]}}, False),
+            ({"code": -32022, "data": {"supported": ["2025-11-25"]}}, True),
+            ({"code": -32022, "data": {"supported": []}}, True),
+            ({"code": -32603, "data": {"supported": ["2027-01-01"]}}, True),
+        ]
+        for error, fallback in cases:
+            with self.subTest(error=error):
+                fixture = McpFixture(era="legacy", rpc_errors={"server/discover": error})
+                try:
+                    if fallback:
+                        loaded = load_mcp_tools(McpConfig("fixture", fixture.url)); loaded.close()
+                        self.assertIn("initialize", fixture.method_counts)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "mutually compatible modern"):
+                            load_mcp_tools(McpConfig("fixture", fixture.url))
+                        self.assertNotIn("initialize", fixture.method_counts)
+                finally: fixture.close()
+
+    def test_mcp_header_encoding_mirroring_and_invalid_declaration_exclusion(self):
+        self.assertEqual(_encode_mcp_param_value("plain ASCII"), "plain ASCII")
+        self.assertEqual(_encode_mcp_param_value(""), "=?base64??=")
+        self.assertEqual(_encode_mcp_param_value("\tvalue"), "=?base64?CXZhbHVl?=")
+        self.assertEqual(_encode_mcp_param_value("=?base64?YWJj?="), "=?base64?PT9iYXNlNjQ/WVdKaj89?=")
+        self.assertEqual(_encode_mcp_param_value("工具"), "=?base64?5bel5YW3?=")
+        schema = {"type": "object", "properties": {
+            "message": {"type": "string", "x-mcp-header": "Message"},
+            "nested": {"type": "object", "properties": {"enabled": {"type": "boolean", "x-mcp-header": "Enabled"}}},
+        }}
+        fixture = McpFixture(tools=[{"name": "echo", "inputSchema": schema}])
+        try:
+            loaded = load_mcp_tools(McpConfig("fixture", fixture.url))
+            loaded.tools[0]["execute"]({"message": " café ", "nested": {"enabled": True}})
+            call = fixture.calls[-1]["headers"]
+            self.assertEqual(call["mcp-name"], "echo")
+            self.assertEqual(call["mcp-param-message"], "=?base64?IGNhZsOpIA==?=")
+            self.assertEqual(call["mcp-param-enabled"], "true")
+            loaded.close()
+        finally: fixture.close()
+        invalid = McpFixture(tools=[{"name": "echo", "inputSchema": {"type": "object", "items": {"type": "string", "x-mcp-header": "Bad"}}}])
+        try:
+            loaded = load_mcp_tools(McpConfig("fixture", invalid.url))
+            self.assertEqual(loaded.tools, []); loaded.close()
+        finally: invalid.close()
+
+    def test_tools_list_pagination_aggregates_under_bounds(self):
+        pages = [
+            [{"name": "echo", "inputSchema": {"type": "object"}}],
+            [{"name": "structured", "inputSchema": {"type": "object"}}],
+        ]
+        fixture = McpFixture(pages=pages)
+        try:
+            loaded = load_mcp_tools(McpConfig("fixture", fixture.url))
+            self.assertEqual(len(loaded.tools), 2)
+            list_calls = [call["request"]["params"] for call in fixture.calls if call["request"]["method"] == "tools/list"]
+            self.assertEqual(list_calls, [{"_meta": list_calls[0]["_meta"]}, {"cursor": "1", "_meta": list_calls[1]["_meta"]}])
+            loaded.close()
+        finally: fixture.close()
 
     def test_allowlist_bounds_mapping_timeout_and_cancellation(self):
         fixture = McpFixture()

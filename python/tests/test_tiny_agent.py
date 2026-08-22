@@ -1,15 +1,19 @@
+import io
 import json
 import os
 import re
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from tiny_agent import agent as tiny
+from tiny_agent import cli
 from tiny_agent.cli import Terminal
 
 
@@ -124,6 +128,40 @@ class TinyAgentTest(unittest.TestCase):
         self.assertEqual([(m["tool_call_id"], m["content"]) for m in tools], [
             ("slow", "Operation aborted"), ("later", "Operation aborted before execution"),
         ])
+
+    def test_plugin_selection_deduplicates_assembles_mcp_and_rejects_unknown_early(self):
+        remote = {"type": "function", "function": {"name": "mcp_remote", "description": "remote", "parameters": {}}}
+        loaded = SimpleNamespace(tools=[remote], protocol_version="test", close=lambda: None)
+        session = SimpleNamespace(id="session-id", path=Path("session.jsonl"))
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, _skills, _session, _instructions, tools):
+                captured["tools"] = tools; self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}; self.on_tool = None
+            def run_agent_loop(self, _text): return "done"
+
+        class FakeTerminal:
+            def __enter__(self): return self
+            def __exit__(self, *_): return None
+            def run(self, _agent, operation): return operation()
+
+        output = io.StringIO()
+        with patch.object(cli, "load_mcp_configs", return_value=[SimpleNamespace(alias="fixture")]), \
+             patch.object(cli, "load_mcp_tools", return_value=loaded), \
+             patch.object(cli, "load_skills", return_value=[]), \
+             patch.object(cli, "load_project_instructions", return_value=""), \
+             patch.object(cli.Session, "create", return_value=session), \
+             patch.object(cli, "Agent", FakeAgent), patch.object(cli, "Terminal", FakeTerminal), \
+             redirect_stdout(output):
+            self.assertEqual(cli.run_cli(["--plugin", " read, edit ", "--plugin", "read", "--mcp", "fixture", "hello"]), 0)
+
+        self.assertEqual([tool["function"]["name"] for tool in captured["tools"]], ["read", "edit", "mcp_remote"])
+        self.assertIn("tools: read, edit, mcp_remote\nmcp: fixture", output.getvalue())
+
+        with patch.object(cli.Session, "create") as create:
+            with self.assertRaisesRegex(ValueError, r"Unknown plugin: missing\. Available plugins: bash, read, write, edit"):
+                cli.run_cli(["--plugin", "missing", "hello"])
+            create.assert_not_called()
 
     def test_terminal_display_position(self):
         self.assertEqual(Terminal.display_position("你a", 80), (0, 3))
