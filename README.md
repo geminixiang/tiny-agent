@@ -10,37 +10,52 @@
 
 ```mermaid
 flowchart TD
-    CLI["tiny-ts / tiny-go / tiny-py / tiny-rs CLI"] --> Context["載入 AGENTS.md、skills、session"]
-    Context --> User["User prompt"]
-    User --> Model["OpenRouter / LLM"]
-    Model --> Decision{"有 tool calls?"}
-    Decision -- 否 --> Answer["顯示回答並寫入 session"]
-    Decision -- 是 --> Tools["bash / read / write / edit"]
-    Tools --> Result["Tool result 寫入 session"]
-    Result --> Model
-    CLI -- Esc --> Abort["AbortController"]
-    Abort --> Model
-    Abort --> Tools
+    Host["Trusted host / deployment"] --> Catalog["MCP catalog + short-lived token"]
+    CLI["tiny-ts / tiny-go / tiny-py / tiny-rs"] --> Context["AGENTS.md + skills + session"]
+    Catalog --> CLI
+    Context --> Loop["Agent loop"]
+    User["User prompt"] --> Loop
+    Loop --> Model["OpenRouter / LLM"]
+    Model --> Decision{"tool calls?"}
+    Decision -- no --> Answer["Final answer"]
+    Decision -- yes --> Dispatch["Injected Tool interface"]
+    Dispatch --> Local["Local tools\nbash / read / write / edit"]
+    Dispatch --> MCP["MCP adapter\ntrusted named servers"]
+    Local --> Results["Tool results"]
+    MCP --> Results
+    Results --> Loop
+    Loop --> Session["Append-only JSONL session"]
+    Loop --> Events["Structured run events"]
+    CLI -- "Esc / Ctrl+C" --> Cancel["Cancellation + cleanup"]
+    Cancel --> Model
+    Cancel --> Dispatch
 ```
 
-Agent loop 的核心：
+Agent loop 的核心保持不變；MCP 只是另一種 Tool adapter：
 
 ```text
-user prompt → model → tool calls → tool results → model → final answer
+messages → model → tool calls → tool results → model
 ```
 
 ## 功能
 
-- OpenRouter；預設 `deepseek/deepseek-v4-flash-0731`
-- Agent loop 與 `bash`、`read`、`write`、`edit`
-- `.tiny-agent/skills/**/SKILL.md` 漸進載入
-- 啟動時讀取 `./AGENTS.md`
-- `/compact` 壓縮舊對話
-- JSONL session 與 `--session` 恢復
-- `Esc` 中斷 model、tool、compaction
-- Token、cache usage 與精簡 tool log
+四種語言共同支援：
 
-核心實作：[`typescript/src/index.ts`](typescript/src/index.ts)、[`typescript/src/cli.ts`](typescript/src/cli.ts)、[`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)、[`python/tiny_agent/agent.py`](python/tiny_agent/agent.py)、[`python/tiny_agent/cli.py`](python/tiny_agent/cli.py)、[`rust/src/lib.rs`](rust/src/lib.rs)、[`rust/src/terminal.rs`](rust/src/terminal.rs)。共用的 skill、session schema 與文件留在 repo root。
+- OpenRouter與可覆寫的 `TINY_MODEL`
+- Agent loop與 `bash`、`read`、`write`、`edit`
+- `AGENTS.md`、漸進載入 skills、compaction
+- Append-only JSONL session與 `--session`恢復
+- Model/tool/compaction cancellation
+- Token與prompt-cache usage
+
+TypeScript參考實作另外支援：
+
+- Injectable `Tool[]`與trusted local `--plugin` allowlist
+- `--json` structured run monitoring
+- Trusted named Streamable HTTP MCP servers
+- MCP tool discovery、calling、timeouts、bounds與cleanup
+
+核心實作：[`typescript/src/index.ts`](typescript/src/index.ts)、[`typescript/src/tools.ts`](typescript/src/tools.ts)、[`typescript/src/mcp.ts`](typescript/src/mcp.ts)、[`typescript/src/cli.ts`](typescript/src/cli.ts)、[`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)、[`python/tiny_agent/agent.py`](python/tiny_agent/agent.py)、[`python/tiny_agent/cli.py`](python/tiny_agent/cli.py)、[`rust/src/lib.rs`](rust/src/lib.rs)、[`rust/src/terminal.rs`](rust/src/terminal.rs)。共用的 skills、session schema與文件留在repo root。
 
 ## 安裝
 
@@ -98,7 +113,17 @@ export TINY_MCP_TOKEN_SENTRY=...
 tiny-ts --mcp sentry --plugin read "調查 issue"
 ```
 
-`--mcp` 可重複或以逗號分隔。設定檔只保存 token 的環境變數名稱，不保存 token；部署或測試可用 `TINY_MCP_CONFIG=/trusted/path/mcp.json` 指定可信 catalog。Tiny-agent 不會讀取 repository 內的 MCP 設定，也不接受 CLI 傳入 URL、header 或 token。多租戶環境應連到 trusted gateway，tenant ACL 與長效 credential 不應放進 agent job。
+`--mcp`可重複或以逗號分隔；`--plugin`仍是獨立的local capability allowlist。啟動後會顯示實際可用能力：
+
+```text
+MCP sentry: connected (2026-07-28, 2 tools)
+tools: read, mcp:sentry/search_issues, mcp:sentry/get_issue
+mcp: sentry
+```
+
+設定檔只保存token的環境變數名稱，不保存token；部署或測試可用 `TINY_MCP_CONFIG=/trusted/path/mcp.json` 指定可信catalog。Tiny-agent不會讀取repository內的MCP設定，也不接受CLI傳入URL、header或token。多租戶環境應連到trusted gateway，tenant ACL與長效credential不應放進agent job。
+
+目前範圍是Streamable HTTP、`tools/list`與`tools/call`。MCP是Tool adapter，不是sandbox或authorization boundary。
 
 單次執行：
 
@@ -189,19 +214,24 @@ system prompt + compacted summary + 最近至少 6 則完整 turn
 
 ```bash
 make test
+make test-mcp     # deterministic local MCP fixture，不使用公開server
 make check
 make format
 make build
 ```
 
-個別實作也可使用 `make test-ts`、`make test-go`、`make test-py`、`make test-rs` 等對應 target。測試使用 mock OpenRouter，不消耗 API 額度。
+個別實作也可使用 `make test-ts`、`make test-go`、`make test-py`、`make test-rs` 等對應target。普通測試使用mock OpenRouter，不消耗API額度；公開MCP endpoints只作optional compatibility smoke。
 
-## 四語言路線
+## 四語言狀態
 
-1. TypeScript：目前版本
-2. Go：目前版本
-3. Python：目前版本
-4. Rust：目前版本
+| CLI | 核心agent | Session / skills / compact | MCP |
+|---|---:|---:|---:|
+| `tiny-ts` | ✓ | ✓ | ✓ reference |
+| `tiny-go` | ✓ | ✓ | 移植中 |
+| `tiny-py` | ✓ | ✓ | 移植中 |
+| `tiny-rs` | ✓ | ✓ | 移植中 |
+
+MCP移植以TypeScript行為為contract；各語言應維持相同CLI、catalog、validation、tool result與cleanup語意。
 
 Rust 版使用 `ureq`（blocking HTTP）、`libc` + `unicode-width`（raw terminal 與 CJK 顯示寬度）、`serde`（session/JSON）。model request 設有 connect/read/write timeout；按 Esc 會立即停止前景等待，但 `ureq` 的 blocking transport thread 可能在 timeout 前繼續完成。Bash 工具則會清除整個 process group。
 
