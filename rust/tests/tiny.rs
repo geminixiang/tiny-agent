@@ -55,7 +55,8 @@ fn head_body_split(buf: &[u8]) -> Option<String> {
     let idx = text.find("\r\n\r\n")?;
     let mut body_len = 0usize;
     for line in text[..idx].lines() {
-        if let Some(v) = line.strip_prefix("Content-Length:") {
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("content-length:") {
             body_len = v.trim().parse().unwrap_or(0);
         }
     }
@@ -273,6 +274,311 @@ fn durable_model_run_persists_attempt_before_request() {
     assert_eq!(handle.join().unwrap().unwrap(), "Operation aborted.");
 }
 
+#[test]
+fn durable_compaction_abort_persists_intent_before_signal() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let replies = (0..4)
+        .map(|index| format!(r#"{{"choices":[{{"finish_reason":"stop","message":{{"role":"assistant","content":"answer {index}"}}}}],"usage":{{}}}}"#))
+        .collect();
+    let server = start_serving(replies);
+    let mut agent = test_agent(&cwd, &server.url, Some(session.clone()));
+    for index in 0..4 {
+        agent.run_agent_loop(&format!("question {index}")).unwrap();
+    }
+    let hanging = start_hanging();
+    agent.endpoint = hanging.url;
+    let abort = agent.abort_handle();
+    let cancel = agent.cancel.clone();
+    let result = Arc::new(Mutex::new(None));
+    let output = result.clone();
+    let worker = thread::spawn(move || {
+        *output.lock().unwrap() = Some(agent.compact());
+    });
+    while hanging.requests.lock().unwrap().is_empty() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    abort.request().unwrap();
+    let log = std::fs::read_to_string(&session.path).unwrap();
+    assert!(log.contains("\"operationKind\":\"compaction\",\"phase\":\"compact\""));
+    cancel.store(true, Ordering::SeqCst);
+    worker.join().unwrap();
+    assert_eq!(
+        result.lock().unwrap().as_ref().unwrap().as_ref().unwrap(),
+        "Compaction aborted."
+    );
+    assert!(matches!(
+        session.load().unwrap().operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    assert!(
+        !std::fs::read_to_string(&session.path)
+            .unwrap()
+            .contains("\"type\":\"compaction\",\"operationId\"")
+    );
+}
+
+#[test]
+fn compaction_recovery_mismatch_appends_nothing_and_makes_no_request() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let replies = (0..4)
+        .map(|index| format!(r#"{{"choices":[{{"finish_reason":"stop","message":{{"role":"assistant","content":"answer {index}"}}}}],"usage":{{}}}}"#))
+        .collect();
+    let server = start_serving(replies);
+    let mut seed = test_agent(&cwd, &server.url, Some(session.clone()));
+    for index in 0..4 {
+        seed.run_agent_loop(&format!("question {index}")).unwrap();
+    }
+    let (operation_id, input_id) = append_compaction_prefix(&session);
+    let configuration = recovery_configuration(&seed);
+    session
+        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+            &session.allocate_id(),
+            &operation_id,
+            &session.allocate_id(),
+            &session.allocate_id(),
+            "compaction",
+            1,
+            &input_id,
+            &configuration,
+        )])
+        .unwrap();
+    let before = std::fs::read(&session.path).unwrap();
+    let no_requests = start_serving(Vec::new());
+    let mut changed = new_agent(
+        Vec::new(),
+        Some(session),
+        "changed instructions".into(),
+        &cwd,
+    );
+    changed.endpoint = no_requests.url.clone();
+    assert_eq!(
+        changed.resume_session().unwrap_err(),
+        "Session recovery blocked: configuration_changed"
+    );
+    assert_eq!(
+        std::fs::read(&changed.session.as_ref().unwrap().path).unwrap(),
+        before
+    );
+    assert!(no_requests.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn compaction_abort_after_start_before_attempt_makes_no_request() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let replies = (0..4)
+        .map(|index| format!(r#"{{"choices":[{{"finish_reason":"stop","message":{{"role":"assistant","content":"answer {index}"}}}}],"usage":{{}}}}"#))
+        .collect();
+    let server = start_serving(replies);
+    let mut seed = test_agent(&cwd, &server.url, Some(session.clone()));
+    for index in 0..4 {
+        seed.run_agent_loop(&format!("question {index}")).unwrap();
+    }
+    let (operation_id, _) = append_compaction_prefix(&session);
+    session
+        .append(vec![tiny_agent_rust::session_runtime::abort_requested(
+            &session.allocate_id(),
+            &operation_id,
+            "compaction",
+            "compact",
+            None,
+        )])
+        .unwrap();
+    let no_requests = start_serving(Vec::new());
+    let mut recovered = test_agent(&cwd, &no_requests.url, Some(session.clone()));
+    recovered.resume_session().unwrap();
+    assert!(no_requests.requests.lock().unwrap().is_empty());
+    assert!(matches!(
+        session.load().unwrap().operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    let log = std::fs::read_to_string(&session.path).unwrap();
+    assert!(!log.contains("\"stepKind\":\"compaction\""));
+    assert!(!log.contains("\"type\":\"compaction\",\"operationId\""));
+}
+
+#[test]
+fn compaction_abort_racing_successful_response_wins_settlement() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let replies = (0..4)
+        .map(|index| format!(r#"{{"choices":[{{"finish_reason":"stop","message":{{"role":"assistant","content":"answer {index}"}}}}],"usage":{{}}}}"#))
+        .collect();
+    let server = start_serving(replies);
+    let mut agent = test_agent(&cwd, &server.url, Some(session.clone()));
+    for index in 0..4 {
+        agent.run_agent_loop(&format!("question {index}")).unwrap();
+    }
+    let delayed = start_serving_with_delay(
+        vec![r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"too late"}}],"usage":{"prompt_tokens":9,"completion_tokens":2}}"#.into()],
+        Duration::from_millis(200),
+    );
+    agent.endpoint = delayed.url.clone();
+    let abort = agent.abort_handle();
+    let worker = thread::spawn(move || {
+        let result = agent.compact();
+        (agent, result)
+    });
+    while delayed.requests.lock().unwrap().is_empty() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    abort.request().unwrap();
+    let (agent, result) = worker.join().unwrap();
+    assert_eq!(result.unwrap(), "Compaction aborted.");
+    assert_eq!(delayed.requests.lock().unwrap().len(), 1);
+    let state = session.load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    assert_eq!(state.usage.input, 0);
+    assert_eq!(agent.usage.input, state.usage.input);
+    assert_eq!(agent.usage.output, state.usage.output);
+    assert_eq!(agent.messages.len(), state.active_context.len() + 1);
+    let log = std::fs::read_to_string(&session.path).unwrap();
+    assert!(log.contains("\"code\":\"aborted\""));
+    assert!(!log.contains("\"type\":\"compaction\",\"operationId\""));
+}
+
+#[test]
+fn compaction_recovery_retries_open_attempt_and_finishes_committed_entry_idempotently() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let mut replies = (0..4)
+        .map(|index| format!(r#"{{"choices":[{{"finish_reason":"stop","message":{{"role":"assistant","content":"answer {index}"}}}}],"usage":{{}}}}"#))
+        .collect::<Vec<_>>();
+    replies.push(r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"original summary"}}],"usage":{}}"#.into());
+    let server = start_serving(replies);
+    let mut agent = test_agent(&cwd, &server.url, Some(session.clone()));
+    for index in 0..4 {
+        agent.run_agent_loop(&format!("question {index}")).unwrap();
+    }
+    agent.compact().unwrap();
+    let id = session.id.clone();
+    let path = session.path.clone();
+    session.close().unwrap();
+    let lines = std::fs::read(&path)
+        .unwrap()
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| [line, b"\n"].concat())
+        .collect::<Vec<_>>();
+    let attempt_line = lines
+        .iter()
+        .rposition(|line| String::from_utf8_lossy(line).contains("\"stepKind\":\"compaction\""))
+        .unwrap();
+    std::fs::write(&path, lines[..=attempt_line].concat()).unwrap();
+
+    let reopened = Session::open(&id, std::path::Path::new(&cwd)).unwrap();
+    let recovery = start_serving(vec![r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"recovered summary"}}],"usage":{}}"#.into()]);
+    let mut recovered = test_agent(&cwd, &recovery.url, Some(reopened.clone()));
+    recovered.resume_session().unwrap();
+    let log = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(log.matches("\"attempt\":2").count(), 1);
+    let before = std::fs::read(&path).unwrap();
+    recovered.resume_session().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let lines = before
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| [line, b"\n"].concat())
+        .collect::<Vec<_>>();
+    let entry_line = lines
+        .iter()
+        .rposition(|line| String::from_utf8_lossy(line).contains("\"type\":\"compaction\""))
+        .unwrap();
+    reopened.close().unwrap();
+    std::fs::write(&path, lines[..=entry_line].concat()).unwrap();
+    let unfinished = Session::open(&id, std::path::Path::new(&cwd)).unwrap();
+    assert!(matches!(
+        unfinished.load().unwrap().operation,
+        tiny_agent_rust::session_reducer::OperationState::Compaction {
+            step: Some(tiny_agent_rust::session_reducer::StepState { status, .. }),
+            ..
+        } if status == "settled"
+    ));
+    let no_requests = start_serving(Vec::new());
+    let mut finisher = test_agent(&cwd, &no_requests.url, Some(unfinished.clone()));
+    let prefix = std::fs::read(&path).unwrap();
+    finisher.resume_session().unwrap();
+    assert!(no_requests.requests.lock().unwrap().is_empty());
+    assert!(matches!(
+        unfinished.load().unwrap().operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    let finished = std::fs::read(&path).unwrap();
+    assert!(finished.starts_with(&prefix));
+    let suffix = std::str::from_utf8(&finished[prefix.len()..]).unwrap();
+    assert_eq!(suffix.lines().count(), 1);
+    assert!(suffix.contains("\"type\":\"operationFinished\""));
+    finisher.resume_session().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), finished);
+    assert!(no_requests.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn repeated_compaction_summarizes_bounded_materialized_context() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let mut replies = (0..4)
+        .map(|index| format!(r#"{{"choices":[{{"finish_reason":"stop","message":{{"role":"assistant","content":"old {index}"}}}}],"usage":{{}}}}"#))
+        .collect::<Vec<_>>();
+    replies.push(r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"first knowledge"}}],"usage":{}}"#.into());
+    replies.extend((0..4).map(|index| format!(r#"{{"choices":[{{"finish_reason":"stop","message":{{"role":"assistant","content":"new {index}"}}}}],"usage":{{}}}}"#)));
+    replies.push(r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"second knowledge including first knowledge"}}],"usage":{}}"#.into());
+    let server = start_serving(replies);
+    let mut agent = test_agent(&cwd, &server.url, Some(session.clone()));
+    for index in 0..4 {
+        agent
+            .run_agent_loop(&format!("old question {index}"))
+            .unwrap();
+    }
+    agent.compact().unwrap();
+    for index in 0..4 {
+        agent
+            .run_agent_loop(&format!("new question {index}"))
+            .unwrap();
+    }
+    agent.compact().unwrap();
+    let requests = server.requests.lock().unwrap();
+    let compact_requests = requests
+        .iter()
+        .filter_map(|request| serde_json::from_str::<serde_json::Value>(request).ok())
+        .filter(|request| request.get("tools").is_none())
+        .collect::<Vec<_>>();
+    let second = compact_requests.last().unwrap();
+    let summarized: Vec<serde_json::Value> = serde_json::from_str(
+        second
+            .pointer("/messages/1/content")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        summarized[0]["content"],
+        "[Compacted history]\nfirst knowledge"
+    );
+    assert!(summarized.len() < session.message_source().unwrap().len());
+    let state = session.load().unwrap();
+    assert!(
+        state.active_context[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("first knowledge")
+    );
+    assert_eq!(state.active_context.len(), 7);
+}
+
 // ---------------------------------------------------------------------------
 #[test]
 fn formats_tui_tool_events() {
@@ -429,6 +735,35 @@ fn recovery_configuration(agent: &Agent) -> tiny_agent_rust::session_runtime::Ru
         "openrouter:chat-completions:v1",
         &format!("openrouter:{}", model_name()),
     )
+}
+
+fn append_compaction_prefix(session: &Session) -> (String, String) {
+    let state = session.load().unwrap();
+    let source = session.message_source().unwrap();
+    let input_id = state.active_context_through_entry_id.unwrap();
+    let retained = 6;
+    let partition = source.len() - retained;
+    let compacted_ids = source[..partition]
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let retained_ids = source[partition..]
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let operation_id = session.allocate_id();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::start_compaction(
+            &session.allocate_id(),
+            &operation_id,
+            &input_id,
+            &session.allocate_id(),
+            &compacted_ids,
+            &retained_ids,
+            &tiny_agent_rust::session_runtime::source_digest(&source),
+        )])
+        .unwrap();
+    (operation_id, input_id)
 }
 
 struct ToolPrefix {
@@ -1123,10 +1458,14 @@ fn runs_tool_loop_and_compacts_through_mock() {
     let replies = vec![
         r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"1","type":"function","function":{"name":"write","arguments":"{\"path\":\"made.txt\",\"content\":\"yes\"}"}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":25}}}"#.to_string(),
         r#"{"choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":120,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":60}}}"#.to_string(),
-        r#"{"choices":[{"message":{"role":"assistant","content":"summary"}}],"usage":{"prompt_tokens":80,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":20}}}"#.to_string(),
+        r#"{"choices":[{"message":{"role":"assistant","content":"answer 1"}}],"usage":{}}"#.to_string(),
+        r#"{"choices":[{"message":{"role":"assistant","content":"answer 2"}}],"usage":{}}"#.to_string(),
+        r#"{"choices":[{"message":{"role":"assistant","content":"answer 3"}}],"usage":{}}"#.to_string(),
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"summary"}}],"usage":{"prompt_tokens":80,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":20}}}"#.to_string(),
     ];
     let server = start_serving(replies);
-    let mut agent = test_agent(&cwd, &server.url, None);
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let mut agent = test_agent(&cwd, &server.url, Some(session));
     let events = Arc::new(Mutex::new(Vec::new()));
     let ev = events.clone();
     agent.on_tool = Arc::new(move |e| ev.lock().unwrap().push((e.phase, e.name, e.result)));
@@ -1152,24 +1491,25 @@ fn runs_tool_loop_and_compacts_through_mock() {
     assert_eq!(agent.usage.output, 15);
     assert_eq!(agent.usage.cache_read, 85);
     assert!(agent.usage.cache_hit_rate > 49.9 && agent.usage.cache_hit_rate < 50.1); // compact
-    let mut recent = Vec::new();
-    for i in 0..8 {
-        recent.push(Message {
-            role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
-            content: Some(format!("m{}", i)),
-            tool_call_id: String::new(),
-            tool_calls: Vec::new(),
-        });
-    }
-    let recent_clone = recent.clone();
-    agent.messages.extend(recent.iter().cloned());
+    agent.run_agent_loop("question 1").unwrap();
+    agent.run_agent_loop("question 2").unwrap();
+    agent.run_agent_loop("question 3").unwrap();
     let result = agent.compact().unwrap();
-    assert_eq!(result, "Compacted 6 messages (kept last 6).");
+    assert_eq!(result, "Compacted 4 messages (kept last 6).");
     assert_eq!(
         agent.messages[1].content.as_deref(),
         Some("[Compacted history]\nsummary")
     );
-    let _ = recent_clone;
+    let log = std::fs::read_to_string(&agent.session.as_ref().unwrap().path).unwrap();
+    let started = log.rfind("\"type\":\"compactionStarted\"").unwrap();
+    let attempt = log.rfind("\"stepKind\":\"compaction\"").unwrap();
+    let usage = log.rfind("\"kind\":\"usage\"").unwrap();
+    let entry = log.rfind("\"type\":\"compaction\"").unwrap();
+    let finished = log.rfind("\"type\":\"operationFinished\"").unwrap();
+    assert!(started < attempt && attempt < usage && usage < entry && entry < finished);
+    assert!(log.contains("\"compactedEntryIds\""));
+    assert!(log.contains("\"retainedEntryIds\""));
+    assert!(log.contains("\"sourceDigest\":\"sha256:"));
     // requests captured include tools on first two, none on compact
     // tool definitions match tiny-ts's four tools
     let defs: serde_json::Value = serde_json::from_str(tool_definitions_json()).unwrap();

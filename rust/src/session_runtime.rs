@@ -103,6 +103,61 @@ pub fn tool_declaration<'a>(
     configuration.tools.iter().find(|tool| tool.name == name)
 }
 
+pub fn source_digest(source: &[(String, Value)]) -> String {
+    let value = Value::Array(
+        source
+            .iter()
+            .map(|(source_entry_id, message)| {
+                json!({"sourceEntryId":source_entry_id,"message":message})
+            })
+            .collect(),
+    );
+    digest(&value)
+}
+
+pub fn start_compaction(
+    record_id: &str,
+    operation_id: &str,
+    input_through_entry_id: &str,
+    result_entry_id: &str,
+    compacted_entry_ids: &[String],
+    retained_entry_ids: &[String],
+    source_digest: &str,
+) -> SessionFact {
+    fact(json!({
+        "kind":"record", "id":record_id,
+        "record":{
+            "type":"compactionStarted", "operationId":operation_id,
+            "operationKind":"compaction", "inputThroughEntryId":input_through_entry_id,
+            "resultEntryId":result_entry_id, "compactedEntryIds":compacted_entry_ids,
+            "retainedEntryIds":retained_entry_ids, "sourceDigest":source_digest,
+        }
+    }))
+}
+
+pub fn compaction_entry(
+    entry_id: &str,
+    operation_id: &str,
+    summary: &str,
+    compacted_through_entry_id: &str,
+    retained_tail: &[(String, Value)],
+) -> SessionFact {
+    let retained_tail = retained_tail
+        .iter()
+        .map(
+            |(source_entry_id, message)| json!({"sourceEntryId":source_entry_id,"message":message}),
+        )
+        .collect::<Vec<_>>();
+    fact(json!({
+        "kind":"entry", "id":entry_id,
+        "entry":{
+            "type":"compaction", "operationId":operation_id, "summary":summary,
+            "compactedThroughEntryId":compacted_through_entry_id,
+            "retainedTail":retained_tail,
+        }
+    }))
+}
+
 pub fn start_run(
     user_entry_id: &str,
     run_record_id: &str,

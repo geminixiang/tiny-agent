@@ -30,6 +30,20 @@ pub fn environment_identity(cwd: &Path) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalAppend {
+    Appended,
+    Aborted,
+    Inactive,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactionSource {
+    pub messages: Vec<(String, Value)>,
+    pub compacted_entry_ids: Vec<String>,
+    pub retained_entry_ids: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct Session {
     pub id: String,
@@ -245,6 +259,200 @@ impl Session {
         Ok(())
     }
 
+    pub fn admit_compaction_attempt(
+        &self,
+        operation_id: &str,
+        attempt: SessionFact,
+        aborted_finish: SessionFact,
+    ) -> Result<ConditionalAppend, String> {
+        let mut inner = self.inner.lock().unwrap();
+        match &inner.state.operation {
+            crate::session_reducer::OperationState::Compaction {
+                operation_id: active,
+                abort_requested: false,
+                ..
+            } if active == operation_id => {
+                append_locked(&mut inner, vec![attempt])?;
+                Ok(ConditionalAppend::Appended)
+            }
+            crate::session_reducer::OperationState::Compaction {
+                operation_id: active,
+                abort_requested: true,
+                step: None,
+                ..
+            } if active == operation_id => {
+                append_locked(&mut inner, vec![aborted_finish])?;
+                Ok(ConditionalAppend::Aborted)
+            }
+            crate::session_reducer::OperationState::Compaction {
+                operation_id: active,
+                abort_requested: true,
+                ..
+            } if active == operation_id => Ok(ConditionalAppend::Aborted),
+            _ => Ok(ConditionalAppend::Inactive),
+        }
+    }
+
+    pub fn settle_compaction_attempt(
+        &self,
+        operation_id: &str,
+        attempt_id: &str,
+        completed_facts: Vec<SessionFact>,
+        aborted_facts: Vec<SessionFact>,
+    ) -> Result<ConditionalAppend, String> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some((active_operation, abort_requested, active_attempt, attempting)) =
+            (match &inner.state.operation {
+                crate::session_reducer::OperationState::Compaction {
+                    operation_id,
+                    abort_requested,
+                    step,
+                    ..
+                } => Some((
+                    operation_id,
+                    *abort_requested,
+                    step.as_ref().map(|step| step.attempt_id.as_str()),
+                    step.as_ref()
+                        .is_some_and(|step| step.status == "attempting"),
+                )),
+                _ => None,
+            })
+        else {
+            return Ok(ConditionalAppend::Inactive);
+        };
+        if active_operation != operation_id || active_attempt != Some(attempt_id) || !attempting {
+            return Ok(ConditionalAppend::Inactive);
+        }
+        if abort_requested {
+            append_locked(&mut inner, aborted_facts)?;
+            return Ok(ConditionalAppend::Aborted);
+        }
+        append_locked(&mut inner, completed_facts)?;
+        Ok(ConditionalAppend::Appended)
+    }
+
+    pub fn finish_compaction(
+        &self,
+        operation_id: &str,
+        final_fact: SessionFact,
+    ) -> Result<ConditionalAppend, String> {
+        let mut inner = self.inner.lock().unwrap();
+        let should_finish = matches!(
+            &inner.state.operation,
+            crate::session_reducer::OperationState::Compaction {
+                operation_id: active,
+                step: Some(step),
+                ..
+            } if active == operation_id && step.status == "settled"
+        );
+        if should_finish {
+            append_locked(&mut inner, vec![final_fact])?;
+            return Ok(ConditionalAppend::Appended);
+        }
+        Ok(ConditionalAppend::Inactive)
+    }
+
+    pub fn compaction_source(&self, operation_id: &str) -> Result<CompactionSource, String> {
+        let inner = self.inner.lock().unwrap();
+        if inner.closed {
+            return Err("Session is closed".into());
+        }
+        let facts = parse_facts(&inner.bytes)?;
+        let record = facts
+            .iter()
+            .rev()
+            .filter_map(|fact| fact.get("record")?.as_object())
+            .find(|record| {
+                record.get("type").and_then(Value::as_str) == Some("compactionStarted")
+                    && record.get("operationId").and_then(Value::as_str) == Some(operation_id)
+            })
+            .ok_or_else(|| "Compaction record missing".to_string())?;
+        let input_id = record
+            .get("inputThroughEntryId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Compaction input boundary missing".to_string())?;
+        let ids = |name: &str| -> Result<Vec<String>, String> {
+            record
+                .get(name)
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("Compaction {name} missing"))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| format!("Compaction {name} is invalid"))
+                })
+                .collect()
+        };
+        let compacted_entry_ids = ids("compactedEntryIds")?;
+        let retained_entry_ids = ids("retainedEntryIds")?;
+        let input_id = input_id.to_string();
+        let mut messages = Vec::new();
+        for fact in facts {
+            if fact.get("kind").and_then(Value::as_str) == Some("entry")
+                && fact
+                    .get("entry")
+                    .and_then(Value::as_object)
+                    .and_then(|entry| entry.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("message")
+            {
+                messages.push((
+                    fact.get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    fact.get("entry")
+                        .and_then(Value::as_object)
+                        .and_then(|entry| entry.get("message"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                ));
+            }
+            if fact.get("id").and_then(Value::as_str) == Some(&input_id) {
+                break;
+            }
+        }
+        Ok(CompactionSource {
+            messages,
+            compacted_entry_ids,
+            retained_entry_ids,
+        })
+    }
+
+    pub fn message_source(&self) -> Result<Vec<(String, Value)>, String> {
+        let inner = self.inner.lock().unwrap();
+        if inner.closed {
+            return Err("Session is closed".into());
+        }
+        Ok(parse_facts(&inner.bytes)?
+            .into_iter()
+            .filter(|fact| {
+                fact.get("kind").and_then(Value::as_str) == Some("entry")
+                    && fact
+                        .get("entry")
+                        .and_then(Value::as_object)
+                        .and_then(|entry| entry.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("message")
+            })
+            .map(|fact| {
+                (
+                    fact.get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    fact.get("entry")
+                        .and_then(Value::as_object)
+                        .and_then(|entry| entry.get("message"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                )
+            })
+            .collect())
+    }
+
     pub fn load(&self) -> Result<SessionState, String> {
         let inner = self.inner.lock().unwrap();
         if inner.closed {
@@ -317,6 +525,31 @@ fn append_locked(
     inner.next_seq += committed.len() as u64;
     inner.state = state;
     Ok(committed)
+}
+
+fn parse_facts(bytes: &[u8]) -> Result<Vec<Map<String, Value>>, String> {
+    let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    let mut facts = Vec::new();
+    for line in text.trim_end_matches('\n').lines().skip(1) {
+        let value: Value = serde_json::from_str(line).map_err(|error| error.to_string())?;
+        if let Some(transaction) = value.as_array() {
+            for fact in transaction {
+                facts.push(
+                    fact.as_object()
+                        .cloned()
+                        .ok_or_else(|| "Session fact is not an object".to_string())?,
+                );
+            }
+        } else {
+            facts.push(
+                value
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| "Session fact is not an object".to_string())?,
+            );
+        }
+    }
+    Ok(facts)
 }
 
 fn count_facts(bytes: &[u8]) -> Result<u64, String> {

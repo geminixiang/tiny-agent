@@ -13,13 +13,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::session::ConditionalAppend;
 pub use crate::session::Session;
 use crate::session_recovery::{CurrentConfiguration, CurrentTool, plan_recovery};
 use crate::session_reducer::OperationState;
 use crate::session_runtime::{
-    RuntimeConfiguration, RuntimeTool, abort_requested, assistant_entry, operation_finished,
-    project_idle, runtime_configuration, start_run, step_attempt, step_failed,
-    synthetic_tool_result, tool_declaration, tool_result, tool_started, usage,
+    RuntimeConfiguration, RuntimeTool, abort_requested, assistant_entry, compaction_entry,
+    operation_finished, project_idle, runtime_configuration, source_digest, start_compaction,
+    start_run, step_attempt, step_failed, synthetic_tool_result, tool_declaration, tool_result,
+    tool_started, usage,
 };
 
 pub mod mcp;
@@ -1255,8 +1257,14 @@ impl Agent {
                     )])?;
                 }
                 "startStep" => {
-                    if operation_kind != "run" {
-                        return Err("Compaction recovery is not implemented".into());
+                    if operation_kind == "compaction" {
+                        self.run_compaction_attempt(
+                            operation_id,
+                            action["contextThroughEntryId"].as_str().unwrap_or_default(),
+                            action["stepId"].as_str(),
+                            action["attempt"].as_u64().unwrap_or(1),
+                        )?;
+                        continue;
                     }
                     self.messages = vec![Message {
                         role: "system".into(),
@@ -1287,21 +1295,41 @@ impl Agent {
                                 .unwrap_or("Session recovery failed"),
                         )
                     });
-                    self.session
-                        .as_ref()
-                        .unwrap()
-                        .append(vec![operation_finished(
-                            &uuid7(),
-                            operation_id,
-                            operation_kind,
-                            outcome,
-                            action["finalEntryId"].as_str(),
-                            error,
-                        )])?;
+                    let finished = operation_finished(
+                        &uuid7(),
+                        operation_id,
+                        operation_kind,
+                        outcome,
+                        action["finalEntryId"].as_str(),
+                        error,
+                    );
+                    if operation_kind == "compaction" && outcome == "completed" {
+                        self.session
+                            .as_ref()
+                            .unwrap()
+                            .finish_compaction(operation_id, finished)?;
+                    } else {
+                        self.session.as_ref().unwrap().append(vec![finished])?;
+                    }
                 }
                 _ => return Err(format!("Unknown session recovery action: {action_type}")),
             }
         }
+    }
+
+    fn reproject_idle_session(&mut self) -> Result<(), String> {
+        let session = self.session.as_ref().unwrap();
+        let state = session.load()?;
+        if !matches!(state.operation, OperationState::Idle) {
+            return Ok(());
+        }
+        let projection = project_idle(
+            &state,
+            self.messages[0].content.as_deref().unwrap_or_default(),
+        )?;
+        self.messages = projection.messages;
+        self.usage = projection.usage;
+        Ok(())
     }
 
     fn add_usage(&mut self, u: UsageJSON, cache_rate: bool) {
@@ -1501,56 +1529,313 @@ impl Agent {
     }
 
     pub fn compact(&mut self) -> Result<String, String> {
-        self.publish_abort_coordination(AbortCoordination::NonDurable);
-        self.cancel.store(false, Ordering::SeqCst);
-        let keep = 6;
-        if self.messages.len() <= 1 {
-            return Ok("Nothing to compact.".to_string());
+        let Some(session) = self.session.clone() else {
+            return Err("Session is required for compaction".into());
+        };
+        let state = session.load()?;
+        if !matches!(state.operation, OperationState::Idle) {
+            return Err("Session operation is not idle".into());
         }
-        let mut cut = (self.messages.len() - keep).max(1);
-        while cut > 1 && self.messages[cut].role != "user" {
+        let messages = state.active_context;
+        if messages.is_empty() {
+            self.publish_abort_coordination(AbortCoordination::NonDurable);
+            return Ok("Nothing to compact.".into());
+        }
+        let mut cut = messages.len().saturating_sub(6);
+        while cut > 0
+            && messages[cut]
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                != Some("user")
+        {
             cut -= 1;
         }
-        let old = self.messages[1..cut].to_vec();
-        if old.is_empty() {
-            return Ok("Nothing to compact.".to_string());
+        if cut == 0 {
+            self.publish_abort_coordination(AbortCoordination::NonDurable);
+            return Ok("Nothing to compact.".into());
         }
-        let recent = self.messages[cut..].to_vec();
+
+        let source = session.message_source()?;
+        let input_through_entry_id = state
+            .active_context_through_entry_id
+            .ok_or_else(|| "Compaction input boundary missing".to_string())?;
+        let retained_count = messages.len() - cut;
+        if source.len() <= retained_count {
+            self.publish_abort_coordination(AbortCoordination::NonDurable);
+            return Ok("Nothing to compact.".into());
+        }
+        let partition = source.len() - retained_count;
+        let compacted_entry_ids = source[..partition]
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let retained_entry_ids = source[partition..]
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let operation_id = uuid7();
+        let result_entry_id = uuid7();
+        let digest = source_digest(&source);
+
+        let (coordination_lock, ready) = &*self.abort_coordination;
+        let mut coordination = coordination_lock.lock().unwrap();
+        self.cancel.store(false, Ordering::SeqCst);
+        if let Err(error) = session.append(vec![start_compaction(
+            &uuid7(),
+            &operation_id,
+            &input_through_entry_id,
+            &result_entry_id,
+            &compacted_entry_ids,
+            &retained_entry_ids,
+            &digest,
+        )]) {
+            *coordination = AbortCoordination::NonDurable;
+            ready.notify_all();
+            return Err(error);
+        }
+        *coordination = AbortCoordination::DurableReady;
+        ready.notify_all();
+        drop(coordination);
+
+        self.run_compaction_attempt(&operation_id, &input_through_entry_id, None, 1)
+    }
+
+    fn run_compaction_attempt(
+        &mut self,
+        operation_id: &str,
+        context_entry_id: &str,
+        existing_step_id: Option<&str>,
+        attempt: u64,
+    ) -> Result<String, String> {
+        let session = self.session.clone().unwrap();
+        let source = session.compaction_source(operation_id)?;
+        let retained = source.retained_entry_ids.len();
+        let state = session.load()?;
+        let old_count = state.active_context.len().saturating_sub(retained);
+        let old = &state.active_context[..old_count];
         let summary_prompt = vec![
             Message {
-                role: "system".to_string(),
-                content: Some(
-                    "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps."
-                        .to_string(),
-                ),
+                role: "system".into(),
+                content: Some("Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps.".into()),
                 tool_call_id: String::new(),
                 tool_calls: Vec::new(),
             },
             Message {
-                role: "user".to_string(),
-                content: Some(serde_json::to_string(&old).map_err(|e| e.to_string())?),
+                role: "user".into(),
+                content: Some(serde_json::to_string(old).map_err(|error| error.to_string())?),
                 tool_call_id: String::new(),
                 tool_calls: Vec::new(),
             },
         ];
-        let response = self.model_request(&summary_prompt, false, false)?;
-        let Some(data) = response else {
-            return Ok("Compaction aborted.".to_string());
+        let step_id = existing_step_id.map(str::to_string).unwrap_or_else(uuid7);
+        let attempt_id = uuid7();
+        let configuration = self.runtime_configuration();
+        let admitted = session.admit_compaction_attempt(
+            operation_id,
+            step_attempt(
+                &uuid7(),
+                operation_id,
+                &step_id,
+                &attempt_id,
+                "compaction",
+                attempt,
+                context_entry_id,
+                &configuration,
+            ),
+            operation_finished(&uuid7(), operation_id, "compaction", "aborted", None, None),
+        )?;
+        match admitted {
+            ConditionalAppend::Appended => {}
+            ConditionalAppend::Aborted => return Ok("Compaction aborted.".into()),
+            ConditionalAppend::Inactive => return Ok("Compaction already finished.".into()),
+        }
+        let data = match self.call_model(&summary_prompt, false, false) {
+            Ok(data)
+                if data.stop_reason == StopReason::Stop
+                    && data
+                        .message
+                        .content
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty()) =>
+            {
+                data
+            }
+            Ok(_) => {
+                let error = "Model returned an invalid compaction summary";
+                let settled = session.settle_compaction_attempt(
+                    operation_id,
+                    &attempt_id,
+                    vec![
+                        step_failed(
+                            &uuid7(),
+                            operation_id,
+                            &step_id,
+                            &attempt_id,
+                            "model_error",
+                            error,
+                        ),
+                        operation_finished(
+                            &uuid7(),
+                            operation_id,
+                            "compaction",
+                            "failed",
+                            None,
+                            Some(("model_error", error)),
+                        ),
+                    ],
+                    vec![
+                        step_failed(
+                            &uuid7(),
+                            operation_id,
+                            &step_id,
+                            &attempt_id,
+                            "aborted",
+                            "Operation aborted",
+                        ),
+                        operation_finished(
+                            &uuid7(),
+                            operation_id,
+                            "compaction",
+                            "aborted",
+                            None,
+                            None,
+                        ),
+                    ],
+                )?;
+                self.reproject_idle_session()?;
+                return match settled {
+                    ConditionalAppend::Appended => Err(error.into()),
+                    ConditionalAppend::Aborted => Ok("Compaction aborted.".into()),
+                    ConditionalAppend::Inactive => Ok("Compaction already finished.".into()),
+                };
+            }
+            Err(error) => {
+                if self.cancel.load(Ordering::SeqCst) {
+                    session.append_abort_if_active(
+                        operation_id,
+                        abort_requested(&uuid7(), operation_id, "compaction", "compact", None),
+                    )?;
+                }
+                let settled = session.settle_compaction_attempt(
+                    operation_id,
+                    &attempt_id,
+                    vec![
+                        step_failed(
+                            &uuid7(),
+                            operation_id,
+                            &step_id,
+                            &attempt_id,
+                            "model_error",
+                            &error,
+                        ),
+                        operation_finished(
+                            &uuid7(),
+                            operation_id,
+                            "compaction",
+                            "failed",
+                            None,
+                            Some(("model_error", &error)),
+                        ),
+                    ],
+                    vec![
+                        step_failed(
+                            &uuid7(),
+                            operation_id,
+                            &step_id,
+                            &attempt_id,
+                            "aborted",
+                            "Operation aborted",
+                        ),
+                        operation_finished(
+                            &uuid7(),
+                            operation_id,
+                            "compaction",
+                            "aborted",
+                            None,
+                            None,
+                        ),
+                    ],
+                )?;
+                self.reproject_idle_session()?;
+                return match settled {
+                    ConditionalAppend::Appended => Err(error),
+                    ConditionalAppend::Aborted => Ok("Compaction aborted.".into()),
+                    ConditionalAppend::Inactive => Ok("Compaction already finished.".into()),
+                };
+            }
         };
         let summary = data.message.content.unwrap_or_default();
-        let compacted = Message {
-            role: "user".to_string(),
-            content: Some(format!("[Compacted history]\n{}", summary)),
-            tool_call_id: String::new(),
-            tool_calls: Vec::new(),
+        let retained_ids = source
+            .retained_entry_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let retained_tail = source
+            .messages
+            .iter()
+            .filter(|(id, _)| retained_ids.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let compacted_through = source
+            .compacted_entry_ids
+            .last()
+            .ok_or_else(|| "Compaction source is empty".to_string())?;
+        let result_id = match session.load()?.operation {
+            OperationState::Compaction {
+                operation_id: active_operation,
+                result_entry_id,
+                ..
+            } if active_operation == operation_id => result_entry_id,
+            _ => return Ok("Compaction already finished.".into()),
         };
-        let mut new_messages = vec![self.messages[0].clone(), compacted.clone()];
-        new_messages.extend(recent.iter().cloned());
-        self.messages = new_messages;
+        let completed = session.settle_compaction_attempt(
+            operation_id,
+            &attempt_id,
+            vec![
+                usage(&uuid7(), operation_id, Some(&attempt_id), None, data.usage),
+                compaction_entry(
+                    &result_id,
+                    operation_id,
+                    &summary,
+                    compacted_through,
+                    &retained_tail,
+                ),
+            ],
+            vec![
+                step_failed(
+                    &uuid7(),
+                    operation_id,
+                    &step_id,
+                    &attempt_id,
+                    "aborted",
+                    "Operation aborted",
+                ),
+                operation_finished(&uuid7(), operation_id, "compaction", "aborted", None, None),
+            ],
+        )?;
+        if completed == ConditionalAppend::Aborted {
+            self.reproject_idle_session()?;
+            return Ok("Compaction aborted.".into());
+        }
+        if completed == ConditionalAppend::Inactive {
+            self.reproject_idle_session()?;
+            return Ok("Compaction already finished.".into());
+        }
+        session.finish_compaction(
+            operation_id,
+            operation_finished(
+                &uuid7(),
+                operation_id,
+                "compaction",
+                "completed",
+                Some(&result_id),
+                None,
+            ),
+        )?;
+        self.reproject_idle_session()?;
         Ok(format!(
             "Compacted {} messages (kept last {}).",
-            old.len(),
-            recent.len()
+            source.compacted_entry_ids.len(),
+            retained_tail.len()
         ))
     }
 
