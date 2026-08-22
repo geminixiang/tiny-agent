@@ -16,10 +16,12 @@ import {
     type LoadedMcpTools,
     type RunEvent,
     type RunResult,
+    type SessionStore,
     builtInPlugins,
 } from "./index.js";
 
 const activeMcp: LoadedMcpTools[] = [];
+let activeSession: SessionStore | undefined;
 
 function parseCLIArgs(args = process.argv.slice(2)) {
     const { values, positionals } = parseArgs({
@@ -74,7 +76,10 @@ async function main() {
     const configs = await loadMcpConfigs(mcp);
     const skills = await loadSkills(extras),
         instructions = await loadProjectInstructions();
-    const session = sessionId ? await Session.open(sessionId, process.cwd()) : await Session.create(process.cwd(), MODEL);
+    const session = sessionId
+        ? await Session.open(sessionId, process.cwd())
+        : await Session.create(process.cwd(), MODEL);
+    activeSession = session;
     const runStarted = performance.now();
     if (json) {
         emit({
@@ -261,7 +266,10 @@ function mcpFailureCause(error: unknown) {
 }
 
 main()
-    .finally(() => closeMcp(activeMcp))
+    .finally(async () => {
+        await closeMcp(activeMcp);
+        await activeSession?.close();
+    })
     .catch((error) => {
         console.error(error.message);
         process.exitCode = 1;

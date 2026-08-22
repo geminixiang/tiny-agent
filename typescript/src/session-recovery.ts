@@ -80,11 +80,17 @@ function startedSynthetic(tool: ToolCallState, reason: "interrupted"): Synthetic
 
 function assistantCalls(state: SessionState) {
     if (state.operation.kind !== "run" || !state.operation.step?.settledEntryId) return undefined;
-    const message = [...state.transcript]
-        .reverse()
-        .find((item) => item.role === "assistant" && item.tool_calls?.length);
+    const assistantIndex = state.transcript.findLastIndex(
+        (item) => item.role === "assistant" && item.tool_calls?.length,
+    );
+    const message = state.transcript[assistantIndex];
     if (!message || message.role !== "assistant") return undefined;
-    return { assistantEntryId: state.operation.step.settledEntryId, calls: message.tool_calls ?? [] };
+    const completedResults = state.transcript.slice(assistantIndex + 1).filter((item) => item.role === "tool").length;
+    return {
+        assistantEntryId: state.operation.step.settledEntryId,
+        calls: message.tool_calls ?? [],
+        completedResults,
+    };
 }
 
 function preExecutionSynthetic(
@@ -118,6 +124,7 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
                 operation.toolCalls.map((tool) => [`${tool.assistantEntryId}:${tool.toolIndex}`, tool]),
             );
             const results = assistant.calls.flatMap((call, toolIndex) => {
+                if (toolIndex < assistant.completedResults) return [];
                 const tool = started.get(`${assistant.assistantEntryId}:${toolIndex}`);
                 if (tool?.status === "pending") return [startedSynthetic(tool, "interrupted")];
                 if (tool) return [];
@@ -145,6 +152,10 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
         };
 
     const step = operation.step;
+    if (step.configurationDigest !== current.configurationDigest)
+        return { type: "blocked", reason: "configuration_changed" };
+    if (state.header.environmentIdentity !== current.environmentIdentity)
+        return { type: "blocked", reason: "environment_changed" };
     if (step.status === "failed")
         return {
             type: "finish",
@@ -153,8 +164,6 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
         };
     if (step.status === "attempting") {
         if (step.attempt === 2) return { type: "blocked", reason: "attempts_exhausted" };
-        if (step.configurationDigest !== current.configurationDigest)
-            return { type: "blocked", reason: "configuration_changed" };
         return {
             type: "startStep",
             stepKind: step.stepKind,
@@ -168,11 +177,26 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
         return { type: "finish", outcome: "completed", finalEntryId: operation.resultEntryId };
 
     if (step.stopReason === "length" && assistant) {
+        if (assistant.completedResults === assistant.calls.length)
+            return {
+                type: "finish",
+                outcome: "completed",
+                completion: "truncated",
+                finalEntryId: step.settledEntryId,
+            };
         return {
             type: "appendSynthetic",
-            results: assistant.calls.map((call, toolIndex) =>
-                preExecutionSynthetic(assistant.assistantEntryId, toolIndex, call.id, call.function.name, "truncated"),
-            ),
+            results: assistant.calls
+                .slice(assistant.completedResults)
+                .map((call, offset) =>
+                    preExecutionSynthetic(
+                        assistant.assistantEntryId,
+                        assistant.completedResults + offset,
+                        call.id,
+                        call.function.name,
+                        "truncated",
+                    ),
+                ),
         };
     }
 
@@ -180,6 +204,8 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
         return { type: "finish", outcome: "completed", completion: "normal", finalEntryId: step.settledEntryId };
 
     const processed = new Set(operation.toolCalls.map((tool) => `${tool.assistantEntryId}:${tool.toolIndex}`));
+    for (let toolIndex = 0; toolIndex < assistant.completedResults; toolIndex++)
+        processed.add(`${assistant.assistantEntryId}:${toolIndex}`);
     const untouched = assistant.calls.findIndex(
         (_, toolIndex) => !processed.has(`${assistant.assistantEntryId}:${toolIndex}`),
     );
@@ -239,7 +265,8 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
     if (tool.environmentIdentity !== current.environmentIdentity)
         return { type: "blocked", reason: "environment_changed" };
     const declaration = toolDeclaration(current, tool.toolName);
-    if (!declaration || declaration.definitionDigest === "")
+    const recordedDeclaration = step.configurationSnapshot.tools.find((item) => item.name === tool.toolName);
+    if (!declaration || !recordedDeclaration || declaration.definitionDigest !== recordedDeclaration.definitionDigest)
         return { type: "blocked", reason: "configuration_changed" };
     if (tool.replay === "safe" && declaration.replay === "safe" && declaration.replayKey === tool.replayKey)
         return {

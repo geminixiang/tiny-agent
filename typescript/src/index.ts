@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
+import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
 import { builtInTools, toolDefinitions, type Tool, type ToolArgs, type ToolEvent } from "./tools.js";
 
 export { loadMcpConfigs, type McpServerCatalog } from "./mcp-config.js";
@@ -13,7 +14,7 @@ export {
     type CurrentTool,
     type RecoveryPlan,
 } from "./session-recovery.js";
-export { SessionStore as Session, environmentIdentity } from "./session.js";
+export { SessionStore, SessionStore as Session, environmentIdentity } from "./session.js";
 export { reduceSession, SessionCorruption, type SessionCorruptionCode, type SessionState } from "./session-reducer.js";
 export {
     builtInPlugins,
@@ -304,12 +305,230 @@ ${list}
     }
     async resumeSession() {
         if (!this.session) return;
-        const state = await this.session.load();
-        if (state.operation.kind !== "idle") throw Error("Session recovery required");
+        let recoveryError: Error | undefined;
+        for (;;) {
+            const state = await this.session.load();
+            this.restoreState(state);
+            if (state.operation.kind === "idle") {
+                if (recoveryError) throw recoveryError;
+                return;
+            }
+            const operation = state.operation;
+            if (operation.kind === "compaction") throw Error("Compaction requires Phase 2b durable integration");
+
+            const configuration = buildConfiguration(this.systemPrompt, this.tools);
+            const current = {
+                configurationDigest: configuration.configurationDigest,
+                environmentIdentity: await environmentIdentity(state.header.cwd),
+                tools: configuration.configurationSnapshot.tools.map((snapshot) => {
+                    const tool = this.tools.find((candidate) => candidate.name === snapshot.name)!;
+                    return {
+                        ...snapshot,
+                        replay: tool.replay ?? "never",
+                        replayKey: tool.replayKey ?? `tool:${tool.name}:v1`,
+                    };
+                }),
+            };
+            const plan = planRecovery(state, current);
+            const operationId = operation.operationId;
+            if (plan.type === "blocked") {
+                if (plan.reason !== "attempts_exhausted") throw Error(`Session recovery blocked: ${plan.reason}`);
+                await this.session.append({
+                    kind: "record",
+                    record: {
+                        type: "operationFinished",
+                        operationId,
+                        operationKind: "run",
+                        outcome: "failed",
+                        error: { code: "model_error", message: "provider request attempts exhausted" },
+                    },
+                });
+                continue;
+            }
+            if (plan.type === "finish") {
+                await this.session.append({
+                    kind: "record",
+                    record: {
+                        type: "operationFinished",
+                        operationId,
+                        operationKind: "run",
+                        outcome: plan.outcome,
+                        ...(plan.completion ? { completion: plan.completion } : {}),
+                        ...(plan.finalEntryId ? { finalEntryId: plan.finalEntryId } : {}),
+                        ...(plan.error ? { error: plan.error } : {}),
+                    },
+                });
+                continue;
+            }
+            if (plan.type === "closeAttempt") {
+                const step = state.operation.step!;
+                await this.session.append({
+                    kind: "record",
+                    record: {
+                        type: "stepFailed",
+                        operationId,
+                        stepId: step.stepId,
+                        attemptId: step.attemptId,
+                        error: plan.error,
+                    },
+                });
+                continue;
+            }
+            if (plan.type === "appendSynthetic") {
+                await this.session.append(
+                    plan.results.map((result) => this.syntheticRecoveryFact(operation.step!.stepId, result)),
+                );
+                continue;
+            }
+            if (plan.type === "startTool") {
+                await this.executeRecoveryTool(state, plan);
+                continue;
+            }
+
+            const stepId = plan.stepId ?? this.session.allocateId();
+            const attemptId = this.session.allocateId();
+            await this.session.append({
+                kind: "record",
+                record: {
+                    type: "stepAttempt",
+                    operationId,
+                    stepId,
+                    attemptId,
+                    stepKind: plan.stepKind,
+                    attempt: plan.attempt,
+                    contextThroughEntryId: plan.contextThroughEntryId,
+                    ...configuration,
+                },
+            });
+            try {
+                const response = await this.runModelRequest(
+                    this.messages,
+                    toolDefinitions(this.tools),
+                    "model",
+                    operationId,
+                    stepId,
+                    attemptId,
+                );
+                if (!response) continue;
+                const assistantEntryId = this.session.allocateId();
+                await this.session.append([
+                    {
+                        kind: "entry",
+                        id: assistantEntryId,
+                        entry: {
+                            type: "message",
+                            stepId,
+                            attemptId,
+                            stopReason: response.stopReason,
+                            message: response.message,
+                        },
+                    },
+                    { kind: "usage", operationId, attemptId, usage: response.usage },
+                ]);
+            } catch (error) {
+                recoveryError = error instanceof Error ? error : Error(String(error));
+                await this.session.append({
+                    kind: "record",
+                    record: {
+                        type: "stepFailed",
+                        operationId,
+                        stepId,
+                        attemptId,
+                        error: { code: "model_error", message: recoveryError.message },
+                    },
+                });
+            }
+        }
+    }
+    private restoreState(state: Awaited<ReturnType<SessionStore["load"]>>) {
         this.messages = [this.messages[0], ...state.activeContext];
         this.usage = { ...state.usage };
         const totalPrompt = this.usage.input + this.usage.cacheRead + this.usage.cacheWrite;
         if (totalPrompt > 0) this.usage.cacheHitRate = (this.usage.cacheRead / totalPrompt) * 100;
+    }
+    private syntheticRecoveryFact(stepId: string, result: SyntheticResult): SessionFactInput {
+        return {
+            kind: "entry",
+            id: result.resultEntryId,
+            entry: {
+                type: "message",
+                stepId,
+                ...(result.toolStartedId
+                    ? { toolStartedId: result.toolStartedId }
+                    : { assistantEntryId: result.assistantEntryId, toolIndex: result.toolIndex }),
+                message: { role: "tool", tool_call_id: result.toolCallId, content: result.content },
+                toolName: result.toolName,
+                result: { type: "synthetic", reason: result.reason },
+            },
+        };
+    }
+    private async executeRecoveryTool(
+        state: Awaited<ReturnType<SessionStore["load"]>>,
+        plan: Extract<ReturnType<typeof planRecovery>, { type: "startTool" }>,
+    ) {
+        if (!this.session || state.operation.kind !== "run" || !state.operation.step) return;
+        const tool = this.tools.find((candidate) => candidate.name === plan.toolName)!;
+        let toolStartedId = plan.toolStartedId;
+        let resultEntryId: string;
+        if (plan.mode === "start") {
+            toolStartedId = this.session.allocateId();
+            resultEntryId = this.session.allocateId();
+            await this.session.append({
+                kind: "record",
+                id: toolStartedId,
+                record: {
+                    type: "toolStarted",
+                    operationId: state.operation.operationId,
+                    stepId: state.operation.step.stepId,
+                    assistantEntryId: plan.assistantEntryId,
+                    toolIndex: plan.toolIndex,
+                    toolCallId: this.recoveryToolCallId(state, plan.assistantEntryId, plan.toolIndex),
+                    toolName: plan.toolName,
+                    arguments: plan.arguments,
+                    replay: tool.replay ?? "never",
+                    replayKey: tool.replayKey ?? `tool:${tool.name}:v1`,
+                    environmentIdentity: state.header.environmentIdentity,
+                    resultEntryId,
+                },
+            });
+        } else {
+            const pending = state.operation.toolCalls.find((call) => call.toolStartedId === toolStartedId)!;
+            resultEntryId = pending.resultEntryId;
+        }
+        const toolCallId = this.recoveryToolCallId(state, plan.assistantEntryId, plan.toolIndex);
+        let content: string;
+        let result: { type: "success" } | { type: "error" } = { type: "success" };
+        try {
+            content = await tool.execute(plan.arguments, this.beginOperation("tool", toolCallId));
+        } catch (error) {
+            content = `Error: ${error instanceof Error ? error.message : String(error)}`;
+            result = { type: "error" };
+        } finally {
+            this.endOperation();
+        }
+        await this.session.append({
+            kind: "entry",
+            id: resultEntryId,
+            entry: {
+                type: "message",
+                stepId: state.operation.step.stepId,
+                message: { role: "tool", tool_call_id: toolCallId, content },
+                toolName: plan.toolName,
+                toolStartedId,
+                result,
+            },
+        });
+    }
+    private recoveryToolCallId(
+        state: Awaited<ReturnType<SessionStore["load"]>>,
+        assistantEntryId: string,
+        toolIndex: number,
+    ) {
+        const assistant = state.transcript.findLast(
+            (message) => message.role === "assistant" && message.tool_calls?.[toolIndex],
+        );
+        if (!assistant || assistant.role !== "assistant") throw Error(`Missing recovery tool call ${assistantEntryId}`);
+        return assistant.tool_calls![toolIndex].id;
     }
     async callModel(messages = this.messages, tools: unknown = toolDefinitions(this.tools), signal?: AbortSignal) {
         const key = process.env.OPENROUTER_API_KEY;
@@ -448,14 +667,11 @@ ${list}
                 let args: ToolArgs = {};
                 const tool = this.tools.find((candidate) => candidate.name === call.function.name);
                 const synthetic = async (reason: "invalidArguments" | "unknownTool" | "truncated" | "aborted") => {
-                    const contents = {
-                        invalidArguments: "Error: Tool arguments were invalid; the tool was not executed.",
-                        unknownTool: "Error: Unknown tool; the tool was not executed.",
-                        truncated:
-                            "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.",
-                        aborted: "Operation aborted before execution.",
+                    const result: Message = {
+                        role: "tool",
+                        tool_call_id: call.id,
+                        content: SYNTHETIC_CONTENT[reason],
                     };
-                    const result: Message = { role: "tool", tool_call_id: call.id, content: contents[reason] };
                     const id = this.session!.allocateId();
                     await this.session!.append({
                         kind: "entry",
@@ -524,7 +740,9 @@ ${list}
                     ok = true;
                 } catch (error) {
                     aborted = !!this.active?.controller.signal.aborted;
-                    content = aborted ? "Operation interrupted after execution status became unknown; the tool was not replayed." : `Error: ${error instanceof Error ? error.message : error}`;
+                    content = aborted
+                        ? "Operation interrupted after execution status became unknown; the tool was not replayed."
+                        : `Error: ${error instanceof Error ? error.message : error}`;
                 }
                 this.endOperation();
                 this.onTool({ phase: "end", name: tool.name, args, result: content });

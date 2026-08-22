@@ -9,8 +9,8 @@ process.chdir(dir);
 const {
     Agent,
     MODEL,
-    Session,
     SessionStore,
+    builtInTools,
     loadProjectInstructions,
     loadSkills,
     executeTool,
@@ -18,13 +18,14 @@ const {
     formatUsage,
     buildConfiguration,
     runFacts,
+    SYNTHETIC_CONTENT,
 } = await import("../src/index.js");
 
 async function openStore(now = new Date()) {
     return SessionStore.create(dir, MODEL, now);
 }
 
-async function facts(store: SessionStore) {
+async function facts(store: Awaited<ReturnType<typeof openStore>>) {
     const text = await readFile(store.path, "utf8");
     return text
         .trim()
@@ -34,6 +35,51 @@ async function facts(store: SessionStore) {
             const value = JSON.parse(line);
             return Array.isArray(value) ? value : [value];
         });
+}
+
+async function appendSettledToolStep(
+    session: Awaited<ReturnType<typeof openStore>>,
+    agent: InstanceType<typeof Agent>,
+    calls: { id: string; name: string; arguments: string }[],
+) {
+    const accepted = runFacts(session, "recover tools");
+    const stepId = session.allocateId();
+    const attemptId = session.allocateId();
+    const assistantEntryId = session.allocateId();
+    await session.append(accepted.facts);
+    await session.append({
+        kind: "record",
+        record: {
+            type: "stepAttempt",
+            operationId: accepted.operationId,
+            stepId,
+            attemptId,
+            stepKind: "assistant",
+            attempt: 1,
+            contextThroughEntryId: accepted.inputEntryId,
+            ...buildConfiguration(agent.systemPrompt, agent.tools),
+        },
+    });
+    await session.append({
+        kind: "entry",
+        id: assistantEntryId,
+        entry: {
+            type: "message",
+            stepId,
+            attemptId,
+            stopReason: "toolUse",
+            message: {
+                role: "assistant",
+                content: null,
+                tool_calls: calls.map((call) => ({
+                    id: call.id,
+                    type: "function",
+                    function: { name: call.name, arguments: call.arguments },
+                })),
+            },
+        },
+    });
+    return { ...accepted, stepId, assistantEntryId };
 }
 
 test("loads cwd AGENTS.md into the system prompt", async () => {
@@ -84,7 +130,10 @@ test("persists durable run/model lifecycle and restores an idle session", async 
         records.filter((fact) => fact.kind === "record").map((fact) => fact.record.type),
         ["runStarted", "stepAttempt", "operationFinished"],
     );
-    assert.equal(records.find((fact) => fact.kind === "entry" && fact.entry.message.role === "assistant").entry.stopReason, "stop");
+    assert.equal(
+        records.find((fact) => fact.kind === "entry" && fact.entry.message.role === "assistant").entry.stopReason,
+        "stop",
+    );
     assert.deepEqual(records.find((fact) => fact.kind === "usage").usage, {
         input: 10,
         output: 2,
@@ -106,7 +155,13 @@ test("persists durable run/model lifecycle and restores an idle session", async 
 test("persists failed and truncated model outcomes", async () => {
     process.env.OPENROUTER_API_KEY = "test";
     const failedSession = await openStore(new Date("2026-08-04T00:00:00Z"));
-    const failed = new Agent([], (async () => { throw Error("provider down"); }) as typeof fetch, failedSession);
+    const failed = new Agent(
+        [],
+        (async () => {
+            throw Error("provider down");
+        }) as typeof fetch,
+        failedSession,
+    );
     await assert.rejects(() => failed.runAgentLoop("fail"), /provider down/);
     const failedRecords = await facts(failedSession);
     assert.deepEqual(
@@ -122,14 +177,18 @@ test("persists failed and truncated model outcomes", async () => {
         (async () =>
             new Response(
                 JSON.stringify({
-                    choices: [{
-                        finish_reason: "length",
-                        message: {
-                            role: "assistant",
-                            content: null,
-                            tool_calls: [{ id: "cut", type: "function", function: { name: "read", arguments: "{}" } }],
+                    choices: [
+                        {
+                            finish_reason: "length",
+                            message: {
+                                role: "assistant",
+                                content: null,
+                                tool_calls: [
+                                    { id: "cut", type: "function", function: { name: "read", arguments: "{}" } },
+                                ],
+                            },
                         },
-                    }],
+                    ],
                     usage: {},
                 }),
                 { status: 200 },
@@ -138,7 +197,10 @@ test("persists failed and truncated model outcomes", async () => {
     );
     assert.equal(await truncated.runAgentLoop("truncate"), "Model output was truncated.");
     const truncatedRecords = await facts(truncatedSession);
-    assert.equal(truncatedRecords.find((fact) => fact.kind === "entry" && fact.entry.stopReason === "length").entry.stopReason, "length");
+    assert.equal(
+        truncatedRecords.find((fact) => fact.kind === "entry" && fact.entry.stopReason === "length").entry.stopReason,
+        "length",
+    );
     assert.deepEqual(truncatedRecords.at(-1).record, {
         type: "operationFinished",
         operationId: truncatedRecords[1].record.operationId,
@@ -150,11 +212,400 @@ test("persists failed and truncated model outcomes", async () => {
     await truncatedSession.close();
 });
 
-test("rejects resume when durable recovery is required", async () => {
+test("resumes an open model attempt once as attempt 2 and is idempotent", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
     const session = await openStore(new Date("2026-08-06T00:00:00Z"));
-    await session.append(runFacts(session, "accepted").facts);
-    await assert.rejects(() => new Agent([], fetch, session).resumeSession(), /Session recovery required/);
+    const accepted = runFacts(session, "accepted");
+    await session.append(accepted.facts);
+    const configuration = buildConfiguration(new Agent().systemPrompt, builtInTools);
+    await session.append({
+        kind: "record",
+        record: {
+            type: "stepAttempt",
+            operationId: accepted.operationId,
+            stepId: session.allocateId(),
+            attemptId: session.allocateId(),
+            stepKind: "assistant",
+            attempt: 1,
+            contextThroughEntryId: accepted.inputEntryId,
+            ...configuration,
+        },
+    });
+    let requests = 0;
+    const fetcher = (async () => {
+        requests++;
+        return new Response(
+            JSON.stringify({
+                choices: [{ finish_reason: "stop", message: { role: "assistant", content: "recovered" } }],
+                usage: {},
+            }),
+            { status: 200 },
+        );
+    }) as typeof fetch;
+    const restored = new Agent([], fetcher, session);
+    await restored.resumeSession();
+    await restored.resumeSession();
+    assert.equal(requests, 1);
+    assert.equal((await session.load()).operation.kind, "idle");
+    assert.equal(restored.messages.at(-1)?.content, "recovered");
+    const records = await facts(session);
+    assert.deepEqual(
+        records.filter((fact) => fact.kind === "record").map((fact) => fact.record.type),
+        ["runStarted", "stepAttempt", "stepAttempt", "operationFinished"],
+    );
+    assert.equal(records.filter((fact) => fact.record?.type === "stepAttempt").at(-1).record.attempt, 2);
     await session.close();
+});
+
+test("an open attempt 2 exhausts into a canonical failed idle state without calling the provider", async () => {
+    const session = await openStore(new Date("2026-08-06T00:30:00Z"));
+    try {
+        const accepted = runFacts(session, "accepted");
+        await session.append(accepted.facts);
+        const configuration = buildConfiguration(new Agent().systemPrompt, builtInTools);
+        const stepId = session.allocateId();
+        for (const attempt of [1, 2] as const) {
+            await session.append({
+                kind: "record",
+                record: {
+                    type: "stepAttempt",
+                    operationId: accepted.operationId,
+                    stepId,
+                    attemptId: session.allocateId(),
+                    stepKind: "assistant",
+                    attempt,
+                    contextThroughEntryId: accepted.inputEntryId,
+                    ...configuration,
+                },
+            });
+        }
+        let requests = 0;
+        const restored = new Agent(
+            [],
+            (async () => {
+                requests++;
+                throw Error("provider must not be called");
+            }) as typeof fetch,
+            session,
+        );
+
+        await restored.resumeSession();
+
+        assert.equal(requests, 0);
+        assert.deepEqual((await session.load()).operation, { kind: "idle" });
+        const finished = (await facts(session)).at(-1).record;
+        assert.deepEqual(finished, {
+            type: "operationFinished",
+            operationId: accepted.operationId,
+            operationKind: "run",
+            outcome: "failed",
+            error: { code: "model_error", message: "provider request attempts exhausted" },
+        });
+    } finally {
+        await session.close();
+    }
+});
+
+test("blocks recovery after configuration changes without changing session bytes", async () => {
+    const session = await openStore(new Date("2026-08-06T01:00:00Z"));
+    const accepted = runFacts(session, "accepted");
+    await session.append(accepted.facts);
+    const configuration = buildConfiguration(new Agent().systemPrompt, builtInTools);
+    await session.append({
+        kind: "record",
+        record: {
+            type: "stepAttempt",
+            operationId: accepted.operationId,
+            stepId: session.allocateId(),
+            attemptId: session.allocateId(),
+            stepKind: "assistant",
+            attempt: 1,
+            contextThroughEntryId: accepted.inputEntryId,
+            ...configuration,
+        },
+    });
+    const before = await readFile(session.path);
+    await assert.rejects(
+        () => new Agent([], fetch, session, () => {}, "changed instructions").resumeSession(),
+        /configuration_changed/,
+    );
+    assert.deepEqual(await readFile(session.path), before);
+    await session.close();
+});
+
+test("blocks recovery after an environment change without changing session bytes", async () => {
+    const session = await openStore(new Date("2026-08-06T01:30:00Z"));
+    const previousIdentity = process.env.TINY_AGENT_ENVIRONMENT_IDENTITY;
+    try {
+        const accepted = runFacts(session, "accepted");
+        await session.append(accepted.facts);
+        const agent = new Agent([], fetch, session);
+        await session.append({
+            kind: "record",
+            record: {
+                type: "stepAttempt",
+                operationId: accepted.operationId,
+                stepId: session.allocateId(),
+                attemptId: session.allocateId(),
+                stepKind: "assistant",
+                attempt: 1,
+                contextThroughEntryId: accepted.inputEntryId,
+                ...buildConfiguration(agent.systemPrompt, agent.tools),
+            },
+        });
+        const before = await readFile(session.path);
+        process.env.TINY_AGENT_ENVIRONMENT_IDENTITY = "different-environment";
+
+        await assert.rejects(() => agent.resumeSession(), /environment_changed/);
+
+        assert.deepEqual(await readFile(session.path), before);
+    } finally {
+        if (previousIdentity === undefined) delete process.env.TINY_AGENT_ENVIRONMENT_IDENTITY;
+        else process.env.TINY_AGENT_ENVIRONMENT_IDENTITY = previousIdentity;
+        await session.close();
+    }
+});
+
+test("replays a pending safe tool exactly once and repeated resume is a no-op", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-06T02:00:00Z"));
+    try {
+        let executions = 0;
+        let requests = 0;
+        const tools = [
+            {
+                name: "read_once",
+                description: "Read once.",
+                parameters: { type: "object", properties: {} },
+                replay: "safe" as const,
+                replayKey: "test:read-once:v1",
+                async execute() {
+                    executions++;
+                    return "replayed";
+                },
+            },
+        ];
+        const agent = new Agent(
+            [],
+            (async () => {
+                requests++;
+                throw Error("stop after replay");
+            }) as typeof fetch,
+            session,
+            () => {},
+            "",
+            () => {},
+            tools,
+        );
+        const settled = await appendSettledToolStep(session, agent, [
+            { id: "safe-call", name: "read_once", arguments: "{}" },
+        ]);
+        const resultEntryId = session.allocateId();
+        await session.append({
+            kind: "record",
+            id: session.allocateId(),
+            record: {
+                type: "toolStarted",
+                operationId: settled.operationId,
+                stepId: settled.stepId,
+                assistantEntryId: settled.assistantEntryId,
+                toolIndex: 0,
+                toolCallId: "safe-call",
+                toolName: "read_once",
+                arguments: {},
+                replay: "safe",
+                replayKey: "test:read-once:v1",
+                environmentIdentity: (await session.load()).header.environmentIdentity,
+                resultEntryId,
+            },
+        });
+
+        await assert.rejects(() => agent.resumeSession(), /stop after replay/);
+        const afterFirstResume = await readFile(session.path);
+        await agent.resumeSession();
+
+        assert.equal(executions, 1);
+        assert.equal(requests, 1);
+        assert.deepEqual(await readFile(session.path), afterFirstResume);
+        assert.equal((await session.load()).operation.kind, "idle");
+        const replayed = (await facts(session)).find((fact) => fact.id === resultEntryId);
+        assert.equal(replayed.entry.message.content, "replayed");
+        assert.deepEqual(replayed.entry.result, { type: "success" });
+    } finally {
+        await session.close();
+    }
+});
+
+test("does not execute a pending never-replay tool and synthesizes exact interrupted content", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-06T02:30:00Z"));
+    try {
+        let executions = 0;
+        const tools = [
+            {
+                name: "unsafe_write",
+                description: "Write once.",
+                parameters: { type: "object", properties: {} },
+                replay: "never" as const,
+                replayKey: "test:unsafe-write:v1",
+                async execute() {
+                    executions++;
+                    return "must not execute";
+                },
+            },
+        ];
+        const agent = new Agent(
+            [],
+            (async () => {
+                throw Error("stop after interruption");
+            }) as typeof fetch,
+            session,
+            () => {},
+            "",
+            () => {},
+            tools,
+        );
+        const settled = await appendSettledToolStep(session, agent, [
+            { id: "never-call", name: "unsafe_write", arguments: "{}" },
+        ]);
+        const resultEntryId = session.allocateId();
+        await session.append({
+            kind: "record",
+            id: session.allocateId(),
+            record: {
+                type: "toolStarted",
+                operationId: settled.operationId,
+                stepId: settled.stepId,
+                assistantEntryId: settled.assistantEntryId,
+                toolIndex: 0,
+                toolCallId: "never-call",
+                toolName: "unsafe_write",
+                arguments: {},
+                replay: "never",
+                replayKey: "test:unsafe-write:v1",
+                environmentIdentity: (await session.load()).header.environmentIdentity,
+                resultEntryId,
+            },
+        });
+
+        await assert.rejects(() => agent.resumeSession(), /stop after interruption/);
+
+        assert.equal(executions, 0);
+        const interrupted = (await facts(session)).find((fact) => fact.id === resultEntryId);
+        assert.equal(
+            interrupted.entry.message.content,
+            "Operation interrupted after execution status became unknown; the tool was not replayed.",
+        );
+        assert.equal(interrupted.entry.message.content, SYNTHETIC_CONTENT.interrupted);
+        assert.deepEqual(interrupted.entry.result, { type: "synthetic", reason: "interrupted" });
+    } finally {
+        await session.close();
+    }
+});
+
+test("reconciles an abort in tool order and repeated resume remains idle", async () => {
+    const session = await openStore(new Date("2026-08-06T03:00:00Z"));
+    try {
+        let executions = 0;
+        let requests = 0;
+        const tools = [
+            {
+                name: "effect",
+                description: "Perform an effect.",
+                parameters: { type: "object", properties: {} },
+                replay: "never" as const,
+                replayKey: "test:effect:v1",
+                async execute() {
+                    executions++;
+                    return "must not execute";
+                },
+            },
+        ];
+        const agent = new Agent(
+            [],
+            (async () => {
+                requests++;
+                throw Error("provider must not be called");
+            }) as typeof fetch,
+            session,
+            () => {},
+            "",
+            () => {},
+            tools,
+        );
+        const settled = await appendSettledToolStep(session, agent, [
+            { id: "started-call", name: "effect", arguments: "{}" },
+            { id: "untouched-call", name: "effect", arguments: "{}" },
+        ]);
+        const resultEntryId = session.allocateId();
+        await session.append({
+            kind: "record",
+            id: session.allocateId(),
+            record: {
+                type: "toolStarted",
+                operationId: settled.operationId,
+                stepId: settled.stepId,
+                assistantEntryId: settled.assistantEntryId,
+                toolIndex: 0,
+                toolCallId: "started-call",
+                toolName: "effect",
+                arguments: {},
+                replay: "never",
+                replayKey: "test:effect:v1",
+                environmentIdentity: (await session.load()).header.environmentIdentity,
+                resultEntryId,
+            },
+        });
+        await session.append({
+            kind: "record",
+            record: {
+                type: "abortRequested",
+                operationId: settled.operationId,
+                operationKind: "run",
+                phase: "tool",
+                toolCallId: "started-call",
+                reason: "escape",
+            },
+        });
+
+        await agent.resumeSession();
+        const afterFirstResume = await readFile(session.path);
+        await agent.resumeSession();
+
+        assert.equal(executions, 0);
+        assert.equal(requests, 0);
+        assert.deepEqual(await readFile(session.path), afterFirstResume);
+        assert.deepEqual((await session.load()).operation, { kind: "idle" });
+        const records = await facts(session);
+        const results = records.filter((fact) => fact.entry?.message?.role === "tool");
+        assert.deepEqual(
+            results.map((fact) => ({
+                call: fact.entry.message.tool_call_id,
+                content: fact.entry.message.content,
+                result: fact.entry.result,
+            })),
+            [
+                {
+                    call: "started-call",
+                    content: SYNTHETIC_CONTENT.interrupted,
+                    result: { type: "synthetic", reason: "interrupted" },
+                },
+                {
+                    call: "untouched-call",
+                    content: SYNTHETIC_CONTENT.aborted,
+                    result: { type: "synthetic", reason: "aborted" },
+                },
+            ],
+        );
+        assert.deepEqual(records.at(-1).record, {
+            type: "operationFinished",
+            operationId: settled.operationId,
+            operationKind: "run",
+            outcome: "aborted",
+        });
+    } finally {
+        await session.close();
+    }
 });
 
 test("compaction is disabled until durable Phase 2b integration", async () => {
@@ -288,13 +739,21 @@ test("handles provider stop reasons and rejects empty final responses", async ()
             ],
             usage: {},
         },
-        { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "done" } }], usage: {} },
     ];
-    const agent = new Agent([], async () => new Response(JSON.stringify(responses.shift()), { status: 200 }));
-    assert.equal(await agent.runAgentLoop("work"), "done");
+    const session = await openStore();
+    const agent = new Agent([], async () => new Response(JSON.stringify(responses.shift()), { status: 200 }), session);
+    assert.equal(await agent.runAgentLoop("work"), "Model output was truncated.");
+    await session.close();
     await assert.rejects(() => readFile("never.txt"), /ENOENT/);
-    assert.match(agent.messages.at(-2)?.content ?? "", /truncated by the model token limit/);
+    const truncatedResult = (await facts(session)).find(
+        (fact) => fact.kind === "entry" && fact.entry?.result?.reason === "truncated",
+    );
+    assert.equal(
+        truncatedResult.entry.message.content,
+        "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.",
+    );
 
+    const emptySession = await openStore();
     const empty = new Agent(
         [],
         async () =>
@@ -305,10 +764,13 @@ test("handles provider stop reasons and rejects empty final responses", async ()
                 }),
                 { status: 200 },
             ),
+        emptySession,
     );
     await assert.rejects(() => empty.runAgentLoop("work"), /empty response.*finish_reason: stop/);
+    await emptySession.close();
 
     for (const finish_reason of ["content_filter", "network_error", "mystery"]) {
+        const rejectedSession = await openStore();
         const rejected = new Agent(
             [],
             async () =>
@@ -319,8 +781,10 @@ test("handles provider stop reasons and rejects empty final responses", async ()
                     }),
                     { status: 200 },
                 ),
+            rejectedSession,
         );
         await assert.rejects(() => rejected.runAgentLoop("work"), /Provider finish_reason|Unknown provider/);
+        await rejectedSession.close();
     }
 });
 
@@ -360,8 +824,10 @@ test("counts cache from DeepSeek-style prompt_cache_hit_tokens", async () => {
             }),
             { status: 200 },
         );
-    const agent = new Agent([], fakeFetch as typeof fetch);
+    const session = await openStore();
+    const agent = new Agent([], fakeFetch as typeof fetch, session);
     assert.equal(await agent.runAgentLoop("hi"), "ok");
+    await session.close();
     assert.deepEqual(agent.usage, {
         input: 120,
         output: 10,
@@ -388,12 +854,15 @@ test("validates tool argument objects and built-in field types", async () => {
         },
         { choices: [{ message: { role: "assistant", content: "handled" } }], usage: {} },
     ];
+    const session = await openStore();
     const agent = new Agent(
         [],
         (async () => new Response(JSON.stringify(responses.shift()), { status: 200 })) as typeof fetch,
+        session,
     );
     assert.equal(await agent.runAgentLoop("read"), "handled");
-    assert.equal(agent.messages.at(-2)?.content, "Error: tool arguments must be a JSON object");
+    await session.close();
+    assert.equal(agent.messages.at(-2)?.content, "Error: Tool arguments were invalid; the tool was not executed.");
     const invalid = (args: unknown) => args as Parameters<typeof executeTool>[1];
     await assert.rejects(() => executeTool("bash", invalid({ command: 42 })), /command must be a nonempty string/);
     await assert.rejects(() => executeTool("read", invalid({ path: 42 })), /path must be a nonempty string/);
@@ -423,10 +892,11 @@ test("tool monitoring uses execution status instead of result text", async () =>
         { choices: [{ message: { role: "assistant", content: "done" } }], usage: {} },
     ];
     const events: any[] = [];
+    const session = await openStore();
     const agent = new Agent(
         [],
         (async () => new Response(JSON.stringify(responses.shift()), { status: 200 })) as typeof fetch,
-        undefined,
+        session,
         () => {},
         "",
         (event) => events.push(event),
@@ -442,6 +912,7 @@ test("tool monitoring uses execution status instead of result text", async () =>
         ],
     );
     assert.equal(await agent.runAgentLoop("lookup"), "done");
+    await session.close();
     assert.equal(events.find((event) => event.type === "tool.completed")?.ok, true);
 });
 
@@ -558,8 +1029,8 @@ test("runs an injected tool without changing the agent loop", async () => {
             { type: "tool.completed", tool: "lookup" },
         ],
     );
-    const toolRecord = (await facts(session)).find((record) => record.toolName === "lookup");
-    assert.equal(toolRecord.message.content, "42");
+    const toolRecord = (await facts(session)).find((fact) => fact.record?.type === "toolStarted");
+    assert.equal(toolRecord.record.toolName, "lookup");
 });
 
 test("runs tool calls and compacts through mocked OpenRouter", async () => {
@@ -674,45 +1145,11 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         persisted.some((r) => r.type === "tool_log" || ("phase" in r && ["start", "end"].includes(r.phase))),
         false,
     );
-    assert.equal(persisted.filter((r) => r.type === "message" && r.message.role === "tool").length, 1);
-    const recent = [
-        { role: "user", content: "one" },
-        { role: "assistant", content: "two" },
-        { role: "user", content: "three" },
-        { role: "assistant", content: "four" },
-        { role: "user", content: "five" },
-        { role: "assistant", content: "six" },
-        { role: "user", content: "seven" },
-        { role: "assistant", content: "eight" },
-    ] as const;
-    agent.messages.push(...recent);
-    for (const message of recent) await session.append({ type: "message", message });
-    const beforeLength = agent.messages.length;
-    assert.equal(await agent.compact(), "Compacted 6 messages (kept last 6).");
-    assert.equal(agent.messages.length, beforeLength - 5);
-    assert.deepEqual(agent.messages.slice(1), [
-        { role: "user", content: "[Compacted history]\nsummary" },
-        ...recent.slice(-6),
-    ]);
-    assert.deepEqual(agent.usage, {
-        input: 195,
-        output: 23,
-        cacheRead: 105,
-        cacheWrite: 0,
-        cacheHitRate: 35,
-    });
-    const compact = (await facts(session)).find((r) => r.type === "compaction");
-    assert.deepEqual(
-        {
-            summary: compact.summary,
-            compactedMessages: compact.compactedMessages,
-            keptMessages: compact.keptMessages,
-        },
-        { summary: "summary", compactedMessages: 6, keptMessages: 6 },
+    assert.equal(
+        persisted.some((fact) => fact.kind === "entry" && fact.entry?.message?.role === "tool"),
+        true,
     );
-    const restored = new Agent([], fetch, session);
-    await restored.resumeSession();
-    assert.deepEqual(restored.messages, agent.messages);
+    await assert.rejects(() => agent.compact(), /Phase 2b durable integration/);
     assert.equal(requests[0].model, MODEL);
     const definitions = Object.fromEntries(requests[0].tools.map((tool: any) => [tool.function.name, tool.function]));
     assert.match(definitions.bash.description, /last 2,000 lines or 50KB/);
@@ -727,5 +1164,5 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
     assert.equal(definitions.edit.parameters.properties.edits.minItems, 1);
     assert.equal(definitions.edit.parameters.properties.edits.items.properties.oldText.minLength, 1);
     assert.deepEqual(definitions.edit.parameters.required, ["path", "edits"]);
-    assert.equal(requests[2].tools, undefined);
+    assert.equal(requests.length, 2);
 });
