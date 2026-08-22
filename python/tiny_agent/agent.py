@@ -15,6 +15,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from .session import Session, environment_identity, uuid7
+from .session_recovery import plan_recovery
 from .session_reducer import configuration_digest
 
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
@@ -198,14 +199,120 @@ class Agent:
         prompt = self.usage["input"] + self.usage["cacheRead"] + self.usage["cacheWrite"]
         if cache_rate and prompt: self.usage["cacheHitRate"] = self.usage["cacheRead"] / prompt * 100
 
-    def resume_session(self) -> None:
-        if not self.session: return
+    def _current_recovery_configuration(self) -> dict:
+        declarations = []
+        for tool in self.configuration["tools"]:
+            safe = tool["name"] == "read" and any(item is TOOL_DEFINITIONS[1] for item in self.tools if item["function"]["name"] == "read")
+            declarations.append({
+                **tool,
+                "replay": "safe" if safe else "never",
+                "replayKey": "builtin:read:v1" if safe else f"tool:{tool['name']}:v1",
+            })
+        return {
+            "configurationDigest": self.configuration_digest,
+            "environmentIdentity": environment_identity(ROOT),
+            "tools": declarations,
+        }
+
+    def _restore_projection(self) -> None:
         state = self.session.load()
-        if state["operation"]["kind"] != "idle": raise RuntimeError("Session recovery required before resume")
         self.messages = [self.messages[0], *state["activeContext"]]
         self.usage.update(state["usage"])
         prompt = sum(state["usage"][key] for key in ("input", "cacheRead", "cacheWrite"))
         if prompt: self.usage["cacheHitRate"] = state["usage"]["cacheRead"] / prompt * 100
+
+    def resume_session(self) -> str | None:
+        if not self.session: return None
+        self._restore_projection()
+        while self.session.load()["operation"]["kind"] != "idle":
+            state = self.session.load()
+            operation_id = state["operation"]["operationId"]
+            action = plan_recovery(state, self._current_recovery_configuration())
+            if action["type"] == "blocked":
+                raise RuntimeError(f"Session recovery blocked: {action['reason']}")
+            if action["type"] == "closeAttempt":
+                step = state["operation"]["step"]
+                self.session.append({"kind": "record", "record": {
+                    "type": "stepFailed", "operationId": operation_id, "stepId": step["stepId"],
+                    "attemptId": step["attemptId"], "error": action["error"],
+                }})
+                continue
+            if action["type"] == "appendSynthetic":
+                self._append_synthetic_results(action["results"])
+                self._restore_projection()
+                continue
+            if action["type"] == "startTool":
+                self._execute_recovered_tool(operation_id, action)
+                self._restore_projection()
+                continue
+            if action["type"] == "startStep":
+                answer = self._continue_operation(operation_id, action)
+                self._restore_projection()
+                return answer
+            if action["type"] == "finish":
+                record = {"type": "operationFinished", "operationId": operation_id, "operationKind": state["operation"]["kind"], "outcome": action["outcome"]}
+                for key in ("completion", "finalEntryId", "error"):
+                    if key in action: record[key] = action[key]
+                self.session.append({"kind": "record", "record": record})
+                self._restore_projection()
+                continue
+            raise RuntimeError(f"Unknown recovery action: {action['type']}")
+
+    def _append_synthetic_results(self, results: list[dict]) -> None:
+        facts = []
+        for item in results:
+            message = {"role": "tool", "content": item["content"], "tool_call_id": item["toolCallId"]}
+            entry = {
+                "type": "message", "stepId": self.session.load()["operation"]["step"]["stepId"],
+                "message": message, "toolName": item["toolName"],
+                "result": {"type": "synthetic", "reason": item["reason"]},
+            }
+            if "toolStartedId" in item:
+                entry["toolStartedId"] = item["toolStartedId"]
+                fact_id = item["resultEntryId"]
+            else:
+                entry.update(assistantEntryId=item["assistantEntryId"], toolIndex=item["toolIndex"])
+                fact_id = uuid7()
+            facts.append({"kind": "entry", "id": fact_id, "entry": entry})
+        self.session.append(*facts)
+
+    def _execute_recovered_tool(self, operation_id: str, action: dict) -> None:
+        state = self.session.load(); step_id = state["operation"]["step"]["stepId"]
+        tool = next((item for item in self.tools if item["function"]["name"] == action["toolName"]), None)
+        if not tool: raise RuntimeError(f"Recovery tool unavailable: {action['toolName']}")
+        if action["mode"] == "start":
+            call = next(message for message in reversed(state["activeContext"]) if message["role"] == "assistant")["tool_calls"][action["toolIndex"]]
+            started_id, result_id = uuid7(), uuid7()
+            replay = "safe" if tool is TOOL_DEFINITIONS[1] else "never"
+            self.session.append({"kind": "record", "id": started_id, "record": {
+                "type": "toolStarted", "operationId": operation_id, "stepId": step_id,
+                "assistantEntryId": action["assistantEntryId"], "toolIndex": action["toolIndex"],
+                "toolCallId": call["id"], "toolName": action["toolName"], "arguments": action["arguments"],
+                "replay": replay, "replayKey": "builtin:read:v1" if replay == "safe" else f"tool:{action['toolName']}:v1",
+                "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id,
+            }})
+        else:
+            started_id = action["toolStartedId"]
+            pending = next(item for item in state["operation"]["toolCalls"] if item["toolStartedId"] == started_id)
+            result_id, call = pending["resultEntryId"], {"id": pending["toolCallId"]}
+        cancelled = self.begin(operation_id, "tool", call["id"])
+        try:
+            self.on_tool({"phase": "start", "name": action["toolName"], "args": action["arguments"]})
+            content = tool["execute"](action["arguments"], cancelled) if "execute" in tool else execute_tool(action["toolName"], action["arguments"], cancelled)
+            result = {"type": "success"}
+        except BaseException as error:
+            aborted = cancelled.is_set()
+            content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
+            result = {"type": "synthetic", "reason": "interrupted"} if aborted else {"type": "error"}
+        self.end(); self.on_tool({"phase": "end", "name": action["toolName"], "args": action["arguments"], "result": content})
+        self.session.append({"kind": "entry", "id": result_id, "entry": {
+            "type": "message", "stepId": step_id,
+            "message": {"role": "tool", "content": content, "tool_call_id": call["id"]},
+            "toolName": action["toolName"], "toolStartedId": started_id, "result": result,
+        }})
+
+    def _continue_operation(self, operation_id: str, action: dict) -> str:
+        return self._run_operation(operation_id, action["contextThroughEntryId"], action)
 
     def call_model(self, messages: list[dict], tools: list | None, cancelled: threading.Event) -> tuple[dict, dict, str]:
         key = os.getenv("OPENROUTER_API_KEY")
@@ -231,11 +338,11 @@ class Agent:
         self.add_usage(usage)
         return answer, usage, stop_reason
 
-    def _attempt(self, operation_id: str, context_id: str, kind: str = "assistant") -> tuple[str, str]:
-        step_id, attempt_id = uuid7(), uuid7()
+    def _attempt(self, operation_id: str, context_id: str, kind: str = "assistant", attempt: int = 1, step_id: str | None = None) -> tuple[str, str]:
+        step_id, attempt_id = step_id or uuid7(), uuid7()
         self.session.append({"kind": "record", "record": {
             "type": "stepAttempt", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id,
-            "stepKind": kind, "attempt": 1, "contextThroughEntryId": context_id,
+            "stepKind": kind, "attempt": attempt, "contextThroughEntryId": context_id,
             "configurationSnapshot": self.configuration, "configurationDigest": self.configuration_digest,
         }})
         return step_id, attempt_id
@@ -255,9 +362,16 @@ class Agent:
             {"kind": "record", "record": {"type": "runStarted", "operationId": operation_id, "operationKind": "run", "inputEntryId": user_id}},
         )
         self.messages.append(user); context_id = user_id
+        return self._run_operation(operation_id, context_id)
+
+    def _run_operation(self, operation_id: str, context_id: str, next_step: dict | None = None) -> str:
         model_tools = [{"type": tool["type"], "function": tool["function"]} for tool in self.tools]
         while True:
-            step_id, attempt_id = self._attempt(operation_id, context_id)
+            if next_step:
+                step_id, attempt_id = self._attempt(operation_id, next_step["contextThroughEntryId"], attempt=next_step["attempt"], step_id=next_step.get("stepId"))
+                context_id, next_step = next_step["contextThroughEntryId"], None
+            else:
+                step_id, attempt_id = self._attempt(operation_id, context_id)
             cancelled = self.begin(operation_id, "model")
             try: answer, usage, stop_reason = self.call_model(self.messages, model_tools, cancelled)
             except BaseException as error:

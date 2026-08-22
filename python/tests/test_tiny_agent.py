@@ -15,6 +15,9 @@ from unittest.mock import patch
 from tiny_agent import agent as tiny
 from tiny_agent import cli
 from tiny_agent.cli import Terminal
+from tiny_agent.session_reducer import configuration_digest, reduce_session
+
+FIXTURES = Path(__file__).resolve().parents[2] / "schemas/session/fixtures"
 
 
 class TinyAgentTest(unittest.TestCase):
@@ -78,16 +81,69 @@ class TinyAgentTest(unittest.TestCase):
         self.assertEqual(restored.usage["input"], 10)
         reopened.close()
 
-    def test_non_idle_resume_requires_recovery(self):
+    def test_non_idle_resume_starts_recovery(self):
         session = tiny.Session.create(tiny.ROOT)
         user_id, operation_id = tiny.uuid7(), tiny.uuid7()
         session.append(
             {"kind": "entry", "id": user_id, "entry": {"type": "message", "message": {"role": "user", "content": "work"}}},
             {"kind": "record", "record": {"type": "runStarted", "operationId": operation_id, "operationKind": "run", "inputEntryId": user_id}},
         )
-        with self.assertRaisesRegex(RuntimeError, "recovery required"):
-            tiny.Agent(session=session).resume_session()
+        reply = {"choices": [{"message": {"role": "assistant", "content": "recovered"}, "finish_reason": "stop"}], "usage": {}}
+        self.assertEqual(tiny.Agent(session=session, requester=lambda *_: reply).resume_session(), "recovered")
+        self.assertEqual(session.load()["operation"]["kind"], "idle")
         session.close()
+
+    def recovery_agent(self, fixture: str, replies=()):
+        data = (FIXTURES / fixture).read_bytes(); state = reduce_session(data); session_id = state["header"]["id"]
+        directory = tiny.ROOT / ".tiny-agent/sessions"; directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"fixture_{session_id}.jsonl").write_bytes(data)
+        session = tiny.Session.open(session_id, tiny.ROOT)
+        snapshot = state["operation"].get("step", {}).get("configurationSnapshot")
+        read_tool = tiny.TOOL_DEFINITIONS[1]
+        agent = tiny.Agent(session=session, requester=lambda *_: next(replies), tools=[read_tool])
+        if snapshot:
+            agent.configuration = snapshot
+            agent.configuration_digest = configuration_digest(snapshot)
+        return agent, session
+
+    def test_recovers_open_attempt_and_is_idempotent(self):
+        replies = iter([{"choices": [{"message": {"role": "assistant", "content": "recovered"}, "finish_reason": "stop"}], "usage": {}}])
+        with patch.dict(os.environ, {"TINY_AGENT_ENVIRONMENT_IDENTITY": "fixture"}):
+            agent, session = self.recovery_agent("open-attempt.jsonl", replies)
+            self.assertEqual(agent.resume_session(), "recovered")
+            before = session.path.read_bytes(); self.assertIsNone(agent.resume_session())
+            self.assertEqual(session.path.read_bytes(), before); self.assertEqual(session.load()["operation"]["kind"], "idle")
+            session.close()
+
+    def test_recovers_pending_safe_and_never_tools(self):
+        (tiny.ROOT / "README.md").write_text("evidence", encoding="utf-8")
+        reply = lambda text: iter([{"choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}], "usage": {}}])
+        with patch.dict(os.environ, {"TINY_AGENT_ENVIRONMENT_IDENTITY": "fixture"}):
+            safe, safe_session = self.recovery_agent("pending-safe-tool.jsonl", reply("safe done"))
+            self.assertEqual(safe.resume_session(), "safe done")
+            self.assertIn({"role": "tool", "content": "evidence", "tool_call_id": "call_1"}, safe.messages)
+            safe_session.close()
+
+            never, never_session = self.recovery_agent("pending-never-tool.jsonl", reply("never done"))
+            self.assertEqual(never.resume_session(), "never done")
+            self.assertIn("not replayed", next(message["content"] for message in never.messages if message["role"] == "tool"))
+            never_session.close()
+
+    def test_recovers_abort_and_blocks_without_writes(self):
+        with patch.dict(os.environ, {"TINY_AGENT_ENVIRONMENT_IDENTITY": "fixture"}):
+            aborted, aborted_session = self.recovery_agent("abort-open-attempt.jsonl")
+            self.assertIsNone(aborted.resume_session()); self.assertEqual(aborted_session.load()["operation"]["kind"], "idle")
+            aborted_session.close()
+
+            exhausted, exhausted_session = self.recovery_agent("attempts-exhausted.jsonl")
+            before = exhausted_session.path.read_bytes()
+            with self.assertRaisesRegex(RuntimeError, "attempts_exhausted"): exhausted.resume_session()
+            self.assertEqual(exhausted_session.path.read_bytes(), before); exhausted_session.close()
+
+            mismatch, mismatch_session = self.recovery_agent("open-attempt.jsonl")
+            mismatch.configuration_digest = "sha256:" + "f" * 64; before = mismatch_session.path.read_bytes()
+            with self.assertRaisesRegex(RuntimeError, "configuration_changed"): mismatch.resume_session()
+            self.assertEqual(mismatch_session.path.read_bytes(), before); mismatch_session.close()
 
     def test_model_tool_loop_cache_and_no_tui_log_in_session(self):
         replies = iter([

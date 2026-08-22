@@ -51,7 +51,9 @@ def plan_recovery(state: dict, current: dict) -> dict:
         return {"type": "startStep", "stepKind": step["stepKind"], "attempt": 2, "stepId": step["stepId"], "contextThroughEntryId": step["contextThroughEntryId"]}
     if operation["kind"] == "compaction": return {"type": "finish", "outcome": "completed", "finalEntryId": operation["resultEntryId"]}
     if step.get("stopReason") == "length" and assistant:
-        return {"type": "appendSynthetic", "results": [_synthetic(assistant["assistantEntryId"], i, call, "truncated") for i, call in enumerate(assistant["calls"])]}
+        processed = {(tool["assistantEntryId"], tool["toolIndex"]) for tool in operation.get("toolCalls", [])}
+        results = [_synthetic(assistant["assistantEntryId"], i, call, "truncated") for i, call in enumerate(assistant["calls"]) if (assistant["assistantEntryId"], i) not in processed]
+        return {"type": "appendSynthetic", "results": results} if results else {"type": "finish", "outcome": "completed", "completion": "truncated", "finalEntryId": assistant["assistantEntryId"]}
     if not assistant: return {"type": "finish", "outcome": "completed", "completion": "normal", "finalEntryId": step["settledEntryId"]}
     processed = {(tool["assistantEntryId"], tool["toolIndex"]) for tool in operation.get("toolCalls", [])}
     for index, call in enumerate(assistant["calls"]):
