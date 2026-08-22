@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+pub mod mcp;
 pub mod terminal;
 
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
@@ -422,6 +423,7 @@ pub struct Agent {
     pub client: Arc<ureq::Agent>,
     pub on_tool: Arc<dyn Fn(ToolEvent) + Send + Sync>,
     pub cwd: String,
+    pub mcp_tools: Vec<mcp::McpTool>,
 }
 
 pub fn new_agent(
@@ -460,6 +462,7 @@ pub fn new_agent(
         client: Arc::new(open_router_agent()),
         on_tool: Arc::new(|_| {}),
         cwd: cwd.to_string(),
+        mcp_tools: Vec::new(),
     }
 }
 
@@ -613,9 +616,20 @@ impl Agent {
         update_cache_rate: bool,
     ) -> Result<ModelData, String> {
         let some_tools = if tools {
-            serde_json::from_str::<serde_json::Value>(tool_definitions_json())
-                .ok()
-                .map(|v| v.as_array().cloned().unwrap_or_default())
+            let mut definitions =
+                serde_json::from_str::<Vec<serde_json::Value>>(tool_definitions_json())
+                    .unwrap_or_default();
+            definitions.extend(self.mcp_tools.iter().map(|tool| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters
+                    }
+                })
+            }));
+            Some(definitions)
         } else {
             None
         };
@@ -671,25 +685,40 @@ impl Agent {
             }
             for i in 0..answer.tool_calls.len() {
                 let call = answer.tool_calls[i].clone();
-                let parsed = ToolArgs::from_json(&call.function.arguments);
+                let mcp_tool = self
+                    .mcp_tools
+                    .iter()
+                    .find(|tool| tool.name == call.function.name);
+                let parsed = if mcp_tool.is_some() {
+                    serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+                        .map(|value| (ToolArgs::default_layout(), Some(value)))
+                        .map_err(|error| error.to_string())
+                } else {
+                    ToolArgs::from_json(&call.function.arguments).map(|args| (args, None))
+                };
                 let content;
                 let mut aborted = false;
-                let event_args = match &parsed {
-                    Ok(args) => args.clone(),
-                    Err(_) => ToolArgs::default_layout(),
-                };
+                let event_args = parsed
+                    .as_ref()
+                    .map(|(args, _)| args.clone())
+                    .unwrap_or_else(|_| ToolArgs::default_layout());
                 if data.stop_reason == StopReason::Length {
                     content = "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.".to_string();
                 } else {
                     match parsed {
-                        Ok(args) => {
+                        Ok((args, mcp_arguments)) => {
                             (self.on_tool.as_ref())(ToolEvent {
                                 phase: "start".into(),
                                 name: call.function.name.clone(),
                                 args: args.clone(),
                                 result: String::new(),
                             });
-                            let result = self.execute_tool(&call.function.name, &args);
+                            let result = match (mcp_tool, mcp_arguments) {
+                                (Some(tool), Some(arguments)) => {
+                                    tool.execute(arguments, &self.cancel)
+                                }
+                                _ => self.execute_tool(&call.function.name, &args),
+                            };
                             aborted = self.cancel.load(Ordering::SeqCst);
                             content = match &result {
                                 Err(_) if aborted => "Operation aborted".to_string(),

@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use tiny_agent_rust::mcp::{LoadedMcp, display_tool_name, load_mcp_configs, load_mcp_tools};
 use tiny_agent_rust::terminal::{TermError, Terminal};
 use tiny_agent_rust::{
     Session, format_tool_event, format_usage, load_project_instructions, load_skills, model_name,
@@ -9,23 +10,35 @@ use tiny_agent_rust::{
 struct CliArgs {
     session_id: String,
     extras: Vec<String>,
+    mcp: Vec<String>,
     prompt: String,
 }
 
 fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
     let mut session_id = String::new();
     let mut extras = Vec::new();
+    let mut mcp = Vec::new();
     let mut words: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--session" || args[i] == "--skill" {
+        if args[i] == "--session" || args[i] == "--skill" || args[i] == "--mcp" {
             if i + 1 >= args.len() {
                 return Err(format!("{} requires a value", args[i]));
             }
             if args[i] == "--session" {
                 session_id = args[i + 1].clone();
-            } else {
+            } else if args[i] == "--skill" {
                 extras.push(args[i + 1].clone());
+            } else {
+                for alias in args[i + 1]
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    if !mcp.iter().any(|existing| existing == alias) {
+                        mcp.push(alias.to_string());
+                    }
+                }
             }
             i += 2;
         } else {
@@ -36,6 +49,7 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
     Ok(CliArgs {
         session_id,
         extras,
+        mcp,
         prompt: words.join(" "),
     })
 }
@@ -51,8 +65,26 @@ fn term_err_to_string(e: TermError) -> String {
     }
 }
 
+struct ActiveMcp(Vec<LoadedMcp>);
+
+impl Drop for ActiveMcp {
+    fn drop(&mut self) {
+        for loaded in self.0.iter().rev() {
+            loaded.close();
+        }
+    }
+}
+
 fn run_cli(args: Vec<String>) -> Result<i32, String> {
     let parsed = parse_args(args)?;
+    let configs = load_mcp_configs(&parsed.mcp)?;
+    let mut loaded_mcp = ActiveMcp(Vec::new());
+    for config in configs {
+        let alias = config.alias.clone();
+        let loaded =
+            load_mcp_tools(config).map_err(|error| format!("MCP {alias} failed: {error}"))?;
+        loaded_mcp.0.push(loaded);
+    }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let cwd = cwd.to_string_lossy().to_string();
     let skills = load_skills(parsed.extras.clone(), &cwd)?;
@@ -67,7 +99,12 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
     let session_path = session.path.clone();
     let is_restored = !parsed.session_id.is_empty();
 
-    let agent = new_agent(skills, Some(session), instructions, &cwd);
+    let mut agent = new_agent(skills, Some(session), instructions, &cwd);
+    agent.mcp_tools = loaded_mcp
+        .0
+        .iter()
+        .flat_map(|loaded| loaded.tools.clone())
+        .collect();
     let agent = Arc::new(Mutex::new(agent));
     if is_restored {
         agent.lock().unwrap().resume_session()?;
@@ -81,15 +118,39 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
         tool_out.print(&format!(
             "\x1b[{}m{}\x1b[0m\n",
             color,
-            format_tool_event(event)
+            format_tool_event(tiny_agent_rust::ToolEvent {
+                name: display_tool_name(&event.name),
+                ..event
+            })
         ));
     });
 
+    let tool_names = {
+        let agent = agent.lock().unwrap();
+        let mut names = vec![
+            "bash".to_string(),
+            "read".to_string(),
+            "write".to_string(),
+            "edit".to_string(),
+        ];
+        names.extend(agent.mcp_tools.iter().map(|tool| tool.display_name.clone()));
+        names.join(", ")
+    };
+    for loaded in &loaded_mcp.0 {
+        out.print(&format!(
+            "MCP {}: connected ({}, {} tools)\n",
+            loaded.alias,
+            loaded.protocol_version,
+            loaded.tools.len()
+        ));
+    }
     out.print(&format!(
-        "\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {}\nsession: {}\npath: {}{}\n",
+        "\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {}\nsession: {}\npath: {}\ntools: {}\nmcp: {}{}\n",
         model_name(),
         session_id,
         session_path,
+        tool_names,
+        if parsed.mcp.is_empty() { "(none)".to_string() } else { parsed.mcp.join(", ") },
         if is_restored { "\nrestored: yes" } else { "" }
     ));
 
