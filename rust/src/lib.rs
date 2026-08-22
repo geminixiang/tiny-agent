@@ -14,6 +14,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 pub mod mcp;
+pub mod session;
+pub mod session_recovery;
 pub mod session_reducer;
 pub mod terminal;
 
@@ -319,20 +321,22 @@ pub fn load_skills(extra: Vec<String>, cwd: &str) -> Result<Vec<Skill>, String> 
 // ---------------------------------------------------------------------------
 // sessions (append-only JSONL)
 // ---------------------------------------------------------------------------
-pub struct Session {
+pub struct LegacySession {
     pub id: String,
     pub path: String,
 }
 
-impl Session {
-    pub fn create(cwd: &str) -> Result<Session, String> {
+pub type Session = LegacySession;
+
+impl LegacySession {
+    pub fn create(cwd: &str) -> Result<LegacySession, String> {
         let id = uuid7();
         let dir = join_path(cwd, ".tiny-agent/sessions");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let created_at = iso_utc_ms_now();
         let stamp = created_at.replace([':', '.'], "-");
         let path = join_path(&dir, &format!("{}_{}.jsonl", stamp, id));
-        let session = Session {
+        let session = LegacySession {
             id: id.clone(),
             path,
         };
@@ -351,7 +355,7 @@ impl Session {
         Ok(session)
     }
 
-    pub fn open(id: &str, cwd: &str) -> Result<Session, String> {
+    pub fn open(id: &str, cwd: &str) -> Result<LegacySession, String> {
         let valid = id.len() == 36 && is_uuid_chars(id) && id.chars().nth(14) == Some('7');
         if !valid {
             return Err(format!("Invalid session ID: {}", id));
@@ -372,7 +376,7 @@ impl Session {
         if matches.len() > 1 {
             return Err(format!("Duplicate session ID: {}", id));
         }
-        Ok(Session {
+        Ok(LegacySession {
             id: id.to_string(),
             path: matches.remove(0),
         })
