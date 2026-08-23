@@ -13,6 +13,11 @@ const fixture = {
             allowedTools: ["search", "get_issue"],
             callTimeoutMs: 12_000,
         },
+        metabase: {
+            url: "https://mcp.example.com/metabase",
+            auth: { type: "metabaseApiKey", tokenEnv: "METABASE_JOB_KEY" },
+            allowedTools: ["execute_question"],
+        },
         public: { url: "https://mcp.example.com/public" },
     },
 };
@@ -22,7 +27,11 @@ test("loads the trusted MCP catalog from an explicit TINY_MCP_CONFIG path and re
     const path = join(root, "trusted.json");
     await writeFile(path, JSON.stringify(fixture));
     assert.deepEqual(
-        await loadMcpConfigs(["sentry", "public"], { TINY_MCP_CONFIG: path, SENTRY_JOB_TOKEN: "secret" }),
+        await loadMcpConfigs(["sentry", "metabase", "public"], {
+            TINY_MCP_CONFIG: path,
+            SENTRY_JOB_TOKEN: "secret",
+            METABASE_JOB_KEY: "metabase-secret",
+        }),
         [
             {
                 alias: "sentry",
@@ -30,6 +39,12 @@ test("loads the trusted MCP catalog from an explicit TINY_MCP_CONFIG path and re
                 headers: { Authorization: "Bearer secret" },
                 allowedTools: ["search", "get_issue"],
                 callTimeoutMs: 12_000,
+            },
+            {
+                alias: "metabase",
+                url: "https://mcp.example.com/metabase",
+                headers: { "X-API-Key": "metabase-secret" },
+                allowedTools: ["execute_question"],
             },
             { alias: "public", url: "https://mcp.example.com/public" },
         ],
@@ -61,6 +76,60 @@ test("rejects invalid catalogs, aliases, and missing tokens without leaking secr
     await assert.rejects(
         () => load({ servers: { sentry: { url: "https://example.com", tokenEnv: "toString" } } }),
         /environment variable is not set: toString/,
+    );
+    await assert.rejects(
+        () =>
+            load(
+                {
+                    servers: {
+                        sentry: {
+                            url: "https://example.com",
+                            tokenEnv: "TOKEN",
+                            auth: { type: "metabaseApiKey", tokenEnv: "OTHER_TOKEN" },
+                        },
+                    },
+                },
+                ["sentry"],
+                { TOKEN: "secret", OTHER_TOKEN: "other-secret" },
+            ),
+        /must not set both tokenEnv and auth/,
+    );
+    await assert.rejects(
+        () =>
+            load({
+                servers: {
+                    sentry: { url: "https://example.com", auth: { type: "custom", tokenEnv: "TOKEN" } },
+                },
+            }),
+        /auth type must be metabaseApiKey/,
+    );
+    await assert.rejects(
+        () =>
+            load({
+                servers: {
+                    sentry: {
+                        url: "https://example.com",
+                        auth: { type: "metabaseApiKey", tokenEnv: "BAD-NAME" },
+                    },
+                },
+            }),
+        /auth tokenEnv must be an environment variable name/,
+    );
+    await assert.rejects(
+        () =>
+            load({
+                servers: {
+                    sentry: {
+                        url: "https://example.com",
+                        auth: { type: "metabaseApiKey", tokenEnv: "TOKEN", header: "X-Other" },
+                    },
+                },
+            }),
+        /Unknown MCP server sentry auth field: header/,
+    );
+    await assert.rejects(
+        () => load(fixture, ["metabase"], { METABASE_JOB_KEY: "" }),
+        /environment variable is not set: METABASE_JOB_KEY/,
     );
     await assert.rejects(
         () => load({ servers: { sentry: { url: "https://example.com", allowedTools: ["x", "x"] } } }),

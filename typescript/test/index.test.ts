@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { startTestMcpServer } from "./support/mcp-server.js";
 
 const dir = await mkdtemp(join(tmpdir(), "tiny-agent-"));
 process.chdir(dir);
@@ -11,6 +12,7 @@ const {
     MODEL,
     SessionStore,
     builtInTools,
+    loadMcpTools,
     loadProjectInstructions,
     loadSkills,
     executeTool,
@@ -159,6 +161,19 @@ test("buildConfiguration rejects a lone surrogate instead of silently digesting 
     assert.throws(() => buildConfiguration("Always answer briefly.\n\uD800", builtInTools));
     const brokenTool = { ...builtInTools[0], description: "broken\uD800surrogate" };
     assert.throws(() => buildConfiguration("Always answer briefly.", [brokenTool, ...builtInTools.slice(1)]));
+});
+
+test("MCP adapter identity changes durable tool definitions without exposing endpoint or token", async (t) => {
+    const server = await startTestMcpServer();
+    t.after(async () => server.close());
+    const first = await loadMcpTools({ alias: "fixture", url: server.url, headers: { Authorization: "Bearer one" } });
+    const second = await loadMcpTools({ alias: "fixture", url: server.url, headers: { "X-API-Key": "two" } });
+    t.after(async () => Promise.all([first.close(), second.close()]));
+    const firstConfiguration = buildConfiguration("system", first.tools);
+    const secondConfiguration = buildConfiguration("system", second.tools);
+    assert.notEqual(firstConfiguration.configurationDigest, secondConfiguration.configurationDigest);
+    const encoded = JSON.stringify([firstConfiguration, secondConfiguration]);
+    assert.doesNotMatch(encoded, /Bearer one|X-API-Key|two|127\.0\.0\.1/);
 });
 
 test("formats concise TUI tool events", () => {

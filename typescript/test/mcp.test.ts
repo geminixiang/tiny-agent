@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { displayToolName, loadMcpTools } from "../src/mcp.js";
+import { startLegacyTestMcpServer } from "./support/legacy-mcp-server.js";
 import { startTestMcpServer } from "./support/mcp-server.js";
 
 test("displays encoded MCP tool names for humans", () => {
@@ -75,6 +76,33 @@ test("official MCP v2 client cancels slow calls at the server and remains usable
 
     const recovered = await client.callTool({ name: "echo", arguments: { message: "still alive" } });
     assert.deepEqual(recovered.content, [{ type: "text", text: "still alive" }]);
+});
+
+test("loadMcpTools auto-negotiates a stateful legacy server", async (t) => {
+    const server = await startLegacyTestMcpServer();
+    t.after(async () => server.close());
+    const loaded = await loadMcpTools({
+        alias: "legacy",
+        url: server.url,
+        headers: { "X-API-Key": "fixture-secret" },
+        allowedTools: ["echo"],
+    });
+    t.after(async () => loaded.close());
+    assert.equal(loaded.protocolVersion, "2025-03-26");
+    assert.equal(await loaded.tools[0].execute({ message: "hello" }), "hello");
+    await loaded.close();
+    assert.deepEqual(server.methods, [
+        "server/discover",
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/call",
+    ]);
+    assert.equal(server.authenticated, true);
+    assert.ok(server.sessionHeaders >= 3);
+    assert.equal(server.deleted, true);
+    assert.ok(loaded.tools[0].definitionIdentity);
+    assert.doesNotMatch(loaded.tools[0].definitionIdentity!, /fixture-secret|127\.0\.0\.1/);
 });
 
 test("loadMcpTools maps and calls local MCP tools", async (t) => {

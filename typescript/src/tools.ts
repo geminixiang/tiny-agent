@@ -51,6 +51,7 @@ export type Tool = {
     parameters: Record<string, unknown>;
     replay?: "safe" | "never";
     replayKey?: string;
+    definitionIdentity?: string;
     execute(args: ToolArgs, signal?: AbortSignal): Promise<string>;
 };
 export type Plugin = {

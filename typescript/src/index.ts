@@ -113,6 +113,7 @@ export function buildConfiguration(systemPrompt: string, tools: readonly Tool[])
                 name: tool.name,
                 description: tool.description,
                 parameters: tool.parameters,
+                ...(tool.definitionIdentity ? { definitionIdentity: tool.definitionIdentity } : {}),
             }),
         })),
         adapterIdentity: "openrouter:chat-completions:v1",

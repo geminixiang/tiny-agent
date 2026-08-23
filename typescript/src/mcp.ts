@@ -1,4 +1,5 @@
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { canonicalDigest } from "./canonical-json.js";
 import type { Tool } from "./tools.js";
 
 const MAX_RESULT_BYTES = 50 * 1024,
@@ -24,19 +25,21 @@ export type LoadedMcpTools = {
 
 export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Promise<LoadedMcpTools> {
     const validated = validateConfig(config);
-    const client = new Client(
-        { name: "tiny-agent", version: "0.1.0" },
-        { versionNegotiation: { mode: { pin: "2026-07-28" } } },
-    );
+    const client = new Client({ name: "tiny-agent", version: "0.1.0" }, { versionNegotiation: { mode: "auto" } });
     let closed = false;
+    let transport: StreamableHTTPClientTransport | undefined;
     const close = async () => {
         if (closed) return;
         closed = true;
-        await client.close();
+        try {
+            if (client.getProtocolEra() === "legacy") await transport?.terminateSession();
+        } finally {
+            await client.close();
+        }
     };
 
     try {
-        const transport = new StreamableHTTPClientTransport(validated.url, {
+        transport = new StreamableHTTPClientTransport(validated.url, {
             requestInit: validated.headers ? { headers: validated.headers } : undefined,
         });
         await client.connect(transport, { signal });
@@ -46,6 +49,13 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
         const mappedNames = new Set<string>();
         const allowed = validated.allowedTools && new Set(validated.allowedTools);
         const tools: Tool[] = [];
+        const protocolVersion = client.getNegotiatedProtocolVersion();
+        if (!protocolVersion) throw Error("MCP server did not negotiate a protocol version");
+        const adapterIdentity = canonicalDigest({
+            url: validated.url.toString(),
+            auth: mcpAuthType(validated.headers),
+            protocolVersion,
+        });
 
         for (const remote of listed.tools) {
             if (remoteNames.has(remote.name)) throw Error(`duplicate MCP tool name: ${remote.name}`);
@@ -62,6 +72,7 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
                 name,
                 description: remote.description ?? `MCP tool ${remote.name} from ${validated.alias}.`,
                 parameters: remote.inputSchema as Record<string, unknown>,
+                definitionIdentity: `${adapterIdentity}:${remote.name}`,
                 async execute(args, callSignal) {
                     if (closed) throw Error("MCP connection is closed");
                     if (args === null || typeof args !== "object" || Array.isArray(args)) {
@@ -90,16 +101,17 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
             const missing = [...allowed].filter((name) => !remoteNames.has(name));
             if (missing.length) throw Error(`MCP allowed tools were not found: ${missing.join(", ")}`);
         }
-        const protocolEra = client.getProtocolEra();
-        const protocolVersion = client.getNegotiatedProtocolVersion();
-        if (protocolEra !== "modern" || !protocolVersion) {
-            throw Error("MCP server did not negotiate the modern protocol");
-        }
         return { tools, protocolVersion, close };
     } catch (error) {
         await close();
         throw error;
     }
+}
+
+function mcpAuthType(headers?: Record<string, string>) {
+    if (headers?.["X-API-Key"] !== undefined) return "metabaseApiKey";
+    if (headers?.Authorization !== undefined) return "bearer";
+    return "none";
 }
 
 function validateConfig(config: McpConfig) {

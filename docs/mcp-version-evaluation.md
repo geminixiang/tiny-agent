@@ -2,11 +2,24 @@
 
 **Research cutoff:** 2026-08-22. **Scope:** official MCP specification/docs and official MCP/TypeScript SDK repositories only.
 
+## 2026-08-23 decision update
+
+A real Metabase `0.63.14.2` server proved that the official TypeScript SDK can auto-negotiate both eras through the same tiny-agent Tool adapter:
+
+```text
+GitHub     → modern 2026-07-28
+Metabase   → legacy 2025-03-26
+```
+
+TypeScript therefore uses `versionNegotiation: { mode: "auto" }`. The SDK—not tiny-agent—owns the legacy initialize handshake, protocol session, and wire codec. tiny-agent persists neither the negotiated connection nor `Mcp-Session-Id`; resume creates a new adapter connection. Go, Python, and Rust remain modern-only until their hand-written transports are replaced by official SDK adapters.
+
+The catalog keeps a closed authentication interface: ordinary `tokenEnv` sends Bearer; TypeScript additionally accepts `auth: { type: "metabaseApiKey", tokenEnv }` for `X-API-Key`. Literal credentials, arbitrary headers, private hostnames in the public example catalog, and interactive OAuth remain out of scope.
+
 ## Bottom line
 
 The claim is directionally correct but conflates two version systems. The current stable **protocol revision is `2026-07-28`**, released 2026-07-28; MCP protocol revisions are date strings, not “v2.” The official **TypeScript SDK v2** (`@modelcontextprotocol/client@2.0.0`) became stable on 2026-07-27 and was released alongside that specification. This SDK generation—not a protocol named “MCP v2”—is the most likely referent. Both are stable, although the SDK README says v2 is still “settling”; v1 receives bug/security fixes for at least six months after v2’s release. [Protocol release](https://github.com/modelcontextprotocol/modelcontextprotocol/releases/tag/2026-07-28) · [SDK client release](https://github.com/modelcontextprotocol/typescript-sdk/releases/tag/%40modelcontextprotocol%2Fclient%402.0.0) · [SDK status](https://github.com/modelcontextprotocol/typescript-sdk#readme)
 
-For tiny-agent, this is not a reason to implement the whole protocol. Use the stable v2 client package behind a narrow adapter, pin negotiation to the modern `2026-07-28` revision only, and expose only `tools/list` and `tools/call`. tiny-agent does not implement or fall back to the legacy 2025 wire era at all.
+For tiny-agent, this is not a reason to implement the whole protocol. Use the stable v2 client package behind a narrow adapter and expose only `tools/list` and `tools/call`. TypeScript uses SDK-owned automatic era negotiation; the other three implementations remain pinned to the modern revision while their wire transports are still hand-written.
 
 ## What changed, and what matters here
 
@@ -23,13 +36,13 @@ The 2026 revision is a substantial wire-era change from `2025-11-25`:
 
 SDK v2 split `@modelcontextprotocol/sdk` into `@modelcontextprotocol/core`, `@modelcontextprotocol/client`, and `@modelcontextprotocol/server`; requires Node 20+; is ESM-first with CommonJS builds; and includes a codemod for existing SDK users. tiny-agent has no MCP dependency today, so it has no v1 migration burden—start directly with `@modelcontextprotocol/client` v2. [v1→v2 guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/migration/upgrade-to-v2.md)
 
-A critical subtlety: v2 does **not** send 2026 wire semantics by default. A normally constructed `Client` retains the legacy 2025 handshake unless `versionNegotiation` is enabled. tiny-agent uses:
+A critical subtlety: v2 does **not** send 2026 wire semantics by default. TypeScript explicitly enables automatic negotiation:
 
 ```ts
-new Client(clientInfo, { versionNegotiation: { mode: { pin: "2026-07-28" } } })
+new Client(clientInfo, { versionNegotiation: { mode: "auto" } })
 ```
 
-Pinning `2026-07-28` intentionally rejects any server that does not offer this exact modern revision at `server/discover`; there is no fallback to the legacy initiate era. Record the negotiated version for diagnostics and never infer support from arbitrary failures. [SDK protocol support](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/migration/support-2026-07-28.md#client-side-versionnegotiation)
+The SDK first probes the modern era and falls back only when it classifies the peer as legacy. Record the negotiated version for diagnostics and never infer fallback from arbitrary failures. [SDK protocol support](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/migration/support-2026-07-28.md#client-side-versionnegotiation)
 
 ## Transport, auth, and state
 
@@ -39,7 +52,7 @@ Pinning `2026-07-28` intentionally rejects any server that does not offer this e
 
 **Auth is transport authentication, not tiny-agent tool authorization.** MCP authorization is optional; HTTP implementations that support it should follow MCP’s OAuth-based flow, while stdio should obtain credentials from the environment instead. For the first trusted-server integration, tiny-agent receives only a short-lived tenant/job-scoped capability for a trusted gateway. The gateway—not the job capsule—owns reusable upstream URLs, credentials, tenant enforcement, redirect/SSRF policy, rate limits, and audit. Never put literal secrets in session logs, prompts, tool definitions, or persisted config. Defer interactive OAuth discovery/registration and step-up UI until a selected server requires it; do not silently fall back on 401/403. [Authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
 
-Modern MCP has no protocol session. Keep only adapter-local connection/transport state. Do not invent `Mcp-Session-Id` handling.
+Modern MCP has no protocol session. For a legacy peer, keep the SDK-managed protocol session strictly inside the adapter connection; never persist `Mcp-Session-Id` in tiny-agent Session.
 
 ## Smallest version-tolerant design
 
@@ -55,7 +68,7 @@ async function loadMcpTools(config: TrustedMcpConfig, signal: AbortSignal): Prom
 Implement it with `@modelcontextprotocol/client` v2 and `StreamableHTTPClientTransport`:
 
 1. Resolve aliases from a host-injected, immutable catalog. In multi-tenant production, trusted job context authorizes each alias before the process starts. Repository files, model arguments, and ordinary environment variables cannot add servers or override URLs. Production aliases point to a trusted gateway and carry only short-lived tenant/job-scoped capabilities; local tests may inject loopback fixtures.
-2. Connect with `versionNegotiation: { mode: { pin: "2026-07-28" } }`; impose connect/list/call timeouts and forward abort. Surface the negotiated version and typed auth/protocol/transport errors diagnostically.
+2. Connect with SDK-owned automatic negotiation; impose connect/list/call timeouts and forward abort. Surface the negotiated version and typed auth/protocol/transport errors diagnostically. Do not branch tiny-agent tool behavior on the negotiated era.
 3. Fetch the aggregate tool list with SDK `listTools()`; the SDK handles pagination. Retain the remote name, input schema, optional output schema, and full definition for `callTool` (needed by SDK header mirroring/validation). A single run may use this startup snapshot; the protocol does not guarantee that tool lists remain immutable across runs. Ignore list-change subscriptions and TTL refresh initially.
 4. Map each remote tool to a deterministic model-facing name such as `mcp__${encode(alias)}__${encode(remoteName)}`. Use a reversible restricted-character encoding (not lossy replacement), reject duplicate mapped names, and run the existing global duplicate-name check. Keep the exact remote name only in the closure; never let model input select a server or method.
 5. Validate that call arguments are a JSON object. Let the SDK perform protocol/schema behavior; normalize successful `content` plus `structuredContent` into bounded text/JSON for tiny-agent. Preserve `isError` as model-visible corrective output. Treat `input_required` as a clear unsupported-result error—do not attempt elicitation implicitly.
@@ -65,8 +78,8 @@ For UX option A, `tiny-ts --mcp sentry --plugin read` should mean: load built-in
 
 ## Implement now / defer
 
-**Implement now:** SDK v2 client only; Streamable HTTP; pinned modern-only negotiation with a corrective retry on the spec-mandated `-32022` continuation; trusted named configuration authorized by deployment; gateway-scoped short-lived capability; aggregate tool discovery; calls with cancellation/timeouts; collision-safe prefixing; structured/error normalization; cleanup; tests against a modern fixture (JSON and SSE responses) and a fixture that only offers the legacy era, asserting a loud rejection with no fallback.
+**Implement now:** TypeScript SDK v2 client only; Streamable HTTP; SDK-owned automatic era negotiation; trusted named configuration authorized by deployment; Bearer plus the fixed `metabaseApiKey` adapter; aggregate tool discovery; calls with cancellation/timeouts; collision-safe prefixing; structured/error normalization; cleanup; deterministic modern and stateful legacy fixtures.
 
-**Defer:** stdio and process policy; deprecated HTTP+SSE; interactive OAuth/client registration; sessions; subscriptions/list-change refresh; elicitation/MRTR; tasks extension; sampling/roots; resources/prompts; cache-policy optimization; generic custom headers supplied by the model; arbitrary server URLs/commands; and using MCP as permission enforcement.
+**Defer:** stdio and process policy; deprecated HTTP+SSE; interactive OAuth/client registration; persisted protocol sessions; subscriptions/list-change refresh; elicitation/MRTR; tasks extension; sampling/roots; resources/prompts; cache-policy optimization; generic custom headers supplied by the model; arbitrary server URLs/commands; and using MCP as permission enforcement.
 
 This keeps the integration small while delegating the unstable, era-specific wire details to the official client and preserving a narrow replacement seam if SDK behavior changes.

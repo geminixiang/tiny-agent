@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import type { McpConfig } from "./mcp.js";
 
 const ROOT_KEYS = new Set(["servers"]),
-    SERVER_KEYS = new Set(["url", "tokenEnv", "allowedTools", "callTimeoutMs"]);
+    SERVER_KEYS = new Set(["url", "tokenEnv", "auth", "allowedTools", "callTimeoutMs"]),
+    AUTH_KEYS = new Set(["type", "tokenEnv"]);
 
 export type McpServerCatalog = {
     servers: Record<
@@ -11,6 +12,7 @@ export type McpServerCatalog = {
         {
             url: string;
             tokenEnv?: string;
+            auth?: { type: "metabaseApiKey"; tokenEnv: string };
             allowedTools?: string[];
             callTimeoutMs?: number;
         }
@@ -33,12 +35,18 @@ export async function loadMcpConfigs(aliases: string[], env: NodeJS.ProcessEnv =
     const configs: McpConfig[] = [];
     for (const alias of aliases) {
         const server = catalog.servers[alias];
-        const token = server.tokenEnv && Object.hasOwn(env, server.tokenEnv) ? env[server.tokenEnv] : undefined;
-        if (server.tokenEnv && !token) throw Error(`MCP token environment variable is not set: ${server.tokenEnv}`);
+        const token = credential(server, env);
         configs.push({
             alias,
             url: server.url,
-            ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+            ...(token
+                ? {
+                      headers:
+                          server.auth?.type === "metabaseApiKey"
+                              ? { "X-API-Key": token }
+                              : { Authorization: `Bearer ${token}` },
+                  }
+                : {}),
             ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
             ...(server.callTimeoutMs ? { callTimeoutMs: server.callTimeoutMs } : {}),
         });
@@ -56,11 +64,19 @@ function validateCatalog(value: unknown): McpServerCatalog {
         const server = object(value, `MCP server ${alias}`);
         unknownField(server, SERVER_KEYS, `MCP server ${alias}`);
         if (typeof server.url !== "string" || !server.url) throw Error(`MCP server ${alias} url must be a string`);
-        if (
-            server.tokenEnv !== undefined &&
-            (typeof server.tokenEnv !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(server.tokenEnv))
-        ) {
-            throw Error(`MCP server ${alias} tokenEnv must be an environment variable name`);
+        if (server.tokenEnv !== undefined) validateTokenEnv(server.tokenEnv, `MCP server ${alias} tokenEnv`);
+        if (server.tokenEnv !== undefined && server.auth !== undefined) {
+            throw Error(`MCP server ${alias} must not set both tokenEnv and auth`);
+        }
+        let auth: McpServerCatalog["servers"][string]["auth"];
+        if (server.auth !== undefined) {
+            const value = object(server.auth, `MCP server ${alias} auth`);
+            unknownField(value, AUTH_KEYS, `MCP server ${alias} auth`);
+            if (value.type !== "metabaseApiKey") {
+                throw Error(`MCP server ${alias} auth type must be metabaseApiKey`);
+            }
+            validateTokenEnv(value.tokenEnv, `MCP server ${alias} auth tokenEnv`);
+            auth = { type: "metabaseApiKey", tokenEnv: value.tokenEnv as string };
         }
         if (server.allowedTools !== undefined) {
             if (
@@ -84,11 +100,26 @@ function validateCatalog(value: unknown): McpServerCatalog {
         validated[alias] = {
             url: server.url,
             ...(server.tokenEnv === undefined ? {} : { tokenEnv: server.tokenEnv }),
+            ...(auth === undefined ? {} : { auth }),
             ...(server.allowedTools === undefined ? {} : { allowedTools: [...server.allowedTools] as string[] }),
             ...(server.callTimeoutMs === undefined ? {} : { callTimeoutMs: server.callTimeoutMs }),
         };
     }
     return { servers: validated };
+}
+
+function credential(server: McpServerCatalog["servers"][string], env: NodeJS.ProcessEnv): string | undefined {
+    const tokenEnv = server.auth?.tokenEnv ?? server.tokenEnv;
+    if (!tokenEnv) return undefined;
+    const token = Object.hasOwn(env, tokenEnv) ? env[tokenEnv] : undefined;
+    if (!token) throw Error(`MCP token environment variable is not set: ${tokenEnv}`);
+    return token;
+}
+
+function validateTokenEnv(value: unknown, name: string): asserts value is string {
+    if (typeof value !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+        throw Error(`${name} must be an environment variable name`);
+    }
 }
 
 function object(value: unknown, name: string): Record<string, unknown> {

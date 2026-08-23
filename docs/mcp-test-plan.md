@@ -66,37 +66,31 @@ Test:
 
 Do not build a general JSON Schema validator or `$ref` resolver.
 
-### 4. Modern SDK fixture
+### 4. Official SDK negotiation fixtures
 
-Use the official SDK's in-process server handler when possible.
+Use the official SDK's in-process modern server handler when possible, plus a minimal stateful 2025 fixture.
 
 Verify:
 
-- `{ versionNegotiation: { mode: { pin: "2026-07-28" } } }` selects the 2026 era; there is no other mode in production.
-- `tools/list` succeeds.
-- One JSON response tool call succeeds.
-- One request-scoped SSE tool call succeeds.
-- `structuredContent` is available after the tool was listed, including output-schema validation performed by the SDK.
-- The adapter reports the negotiated version through diagnostics without exposing URL or credentials.
-- A fixture that responds to `server/discover` with the spec-mandated `-32022` corrective continuation, offering our exact pinned version, is retried once and then succeeds.
+- TypeScript `{ versionNegotiation: { mode: "auto" } }` selects `2026-07-28` for a modern server.
+- TypeScript falls back to the 2025 `initialize → notifications/initialized` lifecycle only when the SDK classifies the peer as legacy.
+- Legacy `Mcp-Session-Id` stays inside the adapter connection and `close()` terminates the SDK-managed session; it is never persisted in tiny-agent Session.
+- `tools/list` and `tools/call` succeed in both eras through the same tiny-agent Tool interface.
+- JSON, request-scoped SSE, `structuredContent`, diagnostics, and the exact modern `-32022` corrective retry remain covered.
+- Go, Python, and Rust continue to reject legacy-only peers until their hand-written transports are replaced by official SDK adapters.
 
-### 5. Legacy-only fixture is a loud rejection, not a fallback path
+### 5. Auth adapters
 
-Use a fixture that only speaks the 2025 initialize handshake and never offers the modern `2026-07-28` revision at `server/discover`.
+Verify both closed catalog forms:
 
-Verify `load_mcp_tools`/`loadMcpTools` fails with a clear "does not support the modern protocol" error, makes no `initialize` or `notifications/initialized` call, and leaves no session state. There is no dual-era or permissive fixture to support, because production has no fallback code path to exercise.
+- `tokenEnv` sends `Authorization: Bearer`.
+- `auth: { type: "metabaseApiKey", tokenEnv }` sends `X-API-Key` in TypeScript.
+
+Reject unknown auth types, unknown auth fields, invalid or missing environment names, and entries containing both `tokenEnv` and `auth`. Never accept a literal credential or arbitrary header name/value.
 
 ### 6. No-retry outcomes
 
-Assert a single `server/discover` attempt (no retry, no fallback) for:
-
-- `401`
-- `403`
-- `5xx`
-- transport failure or HTTP timeout
-- any protocol error other than the exact `-32022` corrective continuation for our pinned version
-
-Characterize `429` and generic unrecognized `4xx` behavior against the pinned SDK; do not reimplement its era classifier.
+The SDK owns era classification and fallback. Assert that `401`, `403`, `5xx`, transport failure, and HTTP timeout remain connection failures rather than legacy fallback triggers. Do not reimplement the SDK classifier. Keep the exact modern `-32022` corrective retry coverage.
 
 ### 7. Result normalization
 
@@ -224,8 +218,8 @@ Classify live failures as client incompatibility, third-party behavior drift, or
 MCP adapter implementation is complete when:
 
 1. Trusted alias and provider-safe name tests pass.
-2. Modern JSON/SSE fixtures and the legacy-only loud-rejection fixture pass.
-3. The pinned SDK no-retry contract passes.
+2. Modern and legacy TypeScript negotiation fixtures pass; other languages retain their documented modern-only contract.
+3. SDK-owned negotiation, corrective retry, and legacy session cleanup contracts pass.
 4. Normalization, bounds, cancellation, and cleanup pass.
 5. Agent and CLI assembly/session/event contracts pass.
 6. Adapter secret-surface checks pass.

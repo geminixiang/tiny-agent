@@ -91,6 +91,26 @@ tiny-ts --mcp github --plugin read "只使用 GitHub MCP 的 get_file_contents�
 
 `TINY_MCP_CONFIG` 是使用 MCP 時唯一的 catalog 來源。tiny-agent 不會自動讀取 repository 或 home directory 內的設定。
 
+`tiny-ts` 另支援固定的 Metabase API key auth，不接受任意 header。私有 Server 請放在 deployment-owned catalog，不要提交 hostname 或 key：
+
+```json
+{
+    "servers": {
+        "analytics": {
+            "url": "https://{your-metabase.example.com}/api/metabase-mcp",
+            "auth": {
+                "type": "metabaseApiKey",
+                "tokenEnv": "METABASE_MCP_API_KEY"
+            },
+            "allowedTools": ["execute_question"],
+            "callTimeoutMs": 30000
+        }
+    }
+}
+```
+
+TypeScript 使用官方 MCP SDK 自動協商 protocol；Go、Python 與 Rust 目前仍只接受 `2026-07-28`。
+
 ## 致謝
 
 Tiny-agent 受到 [Pi](https://github.com/earendil-works/pi) 對 agent loop、Tool、skills、compaction 與可理解工程設計的啟發。Tiny-agent 不是 Pi 的 fork 或移植。

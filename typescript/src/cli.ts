@@ -258,7 +258,8 @@ async function closeMcp(loaded: LoadedMcpTools[]) {
         try {
             await client.close();
         } catch {
-            // Cleanup is best-effort; never hide the original run result.
+            // Cleanup remains best-effort and never replaces the run result, but stale remote sessions must be visible.
+            console.error("MCP cleanup failed; the remote session may remain until server timeout.");
         }
     }
 }
