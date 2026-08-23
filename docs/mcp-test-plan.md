@@ -77,7 +77,7 @@ Verify:
 - Legacy `Mcp-Session-Id` stays inside the adapter connection and `close()` terminates the SDK-managed session; it is never persisted in tiny-agent Session.
 - `tools/list` and `tools/call` succeed in both eras through the same tiny-agent Tool interface.
 - JSON, request-scoped SSE, `structuredContent`, diagnostics, and the exact modern `-32022` corrective retry remain covered.
-- Go, Python, and Rust continue to reject legacy-only peers until their hand-written transports are replaced by official SDK adapters.
+- Python and Rust continue to reject legacy-only peers until their hand-written transports are replaced by official SDK adapters that preserve the existing response-bound, cancellation, and cleanup contracts.
 
 ### 5. Auth adapters
 

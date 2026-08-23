@@ -11,15 +11,15 @@ GitHub     → modern 2026-07-28
 Metabase   → legacy 2025-03-26
 ```
 
-TypeScript therefore uses `versionNegotiation: { mode: "auto" }`. The SDK—not tiny-agent—owns the legacy initialize handshake, protocol session, and wire codec. tiny-agent persists neither the negotiated connection nor `Mcp-Session-Id`; resume creates a new adapter connection. Go, Python, and Rust remain modern-only until their hand-written transports are replaced by official SDK adapters.
+TypeScript therefore uses `versionNegotiation: { mode: "auto" }`; Go uses the official Go SDK v1.7 with an adapter guard that only permits legacy initialization after an explicit `-32601` discovery response. The SDKs—not tiny-agent—own the legacy initialize handshake, protocol session, and wire codec. tiny-agent persists neither the negotiated connection nor `Mcp-Session-Id`; resume creates a new adapter connection. Python and Rust remain modern-only until their SDK migrations satisfy the existing response-bound, cancellation, and cleanup contracts.
 
-The catalog keeps a closed authentication interface: ordinary `tokenEnv` sends Bearer; TypeScript additionally accepts `auth: { type: "metabaseApiKey", tokenEnv }` for `X-API-Key`. Literal credentials, arbitrary headers, private hostnames in the public example catalog, and interactive OAuth remain out of scope.
+The catalog keeps a closed authentication interface: ordinary `tokenEnv` sends Bearer; TypeScript and Go additionally accept `auth: { type: "metabaseApiKey", tokenEnv }` for `X-API-Key`. Literal credentials, arbitrary headers, private hostnames in the public example catalog, and interactive OAuth remain out of scope.
 
 ## Bottom line
 
 The claim is directionally correct but conflates two version systems. The current stable **protocol revision is `2026-07-28`**, released 2026-07-28; MCP protocol revisions are date strings, not “v2.” The official **TypeScript SDK v2** (`@modelcontextprotocol/client@2.0.0`) became stable on 2026-07-27 and was released alongside that specification. This SDK generation—not a protocol named “MCP v2”—is the most likely referent. Both are stable, although the SDK README says v2 is still “settling”; v1 receives bug/security fixes for at least six months after v2’s release. [Protocol release](https://github.com/modelcontextprotocol/modelcontextprotocol/releases/tag/2026-07-28) · [SDK client release](https://github.com/modelcontextprotocol/typescript-sdk/releases/tag/%40modelcontextprotocol%2Fclient%402.0.0) · [SDK status](https://github.com/modelcontextprotocol/typescript-sdk#readme)
 
-For tiny-agent, this is not a reason to implement the whole protocol. Use the stable v2 client package behind a narrow adapter and expose only `tools/list` and `tools/call`. TypeScript uses SDK-owned automatic era negotiation; the other three implementations remain pinned to the modern revision while their wire transports are still hand-written.
+For tiny-agent, this is not a reason to implement the whole protocol. Use stable official client packages behind a narrow adapter and expose only `tools/list` and `tools/call`. TypeScript and Go now use SDK-owned automatic era negotiation; Python and Rust remain pinned to the modern revision while their hand-written transports still enforce contracts their official SDK adapters have not yet matched.
 
 ## What changed, and what matters here
 

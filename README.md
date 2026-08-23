@@ -109,7 +109,7 @@ tiny-ts --mcp github --plugin read "只使用 GitHub MCP 的 get_file_contents�
 }
 ```
 
-TypeScript 使用官方 MCP SDK 自動協商 protocol；Go、Python 與 Rust 目前仍只接受 `2026-07-28`。
+TypeScript 與 Go 使用官方 MCP SDK 自動協商 protocol；Python 與 Rust 目前仍只接受 `2026-07-28`。
 
 ## 致謝
 
