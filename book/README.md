@@ -2,6 +2,12 @@
 
 繁體中文（臺灣）的靜態教學書網站。內容從最小 agent loop 開始，逐步說明 Tool、Context、durable Session、recovery、cancellation、compaction、測試、observability 與安全邊界。
 
+## 致謝
+
+這本書與tiny-agent的許多設計思考受到[Pi](https://github.com/earendil-works/pi)啟發，尤其是精簡的agent loop、Tool模型、skills漸進載入、compaction，以及讓coding agent保持可理解與可操作的工程取向。感謝Pi及其貢獻者公開實作與文件。
+
+Tiny-agent不是Pi的fork或移植；它是獨立的四語言教學實作，並針對transactional Session、crash recovery與跨語言conformance發展自己的contract。
+
 ## 本機開發
 
 不需要安裝相依套件：
@@ -39,12 +45,12 @@ npx serve book/dist
 
 使用 Cloudflare Dashboard 的 Git integration 連接此 repository。設定：
 
-| 項目 | 值 |
-| --- | --- |
-| Root directory | repository root（留空） |
-| Build command | `npm --prefix book run build` |
-| Build output directory | `book/dist` |
-| Node.js | 22 或更新版本 |
+| 項目                   | 值                            |
+| ---------------------- | ----------------------------- |
+| Root directory         | repository root（留空）       |
+| Build command          | `npm --prefix book run build` |
+| Build output directory | `book/dist`                   |
+| Node.js                | 22 或更新版本                 |
 
 部署完成後，在 Pages project 的 **Custom domains** 綁定：
 

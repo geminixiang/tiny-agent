@@ -109,8 +109,9 @@ th { font-size: .8rem; color: var(--muted); }
 .path-card h2 { margin: 0 0 .25rem; font-size: 1.18rem; transition: color 160ms ease-out; }
 .path-card p { margin: 0; color: var(--muted); }
 .path-card time { color: var(--muted); white-space: nowrap; font-size: .8rem; }
-.planned { margin-top: 4rem; padding: 1.4rem; border: 1px dashed var(--line); }
-.planned h2 { margin-top: 0; }
+.acknowledgement, .planned { margin-top: 4rem; padding: 1.4rem; border: 1px dashed var(--line); }
+.acknowledgement { border-style: solid; background: var(--bg); }
+.acknowledgement h2, .planned h2 { margin-top: 0; }
 
 .footer { margin-top: 2rem; padding: 1rem 0; color: var(--muted); font-size: .8rem; text-align: center; }
 .drawer-backdrop { display: none; }

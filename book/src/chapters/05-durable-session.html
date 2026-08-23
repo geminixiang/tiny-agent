@@ -1,4 +1,4 @@
-<p class="lead">Happy-path agent只要幾十行；穩定執行的agent必須在process crash之後，仍知道一項工作是否已接受、model是否呼叫過、tool effect是否可能發生。</p>
+<p class="lead">如果假設model request永遠成功、tool不會失敗、process也不會突然停止，那麼幾十行就能寫出一個Agent。真正困難的是失敗之後的狀態：process crash之後，系統仍必須判斷工作是否已接受、model是否呼叫過，以及tool effect是否可能已經發生。</p>
 
 <h2 id="promise">Durability 的精確定義</h2>
 <p>Tiny-agent承諾<strong>process-crash durability</strong>：一筆已接受的LF-terminated transaction已交給OS；重開時會丟棄最後LF之後的torn tail，並從完整prefix恢復。</p>

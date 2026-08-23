@@ -251,6 +251,12 @@ make book-test
 
 Rust 版使用 `ureq`（blocking HTTP）、`libc` + `unicode-width`（raw terminal 與 CJK 顯示寬度）、`serde`（session/JSON）。model request 設有 connect/read/write timeout；按 Esc 會立即停止前景等待，但 `ureq` 的 blocking transport thread 可能在 timeout 前繼續完成。Bash 工具則會清除整個 process group。
 
+## 致謝
+
+Tiny-agent的許多設計思考受到[Pi](https://github.com/earendil-works/pi)啟發，特別是精簡的agent loop、Tool模型、skills漸進載入、compaction，以及如何讓coding agent保持可理解與可操作。感謝Pi及其貢獻者公開實作與文件，讓這個專案能站在扎實的工程經驗上繼續拆解、實驗與教學。
+
+Tiny-agent不是Pi的fork或移植；它是獨立的四語言教學實作，並針對transactional Session、crash recovery與跨語言conformance發展自己的contract。書中提到相關設計時，會盡量區分「源自Pi的啟發」、「通用agent原理」與「tiny-agent自己的取捨」。
+
 ## License
 
 [MIT](LICENSE) © 2026 Ying Xiang
