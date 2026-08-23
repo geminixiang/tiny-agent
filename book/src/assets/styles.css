@@ -90,9 +90,10 @@ table { display: block; width: 100%; margin: 1.5rem 0; overflow-x: auto; border-
 th, td { padding: .65rem .75rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
 th { font-size: .8rem; color: var(--muted); }
 .compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin: 1.5rem 0; }
-.compare section, .note { padding: 1rem 1.1rem; border: 1px solid var(--line); background: var(--bg); }
+.compare section { padding: 1rem 1.1rem; border: 1px solid var(--line); background: var(--bg); }
 .compare h3 { margin-top: 0; }
-.note { display: grid; gap: .35rem; margin: 1.7rem 0; }
+.note { margin: 1.7rem 0; padding: 1rem 1.1rem; border: 1px solid var(--line); background: var(--bg); }
+.note > strong { display: block; margin-bottom: .35rem; }
 
 details.reading-branch { margin: 1.6rem 0; padding: 1rem 1.1rem; border: 1px solid var(--line); background: var(--bg); }
 details.reading-branch > summary { cursor: pointer; font-weight: 700; }
@@ -106,6 +107,10 @@ figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem
 .step-flow .step-label { font-weight: 700; }
 .step-flow .crash-note { margin: 0; color: var(--muted); font-size: .82rem; font-weight: 400; }
 .step-flow .step-arrow, .step-flow .step-loop-back { border: 0; background: transparent; color: var(--muted); padding: 0 .25rem; }
+.step-flow .step-decision { min-width: 13rem; }
+.step-flow .step-decision span { display: block; }
+.step-flow .step-exit { color: var(--muted); font-size: .82rem; font-weight: 400; }
+.step-flow .step-continue { color: var(--accent); font-size: .82rem; font-weight: 700; }
 .step-flow .step-loop-back { width: 100%; text-align: left; color: var(--accent); font-weight: 700; }
 .step-flow .step-here { color: var(--accent-strong); border-color: var(--accent); }
 

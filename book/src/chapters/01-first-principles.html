@@ -56,10 +56,16 @@
         <li class="step-arrow" aria-hidden="true">→</li>
         <li><span class="step-label">model(messages)</span></li>
         <li class="step-arrow" aria-hidden="true">→</li>
+        <li class="step-decision">
+            <span class="step-label">有 tool_calls？</span>
+            <span class="step-exit">否 → 回傳 final answer，結束</span>
+            <span class="step-continue">是 → 執行 tool</span>
+        </li>
+        <li class="step-arrow" aria-hidden="true">→</li>
         <li><span class="step-label">依名稱找到 tool 並執行</span></li>
         <li class="step-arrow" aria-hidden="true">→</li>
         <li><span class="step-label">把 tool result 寫回 messages</span></li>
-        <li class="step-loop-back"><span aria-hidden="true">↻</span> 回到 messages，直到不再有 tool_calls</li>
+        <li class="step-loop-back"><span aria-hidden="true">↻</span> 以更新後的 messages 再呼叫 model(messages)</li>
     </ol>
     <figcaption id="fig-01-loop-caption">圖 2：不可再刪的閉環——上面程式碼的形狀。</figcaption>
 </figure>
