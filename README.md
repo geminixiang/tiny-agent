@@ -141,7 +141,7 @@ tiny-rs "讀取 README 並摘要"
 
 ```text
 /compact       摘要舊對話，保留至少最近 6 則 message，並將切點移到 user boundary
-/skill:hello   明確載入 hello skill
+/skill:animation-vocabulary   明確載入 animation-vocabulary skill
 /exit          結束並顯示 session 恢復指令
 Esc            中斷目前的 model、tool 或 compact operation
 Ctrl+C         退出並顯示 session 恢復指令
@@ -194,10 +194,16 @@ Session只承諾process-crash durability，不承諾power-loss durability。格�
 .tiny-agent/skills/**/SKILL.md
 ```
 
-啟動時只把 skill 的 `name`、`description`、`location` 放進 system prompt；模型需要時再用 `read` 載入全文。Repo 內附有 [`hello` skill](.tiny-agent/skills/hello/SKILL.md)：
+啟動時只把skill的`name`、`description`、`location`放進system prompt；模型需要時再用`read`載入全文。Repo內附有[`animation-vocabulary` skill](.tiny-agent/skills/animation-vocabulary/SKILL.md)，可把模糊的motion描述對應到精確術語：
 
 ```bash
-tiny-ts "say hello"
+tiny-ts "那種多個項目一個接一個出現的動畫叫什麼？"
+```
+
+預期會先載入skill，再回答類似：
+
+```text
+**Stagger** — Animate several items one after another with a small delay between each, creating a cascade.
 ```
 
 若目前目錄存在 `AGENTS.md`，其全文也會加入 system prompt。
