@@ -150,6 +150,17 @@ test("loads cwd AGENTS.md into the system prompt", async () => {
     assert.equal(await loadProjectInstructions(resolve(dir, "missing")), "");
 });
 
+test("buildConfiguration rejects a lone surrogate instead of silently digesting it", () => {
+    // The digest producer (buildConfiguration, here) and the durable-log verifier
+    // (session-reducer.ts's configurationDigest) must run the exact same canonicalization, or a
+    // configuration written to disk could fail replay later. A lone UTF-16 surrogate in project
+    // instructions or a tool's own fields must fail here, before anything is durably appended --
+    // not succeed here and only be discovered unrecoverable on resume.
+    assert.throws(() => buildConfiguration("Always answer briefly.\n\uD800", builtInTools));
+    const brokenTool = { ...builtInTools[0], description: "broken\uD800surrogate" };
+    assert.throws(() => buildConfiguration("Always answer briefly.", [brokenTool, ...builtInTools.slice(1)]));
+});
+
 test("formats concise TUI tool events", () => {
     assert.equal(formatToolEvent({ phase: "start", name: "read", args: { path: "README.md" } }), "◆ read README.md");
     assert.equal(

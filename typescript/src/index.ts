@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import { canonicalDigest } from "./canonical-json.js";
 import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
 import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
 import {
@@ -101,21 +101,7 @@ type ConfigurationSnapshot = {
     outputOptionsDigest: string;
 };
 
-function canonical(value: unknown): string {
-    if (value === null || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
-    if (typeof value === "string") return JSON.stringify(value);
-    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-    if (!value || typeof value !== "object") throw Error("unsupported canonical value");
-    const item = value as Record<string, unknown>;
-    return `{${Object.keys(item)
-        .sort()
-        .map((key) => `${JSON.stringify(key)}:${canonical(item[key])}`)
-        .join(",")}}`;
-}
-
-function digest(value: unknown) {
-    return `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}`;
-}
+const digest = canonicalDigest;
 
 export function buildConfiguration(systemPrompt: string, tools: readonly Tool[]) {
     const configurationSnapshot: ConfigurationSnapshot = {

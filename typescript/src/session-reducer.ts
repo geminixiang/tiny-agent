@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { canonicalDigest } from "./canonical-json.js";
 
 export type SessionMessage =
     | { role: "user"; content: string }
@@ -234,37 +234,6 @@ function reserve(
     return key;
 }
 
-function canonicalString(value: string) {
-    for (let index = 0; index < value.length; index++) {
-        const code = value.charCodeAt(index);
-        if (code >= 0xd800 && code <= 0xdbff) {
-            const next = value.charCodeAt(++index);
-            if (next < 0xdc00 || next > 0xdfff) throw new Error("invalid Unicode scalar string");
-        } else if (code >= 0xdc00 && code <= 0xdfff) throw new Error("invalid Unicode scalar string");
-    }
-    return `"${[...value]
-        .map((character) => {
-            if (character === "\\") return "\\\\";
-            if (character === '"') return '\\"';
-            const escapes: Record<string, string> = { "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r" };
-            const code = character.codePointAt(0)!;
-            return code < 0x20 ? (escapes[character] ?? `\\u${code.toString(16).padStart(4, "0")}`) : character;
-        })
-        .join("")}"`;
-}
-
-function canonicalConfiguration(value: unknown): string {
-    if (typeof value === "string") return canonicalString(value);
-    if (Array.isArray(value)) return `[${value.map(canonicalConfiguration).join(",")}]`;
-    if (!value || typeof value !== "object")
-        throw new Error("configuration supports strings, arrays, and objects only");
-    const objectValue = value as JsonObject;
-    return `{${Object.keys(objectValue)
-        .sort()
-        .map((key) => `${canonicalString(key)}:${canonicalConfiguration(objectValue[key])}`)
-        .join(",")}}`;
-}
-
 function configuration(value: unknown, line: number, seq: number): ConfigurationSnapshot {
     const snapshot = object(value, "INVALID_FACT", line, seq);
     exact(
@@ -301,7 +270,7 @@ function configuration(value: unknown, line: number, seq: number): Configuration
 }
 
 function configurationDigest(snapshot: ConfigurationSnapshot) {
-    return `sha256:${createHash("sha256").update(canonicalConfiguration(snapshot)).digest("hex")}`;
+    return canonicalDigest(snapshot);
 }
 
 function structurallyEqual(left: unknown, right: unknown): boolean {
@@ -454,25 +423,13 @@ const SYNTHETIC_CONTENT = {
 } as const;
 type SyntheticReason = keyof typeof SYNTHETIC_CONTENT;
 
-function canonicalValue(value: unknown): string {
-    if (value === null || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
-    if (typeof value === "string") return canonicalString(value);
-    if (Array.isArray(value)) return `[${value.map(canonicalValue).join(",")}]`;
-    if (!value || typeof value !== "object") throw new Error("unsupported canonical value");
-    const item = value as JsonObject;
-    return `{${Object.keys(item)
-        .sort()
-        .map((key) => `${canonicalString(key)}:${canonicalValue(item[key])}`)
-        .join(",")}}`;
-}
-
 function sourceDigest(entries: Map<string, EntryInfo>, inputThroughEntryId: string) {
     const source = [];
     for (const [sourceEntryId, info] of entries) {
         if (info.entry.type === "message") source.push({ sourceEntryId, message: info.entry.message });
         if (sourceEntryId === inputThroughEntryId) break;
     }
-    return `sha256:${createHash("sha256").update(canonicalValue(source)).digest("hex")}`;
+    return canonicalDigest(source);
 }
 
 function validateSyntheticContent(reason: SyntheticReason, content: string, line: number, seq: number) {
