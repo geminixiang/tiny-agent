@@ -10,11 +10,11 @@
 
 ```mermaid
 flowchart TD
+    User["User prompt"] --> CLI["tiny-ts / tiny-go / tiny-py / tiny-rs"]
     Host["Trusted host / deployment"] --> Catalog["Trusted MCP catalog + tokenEnv"]
-    CLI["tiny-ts / tiny-go / tiny-py / tiny-rs"] --> Context["AGENTS.md + skills + session"]
     Catalog --> CLI
+    CLI --> Context["AGENTS.md + skills + session"]
     Context --> Loop["Agent loop"]
-    User["User prompt"] --> Loop
     Loop --> Model["OpenRouter / LLM"]
     Model --> Decision{"tool calls?"}
     Decision -- no --> Answer["Final answer"]
@@ -26,9 +26,6 @@ flowchart TD
     Results --> Loop
     Loop --> Session["Durable operation facts\ncanonical transactional JSONL"]
     Loop -. "tiny-ts --json" .-> Events["Structured run events"]
-    CLI -- "Esc / Ctrl+C" --> Cancel["Cancellation + cleanup"]
-    Cancel --> Model
-    Cancel --> Dispatch
 ```
 
 Agent loop 的核心保持不變；MCP不改變tool-call/result語意。TypeScript、Go與Python將MCP tools適配到通用Tool seam；Rust目前仍使用獨立的`McpTool` dispatch，後續再收斂到相同seam：
@@ -149,6 +146,10 @@ tiny-rs "讀取 README 並摘要"
 Esc            中斷目前的 model、tool 或 compact operation
 Ctrl+C         退出並顯示 session 恢復指令
 ```
+
+`Esc`是對目前active phase發出的控制訊號，不是agent loop中的下一個步驟。Agent會先將`abortRequested`寫入Session，再通知當前的model、tool或compact operation，最後補齊durable result與operation outcome；model與tool取消不是依序執行的兩個階段。
+
+`Ctrl+C`在有active operation時先走同一條abort路徑，再結束CLI。CLI退出時會關閉MCP clients與Session writer並恢復terminal；正常`/exit`也會做這些lifecycle cleanup，但不需要取消operation。
 
 Tool 執行時只在終端顯示精簡 log：
 
