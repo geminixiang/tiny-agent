@@ -1,0 +1,85 @@
+const root = document.documentElement;
+root.classList.add("js");
+const themeButton = document.querySelector("[data-theme-toggle]");
+const menuButton = document.querySelector("[data-menu-toggle]");
+const backdrop = document.querySelector("[data-drawer-backdrop]");
+const search = document.querySelector("[data-nav-search]");
+const sidebar = document.querySelector("[data-sidebar]");
+const mobile = matchMedia("(max-width: 860px)");
+
+function setTheme(theme) {
+    root.dataset.theme = theme;
+    localStorage.setItem("book-theme", theme);
+    if (themeButton) {
+        themeButton.textContent = theme === "dark" ? "☀" : "☾";
+        themeButton.setAttribute("aria-label", theme === "dark" ? "切換亮色主題" : "切換暗色主題");
+    }
+}
+
+setTheme(localStorage.getItem("book-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+themeButton?.addEventListener("click", () => setTheme(root.dataset.theme === "dark" ? "light" : "dark"));
+
+function syncDrawer(open, restoreFocus = false) {
+    const isMobile = mobile.matches;
+    document.body.dataset.drawer = open && isMobile ? "open" : "closed";
+    menuButton?.setAttribute("aria-expanded", String(open && isMobile));
+    if (sidebar) {
+        sidebar.inert = isMobile && !open;
+        if (isMobile && !open) sidebar.setAttribute("aria-hidden", "true");
+        else sidebar.removeAttribute("aria-hidden");
+    }
+    if (open && isMobile) search?.focus();
+    else if (restoreFocus && isMobile) menuButton?.focus();
+}
+
+function closeDrawer() {
+    const wasOpen = document.body.dataset.drawer === "open";
+    syncDrawer(false, wasOpen);
+}
+menuButton?.addEventListener("click", () => {
+    syncDrawer(document.body.dataset.drawer !== "open");
+});
+mobile.addEventListener("change", () => syncDrawer(false));
+syncDrawer(false);
+backdrop?.addEventListener("click", closeDrawer);
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeDrawer();
+});
+document.querySelectorAll(".chapter-nav a").forEach((link) => link.addEventListener("click", closeDrawer));
+
+search?.addEventListener("input", () => {
+    const query = search.value.trim().toLocaleLowerCase("zh-TW");
+    let visible = 0;
+    document.querySelectorAll("[data-search-item]").forEach((item) => {
+        const match = !query || item.textContent.toLocaleLowerCase("zh-TW").includes(query);
+        item.hidden = !match;
+        if (match) visible++;
+    });
+    const empty = document.querySelector("[data-nav-empty]");
+    if (empty) empty.hidden = visible > 0;
+});
+
+const progress = document.querySelector("[data-reading-progress]");
+function updateProgress() {
+    if (!progress) return;
+    const max = document.documentElement.scrollHeight - innerHeight;
+    progress.value = max > 0 ? Math.min(100, (scrollY / max) * 100) : 100;
+}
+addEventListener("scroll", updateProgress, { passive: true });
+addEventListener("resize", updateProgress);
+updateProgress();
+
+document.querySelectorAll("pre").forEach((pre) => {
+    const button = document.createElement("button");
+    button.className = "copy-button";
+    button.type = "button";
+    button.textContent = "複製";
+    button.setAttribute("aria-label", "複製程式碼");
+    button.addEventListener("click", async () => {
+        const code = pre.querySelector("code")?.textContent || pre.textContent;
+        await navigator.clipboard.writeText(code);
+        button.textContent = "已複製";
+        setTimeout(() => (button.textContent = "複製"), 1200);
+    });
+    pre.append(button);
+});

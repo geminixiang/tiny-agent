@@ -1,0 +1,70 @@
+<p class="lead">Happy-path agent只要幾十行；穩定執行的agent必須在process crash之後，仍知道一項工作是否已接受、model是否呼叫過、tool effect是否可能發生。</p>
+
+<h2 id="promise">Durability 的精確定義</h2>
+<p>Tiny-agent承諾<strong>process-crash durability</strong>：一筆已接受的LF-terminated transaction已交給OS；重開時會丟棄最後LF之後的torn tail，並從完整prefix恢復。</p>
+<p>它不承諾<strong>power-loss durability</strong>。沒有每筆file sync與directory sync，就不能保證斷電或storage controller failure後仍存在。教材刻意保留這個區別，不用含糊的「永不遺失資料」。</p>
+
+<h2 id="framing">一個檔案，兩種行</h2>
+<p>第一行是唯一header：</p>
+<pre data-lang="json"><code>{
+  "kind": "header",
+  "version": 2,
+  "id": "019...",
+  "createdAt": 1787371200000,
+  "cwd": "/workspace",
+  "provider": "openrouter",
+  "model": "deepseek/deepseek-v4-flash-0731",
+  "environmentIdentity": "/workspace"
+}</code></pre>
+<p>之後每一行是一個完整transaction：一個fact，或一個non-empty facts array。Array中的facts對reducer原子可見。</p>
+<pre data-lang="json"><code>[
+  {"kind":"entry","seq":1,"id":"...","entry":{"type":"message","message":{"role":"user","content":"修正bug"}}},
+  {"kind":"record","seq":2,"id":"...","record":{"type":"runStarted","operationId":"...","operationKind":"run","inputEntryId":"..."}}
+]</code></pre>
+
+<h2 id="intent-effect">Intent 必須早於 Effect</h2>
+<p>舊式session常在tool完成後才寫 result。若process在外部effect成功、result落盤前crash，重開後完全看不出tool是否執行過。</p>
+<pre><code>錯誤：execute effect → persist result
+正確：persist toolStarted → execute effect → persist result</code></pre>
+<p><code>toolStarted</code>會保存有效arguments、tool identity、replay policy、environment identity與預留的result entry ID。Crash後看到 intent卻沒有result，就能明確得到：</p>
+<blockquote>這個effect可能已經發生，結果未知。</blockquote>
+<p>系統不猜測。Safe read可以在identity完全一致時重播；write、edit、bash與MCP則寫入interrupted synthetic result，不重播。</p>
+
+<h2 id="fact-kinds">Entry、Record 與 Usage</h2>
+<table><thead><tr><th>Kind</th><th>保存內容</th><th>會送給模型？</th></tr></thead><tbody>
+<tr><td><code>entry</code></td><td>user/assistant/tool message、compaction checkpoint</td><td>依active context投影</td></tr>
+<tr><td><code>record</code></td><td>run、attempt、tool intent、abort、operation outcome</td><td>不會</td></tr>
+<tr><td><code>usage</code></td><td>physical model attempt或nested tool用量</td><td>不會</td></tr>
+</tbody></table>
+<p>Usage獨立成ledger，避免從「最後一則assistant message」猜整個session成本。每筆usage綁定到exact attempt或toolStarted。</p>
+
+<h2 id="transaction-invariants">Transaction Invariants</h2>
+<ul>
+<li><code>seq</code>從1開始，每個fact嚴格+1，包含array內部。</li>
+<li>ID是唯一UUIDv7；reference必須指向已存在且正確ownership的fact。</li>
+<li>完整transaction先驗證，成功後才更新memory state。</li>
+<li>最後LF後的 bytes是torn tail；完整但非法的一行則是corruption，不能跳過。</li>
+<li>Session使用single-writer contract；runtime只防同process重複writer，跨process互斥由job runner保證。</li>
+</ul>
+
+<h2 id="store">深而小的 Storage Interface</h2>
+<pre data-lang="ts"><code>interface SessionStore {
+    commit(facts: NewFact[]): Promise&lt;CommittedFact[]&gt;;
+    load(): Promise&lt;SessionState&gt;;
+    close(): Promise&lt;void&gt;;
+}</code></pre>
+<p><code>commit</code>隱藏seq、IDs、timestamp、serialization與FIFO queue；<code>load</code>隱藏framing、torn-tail repair與pure reduction。刪除這個module會讓複雜度重新散回agent loop，因此它是真正通過deletion test的deep module。</p>
+
+<h2 id="hands-on">親手驗證</h2>
+<p>先用標準函式庫親手建立一個最小 append-only JSONL，再故意留下沒有 LF 的 torn tail。這個練習不需要模型或網路：</p>
+<pre data-lang="sh"><code>tmp=$(mktemp)
+printf '%s\n' '{"kind":"header","version":2}' > "$tmp"
+printf '%s\n' '[{"kind":"record","seq":1}]' >> "$tmp"
+printf '%s' '{"torn":' >> "$tmp"
+node -e 'const b=require("fs").readFileSync(process.argv[1]); const i=b.lastIndexOf(10); console.log(b.subarray(0,i+1).toString())' "$tmp"</code></pre>
+<p>輸出只應包含兩個 LF-terminated records；最後半截不能被當成已提交的交易。接著執行真正的 Store regression test，確認修復後才能繼續 append：</p>
+<pre data-lang="sh"><code>npm --prefix typescript test -- \
+  --test-name-pattern="repairs a torn tail"</code></pre>
+<p>最後開啟 <code>schemas/session/fixtures/torn-tail.jsonl</code> 與其 expected state，對照手作版本和 canonical contract 的差別。</p>
+
+<aside class="note"><strong>閱讀原始碼</strong><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session.ts">SessionStore</a>、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/session-design.md">完整Session contract</a>、<a href="https://github.com/geminixiang/tiny-agent/tree/main/schemas/session">跨語言fixtures</a>。</aside>

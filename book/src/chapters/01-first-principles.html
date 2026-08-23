@@ -1,0 +1,55 @@
+<p class="lead">LLM 能產生下一段文字；Agent 則把文字模型放進一個可以觀察世界、採取行動、接收結果並繼續判斷的閉環。這一章只留下不可再刪的部分。</p>
+
+<h2 id="llm-is-not-agent">LLM 不是 Agent</h2>
+<p>一次 LLM 呼叫可以抽象成 <code>output = model(messages)</code>。模型不會記得上一次呼叫，也不會真的讀檔、執行測試或修改系統。它只根據本次輸入預測輸出。所謂「記憶」，其實是 host 在下一次呼叫時，把先前的訊息再次送入。</p>
+
+<div class="compare">
+<section><h3>LLM</h3><ul><li>輸入訊息，輸出文字或 tool call</li><li>單次呼叫無狀態</li><li>不直接產生外部副作用</li></ul></section>
+<section><h3>Agent</h3><ul><li>保存 transcript</li><li>執行模型選擇的 tool</li><li>把結果送回模型，直到得到 final answer</li></ul></section>
+</div>
+
+<h2 id="minimal-loop">不可再刪的閉環</h2>
+<pre data-lang="ts"><code>async function runAgentLoop(userText: string) {
+    messages.push({ role: "user", content: userText });
+
+    for (;;) {
+        const answer = await callModel(messages, toolDefinitions);
+        messages.push(answer);
+
+        if (!answer.toolCalls.length) return answer.text;
+
+        for (const call of answer.toolCalls) {
+            const result = await tools[call.name].execute(call.arguments);
+            messages.push({ role: "tool", toolCallId: call.id, content: result });
+        }
+    }
+}</code></pre>
+<p>這段程式不理解「修 bug」或「查營收」。它只負責機械性的控制：呼叫模型、執行能力、保存結果、決定是否繼續。領域能力在 tools；決策能力在 model；連續性在 messages。</p>
+
+<h2 id="why-coding-agent">Coding Agent 多了什麼</h2>
+<p>給 Agent 四個能力，就得到最小 coding agent：</p>
+<ol>
+<li><code>read</code>：取得原始碼與檔案。</li>
+<li><code>write</code>：建立或完整覆寫檔案。</li>
+<li><code>edit</code>：精準修改既有內容。</li>
+<li><code>bash</code>：搜尋、編譯、測試與執行命令。</li>
+</ol>
+<p>真正困難的不是把 loop 寫出來，而是讓它在錯誤、取消、context 增長、程式 crash 與不確定外部 effect 下，仍保持 transcript 合法且能安全恢復。後面七章都在補上這些可靠性。</p>
+
+<h2 id="responsibility">第一性原則的責任分配</h2>
+<table><thead><tr><th>責任</th><th>由誰負責</th><th>不該負責什麼</th></tr></thead><tbody>
+<tr><td>選擇下一步</td><td>Model</td><td>直接取得 host credential</td></tr>
+<tr><td>控制迴圈</td><td>Agent runtime</td><td>理解每個領域的業務規則</td></tr>
+<tr><td>產生副作用</td><td>Tool adapter</td><td>自行改變授權範圍</td></tr>
+<tr><td>持續與恢復</td><td>Session</td><td>猜測未記錄的 effect 是否成功</td></tr>
+<tr><td>介面與部署</td><td>CLI / trusted host</td><td>把 deployment security 假裝成 agent 功能</td></tr>
+</tbody></table>
+
+<aside class="note"><strong>閱讀原始碼</strong><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L706">TypeScript <code>Agent.runAgentLoop()</code></a> 是這個閉環的 reference implementation。</aside>
+
+<h2 id="hands-on">動手驗證</h2>
+<pre data-lang="sh"><code>tiny-ts --plugin read "讀取 README.md，說明 agent loop"
+
+tiny-ts --plugin edit "讀取 README.md"
+# 第二個命令缺少 read 能力，Agent 應明確說明缺少能力，不能捏造結果。</code></pre>
+<p>這個對照揭示一個重要觀念：Agent 的能力不是 prompt 宣稱出來的，而是本次 request 實際提供的 tool definitions。</p>

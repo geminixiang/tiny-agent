@@ -1,0 +1,82 @@
+<p class="lead">LLM 只能提出 action；Tool 才真的讀檔、寫檔、查 Sentry 或呼叫 MCP。Tool 介面因此同時是能力 seam、測試表面與安全邊界。</p>
+
+<h2 id="interface">小而深的 Tool 介面</h2>
+<pre data-lang="ts"><code>export type Tool = {
+    name: string;
+    description: string;
+    parameters: Record&lt;string, unknown&gt;;
+    replay?: "safe" | "never";
+    replayKey?: string;
+    execute(args: ToolArgs, signal?: AbortSignal): Promise&lt;string&gt;;
+};</code></pre>
+<p>Agent loop 不知道這是檔案、Sentry 還是 MCP。它只做四件事：把 schema 送給模型、依名稱找到 tool、執行、把結果寫回 transcript。這是 Strategy、Command 與 dependency injection 的最小組合，但 implementation 仍只是一般 object 與 array。</p>
+
+<h2 id="locality">Schema 與 Execute 必須放在一起</h2>
+<p>一個 tool 的名稱、描述、參數 schema、runtime guard 與 implementation 應具有 locality。不要把 metadata 放一張表，再用 <code>if (name === "read")</code> 在另一處 dispatch。</p>
+<pre data-lang="ts"><code>const readTool: Tool = Object.freeze({
+    name: "read",
+    replay: "safe",
+    replayKey: "builtin:read:v1",
+    description: "Read a UTF-8 text file...",
+    parameters: {
+        type: "object",
+        properties: {
+            path: { type: "string" },
+            offset: { type: "integer", minimum: 1 },
+        },
+        required: ["path"],
+    },
+    async execute(args, signal) {
+        const path = requiredString(args.path, "path");
+        return trustedReadExecute(path, { offset: args.offset, signal });
+    },
+});</code></pre>
+<p><code>trustedReadExecute</code> 是概念名稱，代表 host 已套用實際的工作區規則、分頁與輸出上限；它不是 Node.js 標準函式。若直接把 <code>readFile(path)</code> 暴露給模型，模型就能要求讀取任何程序可存取的路徑，不能當成 production-safe Tool。</p>
+<p>tiny-agent 的 file tools 會解析 canonical path，拒絕離開目前工作區的路徑與指向外部的 symlink。這是 application-level containment，不是 sandbox，也不是完整的授權系統；路徑檢查與實際開檔之間仍可能存在 TOCTOU race。多租戶或惡意工作負載必須由外層 execution capsule 提供 OS 層隔離。</p>
+
+<h2 id="validation">JSON Schema 不等於 Runtime Validation</h2>
+<p>Schema 是給模型的介面說明，不是安全檢查。模型或 provider仍可能回傳：</p>
+<pre data-lang="json"><code>{"command": 42}
+null
+[]</code></pre>
+<p>Dispatch seam先要求 arguments為non-null JSON object；每個built-in tool再驗證自己真正執行的欄位。失敗必須throw，由Agent轉成error result。不要回傳一般字串<code>Error: ...</code>來表示失敗，否則monitoring只能猜文字。</p>
+
+<h2 id="plugin">Plugin 是具名 Tool Bundle</h2>
+<pre data-lang="ts"><code>export type Plugin = {
+    name: string;
+    tools: readonly Tool[];
+};</code></pre>
+<p>這不是dynamic package system。<code>--plugin read,edit</code>只是從trusted built-in catalog選擇本次提供的capabilities。未指定時啟用四個built-ins；指定後變成allowlist。</p>
+<pre data-lang="sh"><code>tiny-ts --plugin read "分析 README"
+tiny-ts --plugin read,edit "閱讀並修改 README"
+</code></pre>
+<p>Repository不能自行安裝plugin，模型也不能要求下載任意module。企業工具應由trusted host組裝，並透過closure持有tenant scope與credential：</p>
+<pre data-lang="ts"><code>function createSentryPlugin(client, trustedScope): Plugin {
+    return {
+        name: "sentry",
+        tools: [createGetIssueTool(client, trustedScope)],
+    };
+}</code></pre>
+
+<h2 id="mcp">MCP 只是另一個 Tool Adapter</h2>
+<pre><code>MCP tools/list → tiny-agent Tool[]
+Tool.execute()  → MCP tools/call</code></pre>
+<p>MCP不會建立第二個agent loop，也不是authorization或sandbox。Tiny-agent只接受trusted named catalog；URL、token、tenant與authorization不能來自model arguments。遠端名稱內部會編碼避免碰撞，TUI才顯示成人類可讀的<code>mcp:sentry/get_issue</code>。</p>
+<p>目前TypeScript、Go、Python會把MCP能力適配進generic Tool seam；Rust仍使用獨立<code>McpTool</code> dispatch。這是已知cross-language difference，不應在教材中假裝完全一致。</p>
+
+<h2 id="replay">Replay Policy 是 Effect Semantics</h2>
+<p>只有exact built-in <code>read</code>宣告safe replay：</p>
+<pre><code>replay = safe
+replayKey = builtin:read:v1</code></pre>
+<p>同名custom <code>read</code>仍是never。<code>bash/write/edit/MCP</code>預設never，因為crash後無法證明effect沒有發生。Replay不是由模型選擇，也不能只靠tool name判斷。</p>
+
+<h2 id="hands-on">親手驗證</h2>
+<p>先跑injected Tool與filesystem containment的離線測試，不需要OpenRouter key：</p>
+<pre data-lang="sh"><code>npm --prefix typescript test -- \
+  --test-name-pattern="injected tool|filesystem tools contain canonical paths"
+
+go -C go test ./cmd/tiny-go \
+  -run 'TestFilesystemToolsContainCanonicalPaths' -count=1</code></pre>
+<p>在test中追蹤四個步驟：model-facing schema、provider產生的call、runtime argument validation、tool result回到transcript。Symlink案例只證明靜態path containment；它不能取代面對惡意並行filesystem mutation的OS sandbox。</p>
+
+<aside class="note"><strong>閱讀原始碼</strong><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/tools.ts">Tool、Plugin與四個built-ins</a>、<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/mcp.ts">MCP Tool adapter</a>。</aside>

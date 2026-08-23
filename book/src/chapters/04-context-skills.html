@@ -1,0 +1,54 @@
+<p class="lead">Context 不是把所有資料都塞給模型。好的 context engineering 是分層：穩定規則常駐、能力 schema 隨 request 提供、領域知識只在命中時載入。</p>
+
+<h2 id="layers">Context 的四個層級</h2>
+<ol>
+<li><strong>System prompt</strong>：Agent身分、工作目錄、基本workflow。</li>
+<li><strong>Project instructions</strong>：目前cwd的<code>AGENTS.md</code>全文。</li>
+<li><strong>Skill metadata</strong>：name、description、absolute location。</li>
+<li><strong>Conversation</strong>：user、assistant、tool results，以及必要的compact summary。</li>
+</ol>
+<p>Tool definitions由provider request的<code>tools</code>欄位傳送，不是假裝成system文字。這讓模型只能選本次真正存在的能力。</p>
+
+<h2 id="agents-md">AGENTS.md 是專案規則</h2>
+<p>Tiny-agent啟動時只讀目前工作目錄的<code>./AGENTS.md</code>。它會進入明確的project context區塊：</p>
+<pre data-lang="xml"><code>&lt;project_context&gt;
+Project-specific instructions and guidelines:
+&lt;project_instructions path="/workspace/AGENTS.md"&gt;
+...全文...
+&lt;/project_instructions&gt;
+&lt;/project_context&gt;</code></pre>
+<p>這些規則適合放coding style、測試命令、架構決策與禁止事項。不應放credential，也不應把volatile runtime state寫在裡面。</p>
+
+<h2 id="skills">Skills 使用 Progressive Loading</h2>
+<p>Tiny-agent遞迴掃描：</p>
+<pre><code>.tiny-agent/skills/**/SKILL.md</code></pre>
+<p>啟動時只解析frontmatter：</p>
+<pre data-lang="yaml"><code>---
+name: i-have-adhd
+description: Shape responses so an ADHD reader can act on them.
+---</code></pre>
+<p>System prompt只得到metadata與location；完整正文不會預先佔用context。模型自動判斷任務命中後，才使用本次提供的<code>read</code>能力讀取全文。若本次用<code>--plugin edit</code>禁用了read，模型自動載入時必須說明缺少能力，不能假裝skill已載入。</p>
+<p>明確的<code>/skill:name</code>是另一條路徑：CLI會直接讀取已發現的skill檔案，再把正文與user request一起交給Agent，因此不需要啟用<code>read</code> tool。這是trusted host操作，不是模型取得了額外檔案權限。</p>
+
+<h2 id="why-progressive">為什麼不一次全部載入</h2>
+<div class="compare"><section><h3>全部預先載入</h3><ul><li>每輪都支付token成本</li><li>無關instructions干擾model</li><li>skills越多，system prompt越不穩定</li></ul></section><section><h3>Progressive loading</h3><ul><li>metadata足以做初步routing</li><li>只有命中的skill進入transcript</li><li>完整讀取可被Session稽核</li></ul></section></div>
+
+<h2 id="hands-on">親手驗證</h2>
+<pre data-lang="sh"><code>tiny-ts --plugin read
+
+# 互動輸入：CLI明確載入，不依賴read tool
+/skill:i-have-adhd 幫我把工作拆成可執行步驟
+</code></pre>
+<p>明確的<code>/skill:name</code>會由CLI讀取skill正文，並把它與本次user request一起送給Agent。Repo內example是自包含的<code>i-have-adhd</code>，不需要外部服務。</p>
+
+<h2 id="context-growth">Context 會持續成長</h2>
+<p>每次model、tool call與tool result都會讓下一輪input變長。Provider prompt cache可以降低重複prefix成本，卻不減少context window佔用。你需要同時觀察：</p>
+<ul>
+<li>每次physical request的input、cacheRead與cache hit rate。</li>
+<li>active context是否包含巨大tool result。</li>
+<li>是否已到需要<code>/compact</code>的時機。</li>
+<li>summary是否仍保留決策、修改檔案、錯誤與下一步。</li>
+</ul>
+<p>Context engineering不是單獨的prompt技巧，而是Tool結果截短、Skill漸進載入、Session投影與Compaction共同形成的系統行為。</p>
+
+<aside class="note"><strong>閱讀原始碼</strong><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L162">Skill discovery與metadata parser</a>、<a href="https://github.com/geminixiang/tiny-agent/blob/main/.tiny-agent/skills/i-have-adhd/SKILL.md">Example skill</a>。</aside>

@@ -4,6 +4,8 @@
 
 <h1 align="center">tiny-agent</h1>
 
+<p align="center"><a href="https://tiny-agent.geminixiang.com">閱讀繁體中文教學書</a></p>
+
 用最少概念實作可用的 AI coding agent。這個教學專案會分別用 TypeScript、Python、Rust、Go 完成 POC；目前四種語言版本皆已完成。
 
 ## 架構
@@ -228,7 +230,11 @@ make test-mcp     # TypeScript reference MCP fixture；其他語言由各自test
 make check
 make format
 make build
+make book-build
+make book-test
 ```
+
+教學書原始內容位於 [`book/`](book/README.md)，靜態產物可直接部署至 Cloudflare Pages。
 
 個別實作也可使用 `make test-ts`、`make test-go`、`make test-py`、`make test-rs` 等對應target。普通測試使用mock OpenRouter，不消耗API額度；公開MCP endpoints只作optional compatibility smoke。
 

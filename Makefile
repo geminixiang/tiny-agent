@@ -1,4 +1,4 @@
-.PHONY: install install-ts install-go install-py install-rs test test-eval test-mcp test-ts test-go test-py test-rs check check-ts check-go check-py check-rs eval build build-ts build-go build-py build-rs format format-ts format-go format-py format-rs
+.PHONY: install install-ts install-go install-py install-rs test test-eval test-mcp test-ts test-go test-py test-rs check check-ts check-go check-py check-rs eval build build-ts build-go build-py build-rs format format-ts format-go format-py format-rs book-build book-test book-check
 
 install: install-ts install-go install-py install-rs
 
@@ -15,7 +15,7 @@ install-py:
 install-rs:
 	cargo install --path ./rust --force
 
-test: test-ts test-go test-py test-rs test-eval
+test: test-ts test-go test-py test-rs test-eval book-test
 
 test-eval:
 	cd typescript && node --import tsx --test ../eval/run.test.ts
@@ -35,7 +35,7 @@ test-go:
 test-py:
 	uv run --project python python -m unittest discover -s python/tests
 
-check: check-ts check-go check-py check-rs
+check: check-ts check-go check-py check-rs book-check
 
 check-ts:
 	npm --prefix typescript run lint
@@ -68,7 +68,7 @@ format-go:
 format-py:
 	@true
 
-build: build-ts build-go build-py build-rs
+build: build-ts build-go build-py build-rs book-build
 
 build-rs:
 	cd rust && cargo build --release --offline
@@ -81,3 +81,12 @@ build-go:
 
 build-py:
 	uv build --project python
+
+book-build:
+	npm --prefix book run build
+
+book-test:
+	npm --prefix book test
+
+book-check:
+	npm --prefix book run check
