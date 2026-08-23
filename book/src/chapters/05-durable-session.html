@@ -208,7 +208,10 @@ node --import tsx --test --test-name-pattern="repairs a torn tail" test/session.
     contract 的差別。
 </p>
 
-<p class="bridge">重建出的 SessionState 本身不能決定下一步該做什麼——這是下一章 Planner 的責任。</p>
+<p class="bridge">
+    重建出的 SessionState 本身不能決定下一步該做什麼——這是下一章 Planner 的責任。下一章也會講一個真的用
+    <code>kill -9</code> 挖出來、只存在於其中一個語言 port 的真實 bug：intent-before-effect 這個機制本身四個語言都做對了，錯的是它「之後」的下一步判斷。
+</p>
 
 <aside class="note">
     <strong>閱讀原始碼</strong

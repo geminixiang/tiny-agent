@@ -230,6 +230,38 @@ interrupted      → intent已寫，effect狀態未知，不重播</code></pre>
 <pre data-lang="sh"><code>make test
 # TypeScript / Go / Python / Rust 都會跑各自的 reducer、planner 與 production tests</code></pre>
 
+<h2 id="case-study">真實案例：一個真的用 <code>kill -9</code> 挖出來的 bug</h2>
+<p>
+    這不是假設情境。我們真的對 tiny-agent 的四個語言 port 各跑了一次「先讓一個 safe-replay tool（<code>read</code>）的
+    <code>toolStarted</code> 落盤、再對真正的 process 送出真的 <code>SIGKILL</code>」，然後重開程式、讓
+    <code>resumeSession()</code> 接手。
+</p>
+<p>
+    Replay 本身四個語言都做對了：重開後真的重新執行了那次 <code>read</code>，拿到硬碟上的真實內容。問題出在 replay
+    <strong>之後</strong>：recovery 接著自動送出下一輪 model request，而這次模型只是正常回答完畢（<code>stop</code>，沒有
+    tool_calls）。TypeScript port 在這一步直接把 session 弄壞了——reducer 丟出
+    <code>INVALID_TRANSITION</code>，整份 durable log 從此無法再被開啟。Go、Rust、Python 三個 port 面對完全一樣的序列都沒有事。
+</p>
+<p>
+    根因藏在 <code>assistantCalls()</code> 這個小函式裡：它原本的寫法是「往回掃整段 transcript，找最後一個
+    <strong>曾經帶過</strong> tool_calls 的 assistant 訊息」。這句話平常沒問題，但當「目前這一輪」的 assistant
+    回覆恰好是 plain <code>stop</code>（沒有 tool_calls）時，這個掃描會直接跳過它，抓到<strong>更早、已經處理完</strong>的那一輪。Planner
+    於是誤判成「那些舊的 tool_calls 還沒解決」，用一個早就過期的 <code>contextThroughEntryId</code>
+    去開新的 <code>stepAttempt</code>——reducer 一比對，發現它跟現在真正最新的
+    <code>activeContextThroughEntryId</code> 不一致，判定成不合法的狀態轉移，直接拒收。
+</p>
+<p>
+    修法只是把「找最後一個曾經帶 tool_calls 的 assistant」這句話，換成「找最後一個 assistant 訊息，不管它有沒有帶
+    tool_calls」——因為在這個協議下，新的 assistant 訊息本來就不可能在前一輪的 tool_calls
+    全部解決之前被寫進去，所以最後一個 assistant 訊息一定就是「目前這一輪」，不需要額外過濾。
+</p>
+<p>
+    這個案例值得記住的不是這個特定的修法，而是它怎麼被找到的：<strong>單元測試裡的 fixture 都是綠燈，真正的漏洞要靠真的
+    <code>kill -9</code> 一個真的 process 才會現形</strong>。四語言 parity 的永久 merge gate（上一節）保證了「同一份
+    durable bytes 在四個語言得到同一個 plan」，但它沒辦法保證「這份 bytes 本身涵蓋了所有真實會發生的 crash
+    timing」——那要靠真正對著跑起來的程式按下去的那一下 kill。
+</p>
+
 <h2 id="hands-on">親手驗證</h2>
 <p>
     Reducer 與 planner 都是 pure functions，因此最好的練習是直接對同一 durable prefix 執行離線測試。先跑 safe 與 never
