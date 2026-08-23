@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -274,6 +275,82 @@ func TestStopWithToolCallsFailsWithoutInvalidAssistant(t *testing.T) {
 				t.Fatal("idle resume appended")
 			}
 		})
+	}
+}
+
+// TestRecoverySafeReplaySucceedsThenPlainStopFinishesIdly locks in, as a fast
+// deterministic unit test, the parity finding from a live SIGKILL crash test:
+// unlike the TypeScript port (which throws INVALID_TRANSITION here because it
+// reuses a now-stale contextThroughEntryId), the Go port re-derives recovery
+// plans from freshly reduced state on every iteration, so a safe-replay tool
+// result followed by a plain "stop" model attempt finishes cleanly.
+func TestRecoverySafeReplaySucceedsThenPlainStopFinishesIdly(t *testing.T) {
+	requests := 0
+	agent, session, close := durableAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done after replay"},"finish_reason":"stop"}],"usage":{}}`))
+	})
+	defer close()
+
+	if err := os.WriteFile(filepath.Join(cwd, "target.txt"), []byte("real file contents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := agent.startDurableRun("inspect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.startAttempt(&run, "assistant", 1); err != nil {
+		t.Fatal(err)
+	}
+	call := ToolCall{ID: "call_1", Type: "function", Function: ToolFunction{Name: "read", Arguments: `{"path":"target.txt"}`}}
+	assistantID, err := agent.settleAssistant(&run, ModelResponse{Message: Message{Role: "assistant", ToolCalls: []ToolCall{call}}, StopReason: "toolUse"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a crash: durably commit the toolStarted intent for a safe-replay
+	// tool, exactly as executeDurableTool does before running Execute, but never
+	// commit a result - so the tool is left "pending" for recovery to replay.
+	identity, err := environmentIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedID, resultID := session.NewID(time.Now()), session.NewID(time.Now().Add(time.Nanosecond))
+	fact := map[string]any{"kind": "record", "id": startedID, "record": map[string]any{
+		"type": "toolStarted", "operationId": run.OperationID, "stepId": run.StepID, "assistantEntryId": assistantID,
+		"toolIndex": 0, "toolCallId": call.ID, "toolName": call.Function.Name, "arguments": map[string]any{"path": "target.txt"},
+		"replay": "safe", "replayKey": "builtin:read:v1", "environmentIdentity": identity, "resultEntryId": resultID,
+	}}
+	if err := session.Commit([]map[string]any{fact}); err != nil {
+		t.Fatal(err)
+	}
+
+	restored := newAgent(nil, session, "")
+	restored.Endpoint, restored.Client = agent.Endpoint, agent.Client
+	if err := restored.restoreSession(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	state := session.State()
+	if state.Operation.Kind != "idle" {
+		t.Fatalf("expected idle after replay + plain stop, got: %+v", state.Operation)
+	}
+	if requests != 1 {
+		t.Fatalf("expected exactly one model request for the post-replay step, got %d", requests)
+	}
+	last := state.Transcript[len(state.Transcript)-1]
+	if last["content"] != "done after replay" {
+		t.Fatalf("expected final transcript entry to be the post-replay answer, got: %+v", last)
+	}
+	found := false
+	for _, message := range state.Transcript {
+		if message["role"] == "tool" && message["content"] == "real file contents" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the replayed read result in the transcript: %+v", state.Transcript)
 	}
 }
 

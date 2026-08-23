@@ -144,6 +144,20 @@ class TinyAgentTest(unittest.TestCase):
             self.assertIn("not replayed", next(message["content"] for message in never.messages if message["role"] == "tool"))
             never_session.close()
 
+    def test_safe_replay_then_plain_stop_reaches_idle_without_invalid_transition(self):
+        # Regression: in the TypeScript port, a safe-replay tool result committed during
+        # recovery followed by the next model attempt settling with stop (no tool calls)
+        # made the reducer throw INVALID_TRANSITION because the stray extra stepAttempt's
+        # contextThroughEntryId no longer matched the advanced activeContextThroughEntryId.
+        (tiny.ROOT / "README.md").write_text("evidence", encoding="utf-8")
+        reply = iter([{"choices": [{"message": {"role": "assistant", "content": "safe done"}, "finish_reason": "stop"}], "usage": {}}])
+        with patch.dict(os.environ, {"TINY_AGENT_ENVIRONMENT_IDENTITY": "fixture"}):
+            agent, session = self.recovery_agent("pending-safe-tool.jsonl", reply)
+            self.assertEqual(agent.resume_session(), "safe done")
+            self.assertIn({"role": "tool", "content": "evidence", "tool_call_id": "call_1"}, agent.messages)
+            self.assertEqual(session.load()["operation"]["kind"], "idle")
+            session.close()
+
     def test_custom_read_pending_recovery_materializes_interruption(self):
         data = (FIXTURES / "pending-never-tool.jsonl").read_bytes().replace(b"builtin:read:never:v1", b"tool:read:v1")
         state = reduce_session(data); session_id = state["header"]["id"]

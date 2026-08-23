@@ -1002,6 +1002,76 @@ fn pending_safe_read_replays_once_then_closes_and_finishes_idempotently() {
     assert_eq!(server.requests.lock().unwrap().len(), 1);
 }
 
+/// Regression lock for the exact sequence that corrupts the TypeScript port's
+/// reducer: a pending "safe"-replay tool call is recovered (replayed and
+/// closed), and the very next model attempt settles with a plain "stop" (no
+/// further tool calls). In TypeScript this throws INVALID_TRANSITION because
+/// recovery starts a stray extra stepAttempt whose contextThroughEntryId no
+/// longer matches the now-advanced activeContextThroughEntryId. This test
+/// pins down that the Rust reducer/recovery planner does NOT hit that bug:
+/// resume_session() must return Ok, the session must end Idle, and the
+/// model's plain-stop answer must be the final transcript entry.
+#[test]
+fn safe_replay_then_plain_stop_attempt_does_not_corrupt_the_session() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    std::fs::write(format!("{cwd}/input.txt"), "recovered contents").unwrap();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let seed_agent = test_agent(&cwd, "", None);
+    let prefix = append_tool_prefix(
+        &session,
+        &seed_agent,
+        vec![tool_call("read-crash", "read", r#"{"path":"input.txt"}"#)],
+    );
+    let read = prefix
+        .configuration
+        .tools
+        .iter()
+        .find(|tool| tool.name == "read")
+        .unwrap();
+    session
+        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+            &session.allocate_id(),
+            &prefix.operation_id,
+            &prefix.step_id,
+            &prefix.assistant_id,
+            0,
+            "read-crash",
+            "read",
+            serde_json::json!({"path":"input.txt"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            read,
+            &tiny_agent_rust::session::environment_identity(std::path::Path::new(&cwd)).unwrap(),
+            &session.allocate_id(),
+        )])
+        .unwrap();
+    let id = session.id.clone();
+    session.close().unwrap();
+
+    // The safe replay itself needs no model call; the attempt that follows
+    // it (to close out the run) settles plain "stop" with no tool calls —
+    // exactly the sequence that corrupts the TypeScript reducer.
+    let server = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{}}"#.into(),
+    ]);
+    let reopened = Session::open(&id, std::path::Path::new(&cwd)).unwrap();
+    let mut agent = test_agent(&cwd, &server.url, Some(reopened));
+    agent.resume_session().unwrap();
+
+    let state = agent.session.as_ref().unwrap().load().unwrap();
+    assert!(matches!(
+        state.operation,
+        tiny_agent_rust::session_reducer::OperationState::Idle
+    ));
+    assert_eq!(
+        agent.messages.last().unwrap().content.as_deref(),
+        Some("done")
+    );
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+}
+
 #[test]
 fn pending_never_replay_tool_is_interrupted_without_effect_then_run_continues() {
     unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
