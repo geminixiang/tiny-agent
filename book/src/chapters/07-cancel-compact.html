@@ -1,6 +1,11 @@
 <p class="lead">
-    Cancellation 不是「把 Promise 遺失掉」。可靠 Agent 必須先留下 durable abort intent，再通知目前
-    phase，並在退出前補齊合法 transcript 與 operation outcome。
+    換個情境：這次不是 process 被強制關掉，是你自己在 <code>bash deploy.sh</code> 跑到一半按下 <code>Esc</code>。跟上一章的
+    crash 不一樣，這是「使用者主動要求停」，系統理論上有機會好好收尾——但如果收尾的順序錯了，結果一樣糟：如果先取消掉正在跑的 Promise，卻還沒把「使用者要求取消」這件事寫進硬碟，中途再 crash 一次，重開後系統完全不知道使用者曾經要求停止，可能會誤判成「還在跑」而去 retry 或 replay。
+</p>
+
+<p>
+    所以可靠的 Agent 不能只是「把 Promise 取消掉」。它必須先留下 durable 的 abort intent，再通知目前
+    phase 停下來，並在退出前補齊合法 transcript 與 operation outcome。
 </p>
 
 <h2 id="abort-order">Abort 的正確順序</h2>

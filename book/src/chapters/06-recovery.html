@@ -1,6 +1,9 @@
 <p class="lead">
-    重開檔案不應該直接執行 effect。第一步是用 pure reducer 回答「durable facts 表示什麼狀態」；第二步才由 pure planner
-    回答「在目前 configuration 下，允許做什麼」。
+    延續上一章的 <code>deploy.sh</code>：現在硬碟裡已經老實記下「我打算執行這個 tool」（intent）。重開程式時，系統看到這筆記錄，卻沒看到對應的結果——這代表 effect 可能發生了，也可能沒有，結果未知。
+</p>
+
+<p>
+    這時候最危險的做法，是重開之後就直接把這個 tool 再跑一次——如果 <code>deploy.sh</code> 其實已經跑完，你就重複部署了一次。這一章要建立的，就是「重開後先想清楚、再動手」的兩個步驟：第一步只看存檔，還原「現在是什麼狀態」；第二步才拿這個狀態去對照「現在的環境和設定」，決定下一步能不能做、要怎麼做。
 </p>
 
 <h2 id="two-functions">兩個 Pure Functions</h2>

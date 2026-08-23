@@ -1,4 +1,13 @@
-<p class="lead">模型是無狀態的。Agent 能延續工作的唯一原因，是 host 保存了可重播的 transcript，並把它重新送給模型。</p>
+<p class="lead">
+    想像模型是個每次通話都會失憶的人。你每次打電話給它，都要把「我是誰、我們講到哪、剛剛工具回傳了什麼」從頭讀一遍給它聽，它才能接著往下講。
+    Agent 能表現得像「記得上次對話」，唯一原因是 host 把整段對話錄下來（transcript），每次都重播一次給模型聽。
+</p>
+
+<p>
+    問題來了：OpenRouter 回傳的東西不是乾淨的錄音——它夾雜了 <code>reasoning</code>、<code>refusal</code>
+    這類 provider 專屬的雜訊。tiny-agent 曾經直接把 provider 回應當作系統內部的
+    <code>Message</code> 硬轉型（<code>choice.message as Message</code>），結果 strict reducer 直接拒收，因為那不是它認得的格式。這一章要講的就是：錄音帶進來之前，要先過一次「翻譯與檢查」。
+</p>
 
 <h2 id="message-roles">四種角色</h2>
 <table>
@@ -45,9 +54,10 @@
 
 <h2 id="provider-adapter">Provider Adapter 必須正規化</h2>
 <p>
-    OpenRouter wire response 可能包含 <code>reasoning</code>、<code>refusal</code>、<code>reasoning_details</code> 等
-    provider-specific 欄位。它們不能原樣寫入 closed Session schema。TypeScript 曾以
-    <code>choice.message as Message</code> 假裝完成轉型，結果 strict reducer 以 <code>INVALID_FACT</code> 拒絕。
+    前面提到的翻譯步驟，實際上長這樣：<code>normalizeAssistantMessage</code> 會逐欄檢查
+    provider 回來的東西——角色是不是 <code>assistant</code>、內容是不是字串、每個 tool call
+    有沒有合法的 <code>id</code>/<code>function.name</code>/<code>arguments</code>——只有通過檢查的欄位才會被放進乾淨的
+    <code>Message</code>，其他 provider 專屬欄位（<code>reasoning</code>、<code>refusal</code> 等）一律丟棄，不會流進 Session。
 </p>
 <pre data-lang="ts"><code>function normalizeAssistantMessage(value: unknown): Message {
     // 驗證 role、content 與每個 tool call
