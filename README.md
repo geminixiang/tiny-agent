@@ -27,7 +27,7 @@ cd tiny-agent
 
 ```bash
 make install-ts   # Node.js 22+
-make install-go   # Go 1.24+
+make install-go   # Go 1.25+
 make install-py   # Python 3.12+ 與 uv
 make install-rs   # Rust 1.85+
 ```

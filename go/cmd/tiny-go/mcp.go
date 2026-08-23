@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,6 +28,7 @@ import (
 const (
 	modernMCPVersion  = "2026-07-28"
 	maxMCPTools       = 64
+	maxMCPHTTPBytes   = 10 * 1024 * 1024
 	maxMCPSchemaBytes = 50 * 1024
 	maxMCPDescription = 8 * 1024
 	maxMCPSchemaDepth = 20
@@ -44,13 +46,14 @@ type Tool struct {
 }
 
 type MCPConfig struct {
-	Alias        string
-	URL          string
-	Token        string
-	AuthHeader   string
-	AuthEnv      string
-	AllowedTools []string
-	CallTimeout  time.Duration
+	Alias           string
+	URL             string
+	Token           string
+	AuthHeader      string
+	AuthEnv         string
+	AllowedTools    []string
+	AllowedToolsSet bool
+	CallTimeout     time.Duration
 }
 
 type MCPClient struct {
@@ -60,6 +63,63 @@ type MCPClient struct {
 	tools           []Tool
 	mu              sync.Mutex
 	closed          bool
+}
+
+type mcpBoundedTransport struct {
+	base http.RoundTripper
+}
+
+func (t mcpBoundedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(request)
+	if err != nil || response == nil || response.Body == nil {
+		return response, err
+	}
+	response.Body = &mcpBoundedBody{ReadCloser: response.Body, remaining: maxMCPHTTPBytes + 1}
+	return response, nil
+}
+
+type mcpBoundedBody struct {
+	io.ReadCloser
+	remaining int64
+}
+
+func (b *mcpBoundedBody) Read(p []byte) (int, error) {
+	if b.remaining <= 0 {
+		return 0, errors.New("MCP response exceeds 10MB")
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:b.remaining]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= int64(n)
+	if b.remaining == 0 {
+		return n, errors.New("MCP response exceeds 10MB")
+	}
+	return n, err
+}
+
+type mcpLifecycleTransport struct {
+	base        http.RoundTripper
+	allowLegacy bool
+}
+
+func (t mcpLifecycleTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if t.allowLegacy || request.Method != http.MethodPost {
+		return t.base.RoundTrip(request)
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		return nil, err
+	}
+	request.Body.Close()
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	var envelope struct {
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(body, &envelope) == nil && envelope.Method == "initialize" {
+		return nil, errors.New("MCP legacy fallback was not authorized by server/discover")
+	}
+	return t.base.RoundTrip(request)
 }
 
 type mcpAuthTransport struct {
@@ -167,6 +227,8 @@ func loadMCPConfigs(aliases []string, env map[string]string) ([]MCPConfig, error
 			}
 			config.Token, config.AuthEnv, config.AuthHeader = token, name, "X-API-Key"
 		}
+		_, allowedSet := entry["allowedTools"]
+		config.AllowedToolsSet = allowedSet
 		if rawAllowed, ok := entry["allowedTools"]; ok {
 			if bytes.Equal(bytes.TrimSpace(rawAllowed), []byte("null")) || json.Unmarshal(rawAllowed, &config.AllowedTools) != nil {
 				return nil, fmt.Errorf("MCP server %s allowedTools must contain nonempty strings", alias)
@@ -261,16 +323,22 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	base = mcpBoundedTransport{base: base}
 	if config.Token != "" {
-		clone.Transport = mcpAuthTransport{base: base, header: config.AuthHeader, token: config.Token}
+		base = mcpAuthTransport{base: base, header: config.AuthHeader, token: config.Token}
 	}
+	allowLegacy, err := preflightMCPProtocol(ctx, endpoint, base)
+	if err != nil {
+		return nil, err
+	}
+	clone.Transport = mcpLifecycleTransport{base: base, allowLegacy: allowLegacy}
 	transport := &sdk.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &clone, DisableStandaloneSSE: true, MaxRetries: -1}
 	session, err := sdk.NewClient(&sdk.Implementation{Name: "tiny-agent", Version: "0.1.0"}, nil).Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("MCP connect: %w", err)
 	}
 	mcp := &MCPClient{config: config, session: session, protocolVersion: session.InitializeResult().ProtocolVersion}
-	listed, err := session.ListTools(ctx, nil)
+	listed, err := listAllMCPTools(ctx, session)
 	if err != nil {
 		_ = mcp.Close()
 		return nil, fmt.Errorf("MCP tools/list: %w", err)
@@ -284,12 +352,19 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 		allowed[name] = true
 	}
 	endpointDigest := digestMCPIdentity(map[string]any{"endpoint": endpoint, "auth": config.AuthHeader, "authEnv": config.AuthEnv, "protocol": mcp.protocolVersion})
+	seenRemote := map[string]bool{}
+	seenMapped := map[string]bool{}
 	for _, remote := range listed.Tools {
+		if seenRemote[remote.Name] {
+			_ = mcp.Close()
+			return nil, fmt.Errorf("duplicate MCP tool name: %s", remote.Name)
+		}
+		seenRemote[remote.Name] = true
 		if remote.Name == "" {
 			_ = mcp.Close()
 			return nil, errors.New("MCP tool name must not be empty")
 		}
-		if len(config.AllowedTools) > 0 && !allowed[remote.Name] {
+		if config.AllowedToolsSet && !allowed[remote.Name] {
 			continue
 		}
 		schema, ok := remote.InputSchema.(map[string]any)
@@ -323,13 +398,88 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 			_ = mcp.Close()
 			return nil, err
 		}
+		if seenMapped[mapped] {
+			_ = mcp.Close()
+			return nil, fmt.Errorf("duplicate mapped MCP tool name: %s", mapped)
+		}
+		seenMapped[mapped] = true
 		remoteName := remote.Name
 		identity := digestMCPIdentity(map[string]any{"endpoint": endpointDigest, "tool": remoteName})
 		mcp.tools = append(mcp.tools, Tool{Name: mapped, Description: remote.Description, Parameters: schema, Replay: "never", ReplayKey: "mcp:" + identity, Identity: identity, Execute: func(callCtx context.Context, args map[string]any) (string, error) {
 			return mcp.callTool(callCtx, remoteName, args)
 		}})
 	}
+	if config.AllowedToolsSet {
+		for name := range allowed {
+			if !seenRemote[name] {
+				_ = mcp.Close()
+				return nil, fmt.Errorf("MCP allowlisted tool is missing: %s", name)
+			}
+		}
+	}
 	return mcp, nil
+}
+
+func listAllMCPTools(ctx context.Context, session *sdk.ClientSession) (*sdk.ListToolsResult, error) {
+	all := &sdk.ListToolsResult{}
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		listed, err := session.ListTools(ctx, &sdk.ListToolsParams{Cursor: cursor})
+		if err != nil {
+			return nil, err
+		}
+		all.Tools = append(all.Tools, listed.Tools...)
+		if len(all.Tools) > maxMCPTools {
+			return nil, fmt.Errorf("MCP server returned more than %d tools", maxMCPTools)
+		}
+		if listed.NextCursor == "" {
+			return all, nil
+		}
+		if seen[listed.NextCursor] {
+			return nil, errors.New("MCP tools/list returned a repeated cursor")
+		}
+		seen[listed.NextCursor] = true
+		cursor = listed.NextCursor
+	}
+}
+
+func preflightMCPProtocol(ctx context.Context, endpoint string, client http.RoundTripper) (bool, error) {
+	body := []byte(`{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"tiny-agent","version":"0.1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}`)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	request.Header.Set("Mcp-Protocol-Version", modernMCPVersion)
+	response, err := client.RoundTrip(request)
+	if err != nil {
+		return false, fmt.Errorf("MCP protocol preflight: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if _, err := io.Copy(io.Discard, response.Body); err != nil {
+			return false, fmt.Errorf("MCP protocol preflight: %w", err)
+		}
+		return false, fmt.Errorf("MCP protocol preflight: HTTP %d", response.StatusCode)
+	}
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		return false, fmt.Errorf("MCP protocol preflight: %w", err)
+	}
+	if len(envelope.Result) > 0 {
+		return false, nil
+	}
+	if envelope.Error != nil && envelope.Error.Code == -32601 {
+		return true, nil
+	}
+	return false, errors.New("MCP protocol preflight rejected server/discover")
 }
 
 func digestMCPIdentity(value any) string {
