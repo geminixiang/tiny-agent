@@ -12,14 +12,18 @@ class McpFixture:
         self,
         *,
         sse: bool = False,
+        chunked: bool = False,
         token: str | None = None,
         tools: list[dict] | None = None,
         http_error: int | None = None,
         error_body: str = "",
         rpc_errors: dict[str, dict] | None = None,
         pages: list[list[dict]] | None = None,
+        sse_terminal_delay: float = 0,
     ):
         self.sse = sse
+        self.chunked = chunked
+        self.sse_terminal_delay = sse_terminal_delay
         self.token = token
         self.http_error = http_error
         self.error_body = error_body
@@ -126,6 +130,18 @@ class McpFixture:
                     raw = b"event: message\ndata: " + raw + b"\n\n"
                     self.send_header("Content-Type", "text/event-stream")
                 else: self.send_header("Content-Type", "application/json")
+                if fixture.chunked:
+                    self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
+                    midpoint = max(1, len(raw) // 2)
+                    chunks = [raw[index:index + 3] for index in range(0, len(raw), 3)] if fixture.sse_terminal_delay else (raw[:midpoint], raw[midpoint:])
+                    try:
+                        for chunk in chunks:
+                            self.wfile.write(f"{len(chunk):x};fixture=yes\r\n".encode() + chunk + b"\r\n")
+                        self.wfile.flush()
+                        if fixture.sse_terminal_delay: time.sleep(fixture.sse_terminal_delay)
+                        self.wfile.write(b"0\r\nX-Fixture: done\r\n\r\n")
+                    except (BrokenPipeError, ConnectionResetError): pass
+                    return
                 self.send_header("Content-Length", str(len(raw))); self.end_headers()
                 try: self.wfile.write(raw)
                 except BrokenPipeError: pass

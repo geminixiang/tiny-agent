@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import re
 import select
 import sys
 import termios
-import threading
 import tty
 import unicodedata
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 from .agent import Agent, DEFAULT_MODEL, TOOL_DEFINITIONS, format_tool_event, format_usage, load_project_instructions, load_skills
 from .session import Session
@@ -96,27 +96,21 @@ class Terminal:
                 try: text = pending.decode()
                 except UnicodeDecodeError: continue
                 line[cursor:cursor] = text; cursor += len(text); pending.clear(); row = self.redraw(prompt, line, cursor, row)
-    def run(self, agent: Agent, operation: Callable[[], str]) -> str:
-        if not self.tty: return operation()
-        result, done = [], threading.Event()
-        def work():
-            try: result.append((operation(), None))
-            except BaseException as error: result.append((None, error))
-            done.set()
-        threading.Thread(target=work).start()
-        while not done.wait(0.05):
+    async def run(self, agent: Agent, operation: Callable[[], Awaitable[str]]) -> str:
+        task = asyncio.create_task(operation())
+        if not self.tty: return await task
+        while not task.done():
+            await asyncio.sleep(0.05)
             ready, _, _ = select.select([self.fd], [], [], 0)
             if not ready: continue
             char = os.read(self.fd, 1)
             if char == b"\x1b" and self.escape_sequence() == b"":
                 print("\n\x1b[33mAborting...\x1b[0m"); agent.abort()
-            if char == b"\x03": agent.abort(); done.wait(); raise KeyboardInterrupt
-        answer, error = result[0]
-        if error: raise error
-        return answer
+            if char == b"\x03": agent.abort(); await asyncio.gather(task, return_exceptions=True); raise KeyboardInterrupt
+        return await task
 
 
-def run_cli(argv: list[str] | None = None) -> int:
+async def run_cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False); parser.add_argument("--session"); parser.add_argument("--skill", action="append", default=[]); parser.add_argument("--plugin", action="append", default=[]); parser.add_argument("--mcp", action="append", default=[]); parser.add_argument("prompt", nargs="*")
     args = parser.parse_args(argv)
     selected_plugins = split_plugin_names(args.plugin) or list(PLUGIN_NAMES)
@@ -127,7 +121,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     loaded_mcp = []
     try:
         for config in configs:
-            try: loaded = load_mcp_tools(config)
+            try: loaded = await load_mcp_tools(config)
             except (ValueError, RuntimeError, OSError, TimeoutError) as error: raise RuntimeError(f"MCP {config.alias} failed: {error}") from error
             loaded_mcp.append(loaded)
             print(f"MCP {config.alias}: connected ({loaded.protocol_version}, {len(loaded.tools)} tools)")
@@ -146,22 +140,22 @@ def run_cli(argv: list[str] | None = None) -> int:
             try:
                 with Terminal() as terminal:
                     if args.session:
-                        recovered = terminal.run(agent, agent.resume_session)
+                        recovered = await terminal.run(agent, agent.resume_session)
                         if recovered is not None:
                             print(f"\n\x1b[36m{recovered}\x1b[0m\n\x1b[2m{format_usage(agent.usage)}\x1b[0m")
                     if args.prompt:
-                        print(f"\n{terminal.run(agent, lambda: agent.run_agent_loop(' '.join(args.prompt)))}\n\x1b[2m{format_usage(agent.usage)}\x1b[0m"); resume(); return 0
+                        print(f"\n{await terminal.run(agent, lambda: agent.run_agent_loop(' '.join(args.prompt)))}\n\x1b[2m{format_usage(agent.usage)}\x1b[0m"); resume(); return 0
                     print("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit")
                     while True:
                         text = terminal.readline("\x1b[32m›\x1b[0m ")
                         if not text: continue
                         if text == "/exit": break
-                        if text == "/compact": answer = terminal.run(agent, agent.compact)
+                        if text == "/compact": answer = await terminal.run(agent, agent.compact)
                         elif text.startswith("/skill:"):
                             name, _, request = text[7:].partition(" "); skill = next((item for item in skills if item["name"] == name), None)
                             if not skill: print(f"Unknown skill: {name}"); continue
-                            answer = terminal.run(agent, lambda: agent.run_agent_loop(f"{Path(skill['path']).read_text(encoding='utf-8')}\n\nUser: {request}"))
-                        else: answer = terminal.run(agent, lambda: agent.run_agent_loop(text))
+                            answer = await terminal.run(agent, lambda: agent.run_agent_loop(f"{Path(skill['path']).read_text(encoding='utf-8')}\n\nUser: {request}"))
+                        else: answer = await terminal.run(agent, lambda: agent.run_agent_loop(text))
                         print(f"\x1b[36m{answer}\x1b[0m\n\x1b[2m{format_usage(agent.usage)}\x1b[0m")
             except KeyboardInterrupt:
                 pass
@@ -170,10 +164,10 @@ def run_cli(argv: list[str] | None = None) -> int:
             session.close()
     finally:
         for loaded in reversed(loaded_mcp):
-            try: loaded.close()
+            try: await loaded.close()
             except Exception: pass
 
 
 def main() -> None:
-    try: raise SystemExit(run_cli())
+    try: raise SystemExit(asyncio.run(run_cli()))
     except (ValueError, RuntimeError, OSError) as error: print(error, file=sys.stderr); raise SystemExit(1)

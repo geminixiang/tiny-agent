@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -112,7 +113,7 @@ class Session:
             if self.closed: raise ValueError("Session is closed")
             return self._append_locked(facts)
 
-    def request_abort(self, operation_id: str, cancelled: threading.Event, fact: dict) -> bool:
+    def request_abort(self, operation_id: str, cancelled: asyncio.Event, fact: dict) -> bool:
         with self.lock:
             if self.closed: raise ValueError("Session is closed")
             operation = self.state["operation"]
@@ -128,7 +129,7 @@ class Session:
             cancelled.set()
             return True
 
-    def append_aborted_attempt(self, operation_id: str, cancelled: threading.Event, failure: dict, usage: dict) -> list[dict]:
+    def append_aborted_attempt(self, operation_id: str, cancelled: asyncio.Event, failure: dict, usage: dict) -> list[dict]:
         with self.lock:
             if self.closed: raise ValueError("Session is closed")
             operation = self.state["operation"]
@@ -136,7 +137,7 @@ class Session:
                 raise ValueError("Operation is not aborted")
             return self._append_locked((failure, usage))
 
-    def append_if_active(self, operation_id: str, cancelled: threading.Event, *facts: dict) -> list[dict] | None:
+    def append_if_active(self, operation_id: str, cancelled: asyncio.Event, *facts: dict) -> list[dict] | None:
         if not facts: raise ValueError("Session transaction must not be empty")
         with self.lock:
             if self.closed: raise ValueError("Session is closed")

@@ -1,19 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import http.client
 import json
 import os
 import re
-import select
 import signal
-import subprocess
-import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
+from .http import close_writer, read_http_response, remaining, wait_owned
 from .session import Session, environment_identity, uuid7
 from .session_recovery import plan_recovery
 from .session_reducer import configuration_digest, source_digest
@@ -21,6 +19,8 @@ from .session_reducer import configuration_digest, source_digest
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MAX_BASH_OUTPUT = 10 * 1024 * 1024
+BASH_TIMEOUT_SECONDS = 120
+MAX_HTTP_RESPONSE = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT = 50 * 1024
 ROOT = Path.cwd().resolve()
 MODEL = os.getenv("TINY_MODEL") or DEFAULT_MODEL
@@ -84,30 +84,120 @@ def path_in_root(path: str) -> Path:
     return full
 
 
+async def _post_json(url: str, payload: dict, headers: dict[str, str], timeout: float, cancelled: asyncio.Event | None = None) -> dict:
+    async def request() -> dict:
+        parsed = urlsplit(url)
+        ssl = parsed.scheme == "https"
+        port = parsed.port or (443 if ssl else 80)
+        deadline = time.monotonic() + timeout
+        writer: asyncio.StreamWriter | None = None
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(parsed.hostname, port, ssl=ssl), remaining(deadline))
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+            path = parsed.path or "/"
+            if parsed.query: path += f"?{parsed.query}"
+            request_headers = {"Host": parsed.hostname or "", "Content-Length": str(len(body)), "Connection": "close", **headers}
+            raw_headers = "".join(f"{name}: {value}\r\n" for name, value in request_headers.items())
+            writer.write(f"POST {path} HTTP/1.1\r\n{raw_headers}\r\n".encode() + body)
+            await asyncio.wait_for(writer.drain(), remaining(deadline))
+            status, _, raw = await read_http_response(
+                reader, deadline, MAX_HTTP_RESPONSE,
+                "OpenRouter returned an invalid HTTP response", "OpenRouter response exceeded 10MB",
+            )
+            text = raw.decode()
+            if status < 200 or status >= 300: raise RuntimeError(f"OpenRouter {status}: {text}")
+            return json.loads(text)
+        finally:
+            if writer: await close_writer(writer, deadline)
 
-def execute_bash(command: str, cancelled: threading.Event) -> str:
-    process = subprocess.Popen(command, cwd=ROOT, shell=True, executable="/bin/sh", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-    output = bytearray(); deadline = time.monotonic() + 120
-    assert process.stdout
-    os.set_blocking(process.stdout.fileno(), False)
+    return await wait_owned(request(), cancelled)
+
+
+async def execute_bash(command: str, cancelled: asyncio.Event) -> str:
+    deadline = time.monotonic() + BASH_TIMEOUT_SECONDS
+    creation = asyncio.create_task(asyncio.create_subprocess_shell(
+        command, cwd=ROOT, executable="/bin/sh", stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+    ))
+    abort = asyncio.create_task(cancelled.wait())
+    timer = asyncio.create_task(asyncio.sleep(max(0, deadline - time.monotonic())))
+    process: asyncio.subprocess.Process | None = None
+    read: asyncio.Task[bytes] | None = None
+    waited: asyncio.Task[int] | None = None
+
+    async def cancel_tasks(*tasks: asyncio.Task | None) -> None:
+        active = [task for task in tasks if task is not None]
+        for task in active: task.cancel()
+        if active: await asyncio.gather(*active, return_exceptions=True)
+
+    async def kill_and_reap() -> None:
+        assert process is not None
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError): pass
+        if process.stdout:
+            transport = getattr(process.stdout, "_transport", None)
+            if transport: transport.close()
+        await cancel_tasks(read)
+        if waited is not None:
+            await asyncio.gather(waited, return_exceptions=True)
+        else:
+            await asyncio.gather(process.wait(), return_exceptions=True)
+
     try:
-        while process.poll() is None:
-            if cancelled.is_set(): raise InterruptedError("Operation aborted")
-            if time.monotonic() >= deadline: raise TimeoutError("bash timed out after 120 seconds")
-            ready, _, _ = select.select([process.stdout], [], [], 0.05)
-            if ready:
-                chunk = os.read(process.stdout.fileno(), 65_536); remaining = MAX_BASH_OUTPUT - len(output); output.extend(chunk[:remaining])
-                if len(chunk) > remaining: raise RuntimeError("bash output exceeded 10MB limit")
-        while chunk := os.read(process.stdout.fileno(), 65_536):
-            remaining = MAX_BASH_OUTPUT - len(output); output.extend(chunk[:remaining])
-            if len(chunk) > remaining: raise RuntimeError("bash output exceeded 10MB limit")
-    except BaseException:
-        if process.poll() is None:
-            try: os.killpg(process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError): pass
-        process.wait(); process.stdout.close()
+        done, _ = await asyncio.wait((creation, abort, timer), return_when=asyncio.FIRST_COMPLETED)
+        if creation in done: process = await creation
+        if abort in done:
+            await cancel_tasks(creation)
+            raise InterruptedError("Operation aborted")
+        if timer in done:
+            await cancel_tasks(creation)
+            raise TimeoutError(f"bash timed out after {BASH_TIMEOUT_SECONDS:g} seconds")
+        assert process is not None
+        assert process.stdout
+
+        output = bytearray()
+        stdout_eof = False
+        leader_exited = False
+        read = asyncio.create_task(process.stdout.read(65_536))
+        waited = asyncio.create_task(process.wait())
+        while not (stdout_eof and leader_exited):
+            monitored = [abort, timer, waited]
+            if read is not None: monitored.append(read)
+            done, _ = await asyncio.wait(monitored, return_when=asyncio.FIRST_COMPLETED)
+            if abort in done: raise InterruptedError("Operation aborted")
+            if timer in done: raise TimeoutError(f"bash timed out after {BASH_TIMEOUT_SECONDS:g} seconds")
+            if read is not None and read in done:
+                chunk = await read
+                read = None
+                if chunk:
+                    remaining_bytes = MAX_BASH_OUTPUT - len(output)
+                    output.extend(chunk[:remaining_bytes])
+                    if len(chunk) > remaining_bytes:
+                        raise RuntimeError("bash output exceeded 10MB limit")
+                    read = asyncio.create_task(process.stdout.read(65_536))
+                else:
+                    stdout_eof = True
+            if waited in done and not leader_exited:
+                await waited
+                leader_exited = True
+                try: os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError): pass
+
+        # The shell may have exited after starting redirected descendants which no
+        # longer hold stdout open. Its isolated process group must not outlive the tool.
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError): pass
+    except asyncio.CancelledError:
+        if process is not None: await kill_and_reap()
+        if cancelled.is_set(): raise InterruptedError("Operation aborted") from None
         raise
-    process.stdout.close()
+    except BaseException:
+        if process is not None: await kill_and_reap()
+        raise
+    finally:
+        await cancel_tasks(read, abort, timer)
+        if process is None: await cancel_tasks(creation)
+
     text = output.decode(errors="replace") or "(no output)"
     if process.returncode and text == "(no output)": raise RuntimeError(f"command exited with status {process.returncode}")
     if len(output) <= MAX_TOOL_OUTPUT: return text if not process.returncode else f"{text}\nError: command exited with status {process.returncode}"
@@ -119,16 +209,17 @@ def execute_bash(command: str, cancelled: threading.Event) -> str:
     return result if not process.returncode else f"{result}\nError: command exited with status {process.returncode}"
 
 
-def execute_tool(name: str, args: dict[str, str], cancelled: threading.Event | None = None) -> str:
-    cancelled = cancelled or threading.Event()
+async def execute_tool(name: str, args: dict[str, str], cancelled: asyncio.Event | None = None) -> str:
+    cancelled = cancelled or asyncio.Event()
     if cancelled.is_set(): raise InterruptedError("Operation aborted")
-    if name == "bash": return execute_bash(args["command"], cancelled)
+    if name == "bash": return await execute_bash(args["command"], cancelled)
     path = path_in_root(args["path"])
     if name == "read":
         text = path.read_text(encoding="utf-8")
         if cancelled.is_set(): raise InterruptedError("Operation aborted")
         return text[:100_000]
     if name == "write":
+        if cancelled.is_set(): raise InterruptedError("Operation aborted")
         path.parent.mkdir(parents=True, exist_ok=True)
         if cancelled.is_set(): raise InterruptedError("Operation aborted")
         path.write_text(args["content"], encoding="utf-8"); return "ok"
@@ -147,8 +238,8 @@ class Agent:
         self.skills, self.session, self.requester, self.on_tool = skills or [], session, requester, on_tool
         self.tools = tools if tools is not None else TOOL_DEFINITIONS
         self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
-        self.cancelled: threading.Event | None = None
-        self.active: dict | None = None; self.activity_lock = threading.Lock(); self.activity_generation = 0
+        self.cancelled: asyncio.Event | None = None
+        self.active: dict | None = None; self.activity_generation = 0
         listing = "\n".join(f"<skill>\n<name>{s['name']}</name>\n<description>{s['description']}</description>\n<location>{s['path']}</location>\n</skill>" for s in self.skills) or "(none)"
         project = f'\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="{ROOT / "AGENTS.md"}">\n{instructions}\n</project_instructions>\n\n</project_context>' if instructions else ""
         prompt = f"You are tiny-agent, a concise coding agent in {ROOT}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.{project}\n\n<available_skills>\n{listing}\n</available_skills>"
@@ -174,57 +265,36 @@ class Agent:
     def busy(self) -> bool: return self.cancelled is not None
 
     def abort(self) -> None:
-        connection = None
-        with self.activity_lock:
-            active, cancelled = self.active, self.cancelled
-            if cancelled and active and self.session and not active.get("abortRequested"):
-                record = {
-                    "type": "abortRequested", "operationId": active["operationId"],
-                    "operationKind": active["operationKind"], "phase": active["phase"], "reason": "escape",
-                }
-                if active.get("toolCallId"): record["toolCallId"] = active["toolCallId"]
-                active["abortRequested"] = self.session.request_abort(
-                    active["operationId"], cancelled, {"kind": "record", "record": record},
-                )
-                connection = active.get("connection")
-                active["connection"] = None
-            elif cancelled:
-                cancelled.set()
-        if connection:
-            try: connection.close()
-            except OSError: pass
+        active, cancelled = self.active, self.cancelled
+        if cancelled and active and self.session and not active.get("abortRequested"):
+            record = {
+                "type": "abortRequested", "operationId": active["operationId"],
+                "operationKind": active["operationKind"], "phase": active["phase"], "reason": "escape",
+            }
+            if active.get("toolCallId"): record["toolCallId"] = active["toolCallId"]
+            active["abortRequested"] = self.session.request_abort(
+                active["operationId"], cancelled, {"kind": "record", "record": record},
+            )
+        elif cancelled:
+            cancelled.set()
+        if cancelled and cancelled.is_set() and active:
+            task = active.get("task")
+            if task and task is not asyncio.current_task(): task.cancel()
 
-    def begin(self, operation_id: str, phase: str, tool_call_id: str | None = None, operation_kind: str = "run") -> threading.Event:
-        with self.activity_lock:
-            self.activity_generation += 1
-            self.cancelled = threading.Event()
-            self.active = {"generation": self.activity_generation, "operationId": operation_id, "operationKind": operation_kind, "phase": phase, "toolCallId": tool_call_id, "abortRequested": False, "connection": None}
-            return self.cancelled
+    def begin(self, operation_id: str, phase: str, tool_call_id: str | None = None, operation_kind: str = "run") -> asyncio.Event:
+        self.activity_generation += 1
+        self.cancelled = asyncio.Event()
+        self.active = {"generation": self.activity_generation, "operationId": operation_id, "operationKind": operation_kind, "phase": phase, "toolCallId": tool_call_id, "abortRequested": False, "task": asyncio.current_task()}
+        return self.cancelled
 
     def end(self) -> None:
-        with self.activity_lock:
-            self.cancelled = None; self.active = None
+        self.cancelled = None; self.active = None
 
-    def _install_connection(self, cancelled: threading.Event, connection: http.client.HTTPConnection) -> dict | None:
-        with self.activity_lock:
-            active = self.active
-            if not active or self.cancelled is not cancelled or cancelled.is_set():
-                try: connection.close()
-                except OSError: pass
-                return None
-            active["connection"] = connection
-            return active
-
-    def _clear_connection(self, active: dict, connection: http.client.HTTPConnection) -> None:
-        with self.activity_lock:
-            if self.active is active and active.get("connection") is connection:
-                active["connection"] = None
-
-    def _is_aborted(self, operation_id: str, cancelled: threading.Event) -> bool:
+    def _is_aborted(self, operation_id: str, cancelled: asyncio.Event) -> bool:
         operation = self.session.load()["operation"]
         return cancelled.is_set() or (operation.get("operationId") == operation_id and operation.get("abortRequested", False))
 
-    def _fail_aborted_attempt(self, operation_id: str, step_id: str, attempt_id: str, cancelled: threading.Event, usage: dict | None = None, cache_rate: bool = True) -> None:
+    def _fail_aborted_attempt(self, operation_id: str, step_id: str, attempt_id: str, cancelled: asyncio.Event, usage: dict | None = None, cache_rate: bool = True) -> None:
         failure = {"kind": "record", "record": {
             "type": "stepFailed", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id,
             "error": {"code": "aborted", "message": "Operation aborted"},
@@ -267,7 +337,7 @@ class Agent:
         prompt = sum(state["usage"][key] for key in ("input", "cacheRead", "cacheWrite"))
         if prompt: self.usage["cacheHitRate"] = state["usage"]["cacheRead"] / prompt * 100
 
-    def resume_session(self) -> str | None:
+    async def resume_session(self) -> str | None:
         if not self.session: return None
         self._restore_projection()
         while self.session.load()["operation"]["kind"] != "idle":
@@ -288,15 +358,15 @@ class Agent:
                 self._restore_projection()
                 continue
             if action["type"] == "startTool":
-                self._execute_recovered_tool(operation_id, action)
+                await self._execute_recovered_tool(operation_id, action)
                 self._restore_projection()
                 continue
             if action["type"] == "startStep":
                 if state["operation"]["kind"] == "compaction":
-                    self._continue_compaction(operation_id, action)
+                    await self._continue_compaction(operation_id, action)
                     self._restore_projection()
                     continue
-                answer = self._continue_operation(operation_id, action)
+                answer = await self._continue_operation(operation_id, action)
                 self._restore_projection()
                 return answer
             if action["type"] == "finish":
@@ -326,7 +396,7 @@ class Agent:
             facts.append({"kind": "entry", "id": fact_id, "entry": entry})
         self.session.append(*facts)
 
-    def _execute_recovered_tool(self, operation_id: str, action: dict) -> None:
+    async def _execute_recovered_tool(self, operation_id: str, action: dict) -> None:
         state = self.session.load(); step_id = state["operation"]["step"]["stepId"]
         tool = next((item for item in self.tools if item["function"]["name"] == action["toolName"]), None)
         if not tool: raise RuntimeError(f"Recovery tool unavailable: {action['toolName']}")
@@ -349,7 +419,7 @@ class Agent:
         aborted = False
         try:
             self.on_tool({"phase": "start", "name": action["toolName"], "args": action["arguments"]})
-            content = tool["execute"](action["arguments"], cancelled) if "execute" in tool else execute_tool(action["toolName"], action["arguments"], cancelled)
+            content = await tool["execute"](action["arguments"], cancelled) if "execute" in tool else await execute_tool(action["toolName"], action["arguments"], cancelled)
             result = {"type": "success"}
         except BaseException as error:
             aborted = self._is_aborted(operation_id, cancelled)
@@ -367,26 +437,20 @@ class Agent:
             self.session.append(entry(content, {"type": "synthetic", "reason": "interrupted"}))
         self.end(); self.on_tool({"phase": "end", "name": action["toolName"], "args": action["arguments"], "result": content})
 
-    def _continue_operation(self, operation_id: str, action: dict) -> str:
-        return self._run_operation(operation_id, action["contextThroughEntryId"], action)
+    async def _continue_operation(self, operation_id: str, action: dict) -> str:
+        return await self._run_operation(operation_id, action["contextThroughEntryId"], action)
 
-    def call_model(self, messages: list[dict], tools: list | None, cancelled: threading.Event) -> tuple[dict, dict, str]:
+    async def call_model(self, messages: list[dict], tools: list | None, cancelled: asyncio.Event) -> tuple[dict, dict, str]:
         key = os.getenv("OPENROUTER_API_KEY")
         if not key: raise RuntimeError("Set OPENROUTER_API_KEY")
         body = {"model": os.getenv("TINY_MODEL") or DEFAULT_MODEL, "messages": messages, **({"tools": tools} if tools else {})}
-        if self.requester: data = self.requester(body, cancelled)
+        if self.requester:
+            data = await self.requester(body, cancelled)
         else:
-            url = urlsplit(OPENROUTER_URL); connection = http.client.HTTPSConnection(url.hostname, timeout=120)
-            activity = self._install_connection(cancelled, connection)
-            if activity is None: raise InterruptedError("Operation aborted")
-            try:
-                connection.request("POST", url.path, json.dumps(body), {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "HTTP-Referer": "https://github.com/geminixiang/tiny-agent"})
-                response = connection.getresponse(); raw = response.read().decode()
-            finally:
-                self._clear_connection(activity, connection)
-                connection.close()
-            if response.status < 200 or response.status >= 300: raise RuntimeError(f"OpenRouter {response.status}: {raw}")
-            data = json.loads(raw)
+            data = await _post_json(OPENROUTER_URL, body, {
+                "Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/geminixiang/tiny-agent",
+            }, 120, cancelled)
         raw_usage = data.get("usage", {}); details = raw_usage.get("prompt_tokens_details", {})
         cache_read = details.get("cached_tokens", raw_usage.get("prompt_cache_hit_tokens", 0)); cache_write = details.get("cache_write_tokens", 0)
         usage = {"input": max(0, raw_usage.get("prompt_tokens", 0) - cache_read - cache_write), "output": raw_usage.get("completion_tokens", 0), "cacheRead": cache_read, "cacheWrite": cache_write}
@@ -411,7 +475,7 @@ class Agent:
         if error: record["error"] = {"code": "agent_error", "message": str(error)}
         self.session.append({"kind": "record", "record": record})
 
-    def run_agent_loop(self, text: str) -> str:
+    async def run_agent_loop(self, text: str) -> str:
         if not self.session: raise RuntimeError("Session is required")
         user = {"role": "user", "content": text}; user_id, operation_id = uuid7(), uuid7()
         self.session.append(
@@ -419,9 +483,9 @@ class Agent:
             {"kind": "record", "record": {"type": "runStarted", "operationId": operation_id, "operationKind": "run", "inputEntryId": user_id}},
         )
         self.messages.append(user); context_id = user_id
-        return self._run_operation(operation_id, context_id)
+        return await self._run_operation(operation_id, context_id)
 
-    def _run_operation(self, operation_id: str, context_id: str, next_step: dict | None = None) -> str:
+    async def _run_operation(self, operation_id: str, context_id: str, next_step: dict | None = None) -> str:
         model_tools = [{"type": tool["type"], "function": tool["function"]} for tool in self.tools]
         while True:
             if next_step:
@@ -430,7 +494,7 @@ class Agent:
             else:
                 step_id, attempt_id = self._attempt(operation_id, context_id)
             cancelled = self.begin(operation_id, "model")
-            try: answer, usage, stop_reason = self.call_model(self.messages, model_tools, cancelled)
+            try: answer, usage, stop_reason = await self.call_model(self.messages, model_tools, cancelled)
             except BaseException as error:
                 aborted = self._is_aborted(operation_id, cancelled); self.end()
                 self.session.append({"kind": "record", "record": {"type": "stepFailed", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id, "error": {"code": "aborted" if aborted else "model_error", "message": "Operation aborted" if aborted else str(error)}}})
@@ -489,7 +553,7 @@ class Agent:
                     cancelled = self.begin(operation_id, "tool", call["id"]); aborted = False
                     try:
                         self.on_tool({"phase": "start", "name": name, "args": args})
-                        content = tool["execute"](args, cancelled) if "execute" in tool else execute_tool(name, args, cancelled)
+                        content = await tool["execute"](args, cancelled) if "execute" in tool else await execute_tool(name, args, cancelled)
                         result_type = "success"
                     except BaseException as error:
                         aborted = self._is_aborted(operation_id, cancelled); content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
@@ -513,7 +577,7 @@ class Agent:
                     self.messages.append(skipped); context_id = skipped_id
                 self._finish(operation_id, "aborted"); return "Operation aborted."
 
-    def compact(self) -> str:
+    async def compact(self) -> str:
         if not self.session: raise RuntimeError("Session is required")
         state = self.session.load()
         messages = state["activeContext"]
@@ -537,13 +601,13 @@ class Agent:
             "retainedEntryIds": [item["id"] for item in retained],
             "sourceDigest": source_digest(self._full_state(), input_through_id),
         }})
-        result = self._continue_compaction(operation_id, {
+        result = await self._continue_compaction(operation_id, {
             "attempt": 1, "contextThroughEntryId": input_through_id,
         })
         self._restore_projection()
         return result
 
-    def _continue_compaction(self, operation_id: str, action: dict) -> str:
+    async def _continue_compaction(self, operation_id: str, action: dict) -> str:
         state = self.session.load(); operation = state["operation"]
         step_id, attempt_id = self._attempt(
             operation_id, action["contextThroughEntryId"], "compaction",
@@ -555,7 +619,7 @@ class Agent:
         old = messages[:-retained_count] if retained_count else messages
         cancelled = self.begin(operation_id, "compact", operation_kind="compaction")
         try:
-            summary, usage, stop_reason = self.call_model([
+            summary, usage, stop_reason = await self.call_model([
                 {"role": "system", "content": "Summarize this coding session compactly. Preserve decisions, changed files, errors, and next steps."},
                 {"role": "user", "content": json.dumps(old, ensure_ascii=False, separators=(",", ":"))},
             ], None, cancelled)
