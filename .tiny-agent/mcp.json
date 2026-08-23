@@ -3,7 +3,7 @@
         "github": {
             "url": "https://api.githubcopilot.com/mcp/",
             "tokenEnv": "GITHUB_MCP_TOKEN",
-            "allowedTools": ["get_file_contents", "search_code"],
+            "allowedTools": ["get_file_contents", "search_code", "list_issues"],
             "callTimeoutMs": 30000
         }
     }
