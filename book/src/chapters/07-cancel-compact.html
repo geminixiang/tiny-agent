@@ -74,6 +74,45 @@
 → 後續 model requests</code></pre>
 
 <h2 id="two-boundaries">兩個容易混淆的邊界</h2>
+<figure id="fig-07-compaction" aria-labelledby="fig-07-compaction-caption">
+    <table>
+        <thead>
+            <tr>
+                <th scope="col">Track</th>
+                <th scope="col">entry 1</th>
+                <th scope="col">entry 2</th>
+                <th scope="col">...</th>
+                <th scope="col">entry N-6</th>
+                <th scope="col">...</th>
+                <th scope="col">entry N</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <th scope="row">Track1：Active-context cut（給模型看）</th>
+                <td>entry 1 → 送摘要</td>
+                <td>entry 2 → 送摘要</td>
+                <td>... → 送摘要</td>
+                <td>entry N-6 → 送摘要</td>
+                <td>... → 原樣保留</td>
+                <td>entry N → 原樣保留</td>
+            </tr>
+            <tr>
+                <th scope="row">Track2：Durable source partition（給稽核／recovery看）</th>
+                <td>entry 1 → compactedEntryIds</td>
+                <td>entry 2 → compactedEntryIds</td>
+                <td>... → compactedEntryIds</td>
+                <td>entry N-6 → compactedEntryIds</td>
+                <td>... → retainedEntryIds</td>
+                <td>entry N → retainedEntryIds</td>
+            </tr>
+        </tbody>
+    </table>
+    <figcaption id="fig-07-compaction-caption">
+        圖6：兩軌共用同一個切點。即使連續進行第二次以上的compaction，這兩個切點仍然對齊——四語言實作都有一道「找不到user邊界就放棄本次compact」的防護，這道防護同時保證了合成的「上次摘要」訊息不會被算進這次的retained
+        tail。prior summary會參與Track1的摘要輸入，但不是Track2的source entry。
+    </figcaption>
+</figure>
 <h3>1. Active-context cut</h3>
 <p>
     用於決定本次摘要輸入：保留至少最近6 則<strong>message</strong>，再把cut向前移動到user

@@ -46,6 +46,24 @@
         }
     }
 }</code></pre>
+
+<figure class="step-flow" id="fig-01-loop" aria-labelledby="fig-01-loop-caption">
+    <ol>
+        <li>
+            <span class="step-label">messages</span>
+            <p>唯一延續狀態</p>
+        </li>
+        <li class="step-arrow" aria-hidden="true">→</li>
+        <li><span class="step-label">model(messages)</span></li>
+        <li class="step-arrow" aria-hidden="true">→</li>
+        <li><span class="step-label">依名稱找到 tool 並執行</span></li>
+        <li class="step-arrow" aria-hidden="true">→</li>
+        <li><span class="step-label">把 tool result 寫回 messages</span></li>
+        <li class="step-loop-back"><span aria-hidden="true">↻</span> 回到 messages，直到不再有 tool_calls</li>
+    </ol>
+    <figcaption id="fig-01-loop-caption">圖2：不可再刪的閉環——上面程式碼的形狀。</figcaption>
+</figure>
+
 <p>
     這段程式不理解「修 bug」或「查營收」。它只負責機械性的控制：呼叫模型、執行能力、保存結果、決定是否繼續。領域能力在
     tools；決策能力在 model；連續性在 messages。

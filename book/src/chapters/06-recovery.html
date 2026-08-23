@@ -117,6 +117,86 @@ planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
 </ul>
 <p>任何不一致都回傳blocked，不執行effect，也不寫 failed terminal。恢復原本configuration或明確abort，才是合法下一步。</p>
 
+<figure class="decision-tree" id="fig-06-planner" aria-labelledby="fig-06-planner-caption">
+    <ol>
+        <li>
+            <span class="gate">曾寫入 abortRequested？</span>——最優先，略過以下所有檢查
+            <ol>
+                <li><span class="outcome terminal">補齊未完成項後寫 Aborted 終局</span></li>
+            </ol>
+        </li>
+        <li>
+            <span class="gate">無 abortRequested、且無 stepAttempt？</span>
+            <ol>
+                <li><span class="outcome">開始 Attempt 1（本次plan決定，之後繼續執行）</span></li>
+            </ol>
+        </li>
+        <li>
+            <span class="gate">無 abortRequested、且有 stepAttempt？</span
+            >——不論這個attempt是還在進行還是已經<code>stepFailed</code>，都先過這一關
+            <ol>
+                <li>
+                    configurationDigest 不符 →
+                    <span class="outcome blocked">Blocked：configuration_changed（不寫終局，需人為介入）</span>
+                </li>
+                <li>
+                    digest相符，但 environmentIdentity 不符 →
+                    <span class="outcome blocked">Blocked：environment_changed（不寫終局，需人為介入）</span>
+                </li>
+                <li>
+                    digest與environment皆相符，且尚未settled
+                    <ol>
+                        <li>
+                            attempt = 1 →
+                            <span class="outcome">Retry：再送一次 attempt 2（本次plan決定，之後繼續執行）</span>
+                        </li>
+                        <li>
+                            attempt = 2 仍未settled →
+                            <span class="outcome blocked">Blocked：attempts_exhausted（不寫終局，需人為介入）</span>
+                        </li>
+                    </ol>
+                </li>
+                <li>
+                    digest與environment皆相符，且已 <code>stepFailed</code> →
+                    <span class="outcome terminal">Failed 終局（不可重試）</span
+                    >——注意：只有先通過上面兩關（digest、environment都相符），才會走到這裡；<code>stepFailed</code>本身不保證一定走向這個結局。
+                </li>
+            </ol>
+        </li>
+        <li>
+            <span class="gate">assistant已結算、某個 tool call 無 result？</span>——逐一檢查每個pending
+            tool，同樣先查environment再查declaration/digest
+            <ol>
+                <li>
+                    tool的 environmentIdentity 不符 →
+                    <span class="outcome blocked">Blocked：environment_changed（不寫終局，需人為介入）</span>
+                </li>
+                <li>
+                    tool declaration缺失或 definitionDigest 不符 →
+                    <span class="outcome blocked">Blocked：configuration_changed（不寫終局，需人為介入）</span>
+                </li>
+                <li>
+                    replay = safe，且 replayKey/digest 全部相符 →
+                    <span class="outcome">Replay：重播這個tool effect（本次plan決定，之後繼續執行）</span>
+                </li>
+                <li>
+                    tool本身記錄safe，但目前declaration非safe或replayKey不符 →
+                    <span class="outcome blocked">Blocked：replay_declaration_changed（不寫終局，需人為介入）</span>
+                </li>
+                <li>
+                    replay = never →
+                    <span class="outcome">補 Synthetic Interrupted，不重播（本次plan決定，之後繼續執行）</span>
+                </li>
+            </ol>
+        </li>
+    </ol>
+    <figcaption id="fig-06-planner-caption">
+        圖5：Recovery Planner的完整決策樹。configuration／environment／replay
+        declaration三道閘門永遠先於「這個attempt要不要retry」或「這個attempt算不算failed」被檢查——四種blocked
+        reason（configuration_changed／environment_changed／replay_declaration_changed／attempts_exhausted）在圖中各自獨立可見，不能合併成一種。只有Aborted與Failed是真正的終局；blocked不寫終局、需要人為介入；開始attempt、retry、replay與補synthetic都只是這次plan的決定，之後還會繼續執行。
+    </figcaption>
+</figure>
+
 <h2 id="synthetic">Synthetic Results 維護 Transcript</h2>
 <p>Recovery不是只改變internal state；它必須補出provider可接受的tool result：</p>
 <pre><code>invalidArguments → tool未執行

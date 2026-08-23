@@ -201,7 +201,10 @@ test("chapter 06 names all three deep-interface seams and all four recovery outc
 
 test("chapter 05 opens with three visually distinct paragraphs naming a core rule", () => {
     const html = pages.get("/05-durable-session/");
-    const leadBlock = html.slice(html.indexOf('<p class="lead">'), html.indexOf('<h2 id="promise"'));
+    const leadEnd = Math.min(
+        ...["<details", '<h2 id="promise"'].map((marker) => html.indexOf(marker)).filter((index) => index !== -1),
+    );
+    const leadBlock = html.slice(html.indexOf('<p class="lead">'), leadEnd);
     const paragraphs = [...leadBlock.matchAll(/<p[^>]*>[\s\S]*?<\/p>/g)];
     assert.equal(paragraphs.length, 3, "05章開場應為三個獨立段落，不是一段散文");
     assert.match(leadBlock, /<strong>核心規則/, "第二段應以<strong>明確命名核心規則");
@@ -227,6 +230,163 @@ test("chapter 08 backreferences the chapter 1 responsibility table inside the se
     const html = pages.get("/08-test-observe-secure/");
     const securitySection = html.slice(html.indexOf('<h2 id="security"'), html.indexOf('<h2 id="multi-tenant"'));
     assert.match(securitySection, /第1章的責任表/);
+});
+
+test("diagrams are controlled semantic HTML: no mermaid/svg/canvas/inline-style, every figure has a unique id and a matching figcaption", () => {
+    const seenIds = new Set();
+    let figureCount = 0;
+    for (const [route, html] of pages) {
+        assert.doesNotMatch(html, /<svg[\s>]/i, `${route} 不應含 <svg>`);
+        assert.doesNotMatch(html, /<canvas[\s>]/i, `${route} 不應含 <canvas>`);
+        assert.doesNotMatch(html, /mermaid/i, `${route} 不應含 mermaid`);
+        for (const figureMatch of html.matchAll(/<figure\b([^>]*)>([\s\S]*?)<\/figure>/g)) {
+            figureCount += 1;
+            const [, attrs, body] = figureMatch;
+            const idMatch = attrs.match(/\bid="([^"]+)"/);
+            assert.ok(idMatch, `${route} 有一個 <figure> 缺少 id`);
+            assert.ok(!seenIds.has(idMatch[1]), `figure id 重複：${idMatch[1]}`);
+            seenIds.add(idMatch[1]);
+            const labelledby = attrs.match(/aria-labelledby="([^"]+)"/);
+            assert.ok(labelledby, `${route} 的 <figure id="${idMatch[1]}"> 缺少 aria-labelledby`);
+            assert.match(
+                body,
+                new RegExp(`<figcaption id="${labelledby[1]}">`),
+                `${route} 的 <figure id="${idMatch[1]}"> 的 figcaption id 與 aria-labelledby 不匹配`,
+            );
+        }
+    }
+    assert.equal(figureCount, 8, `全書應恰好有 8 個 <figure>，實際 ${figureCount}`);
+});
+
+test("figures sit in the documented reading order relative to their anchoring prose", () => {
+    const home = pages.get("/");
+    assert.ok(home.indexOf('id="fig-home-map"') > home.indexOf("開始第一章"), "首頁圖1a應在「開始第一章」連結之後");
+    assert.ok(home.indexOf('id="fig-home-map"') < home.indexOf('id="path-title"'), "首頁圖1a應在學習路徑清單之前");
+
+    const ch01 = pages.get("/01-first-principles/");
+    assert.ok(ch01.indexOf('id="fig-01-loop"') > ch01.indexOf("runAgentLoop"), "01章圖2應在 runAgentLoop 程式碼之後");
+    assert.ok(ch01.indexOf('id="fig-01-loop"') < ch01.indexOf('id="why-coding-agent"'), "01章圖2應在下一個 h2 之前");
+
+    const ch05 = pages.get("/05-durable-session/");
+    assert.ok(ch05.indexOf('id="fig-05-bridge"') > ch05.indexOf("核心規則"), "05章圖3應在三段式開場之後");
+    assert.ok(ch05.indexOf('id="fig-05-bridge"') < ch05.indexOf('id="promise"'), "05章圖3應在 h2#promise 之前");
+    assert.ok(
+        ch05.indexOf('id="fig-05-intent-effect"') > ch05.indexOf('id="intent-effect"'),
+        "05章圖4應在 h2#intent-effect 之後",
+    );
+    assert.ok(ch05.indexOf('id="fig-05-intent-effect"') < ch05.indexOf('id="fact-kinds"'), "05章圖4應在下一個 h2 之前");
+
+    const ch06 = pages.get("/06-recovery/");
+    assert.ok(
+        ch06.indexOf('id="fig-06-planner"') > ch06.indexOf('id="configuration"'),
+        "06章圖5應在 h2#configuration 完整定義段落之後",
+    );
+    assert.ok(
+        ch06.indexOf('id="fig-06-planner"') > ch06.indexOf("任何不一致都回傳blocked"),
+        "06章圖5應在 configuration/environment/replayKey 定義段落結尾之後",
+    );
+    assert.ok(ch06.indexOf('id="fig-06-planner"') < ch06.indexOf('id="synthetic"'), "06章圖5應在 h2#synthetic 之前");
+
+    const ch07 = pages.get("/07-cancel-compact/");
+    assert.ok(
+        ch07.indexOf('id="fig-07-compaction"') > ch07.indexOf('id="two-boundaries"'),
+        "07章圖6應緊接在 h2#two-boundaries 之後",
+    );
+    assert.ok(ch07.indexOf('id="fig-07-compaction"') < ch07.indexOf("<h3>"), "07章圖6應在第一個 h3 之前");
+
+    const ch08 = pages.get("/08-test-observe-secure/");
+    assert.ok(
+        ch08.indexOf('id="fig-08-responsibility"') > ch08.indexOf("responsibility-backref"),
+        "08章圖7應在責任表回指句之後",
+    );
+    assert.ok(
+        ch08.indexOf('id="fig-08-responsibility"') < ch08.indexOf("Agent implementation與"),
+        "08章圖7應在既有安全邊界清單之前",
+    );
+    assert.ok(ch08.indexOf('id="fig-08-map"') > ch08.lastIndexOf("<h2 "), "08章圖1b應在最後一個 h2 之後");
+    assert.ok(ch08.indexOf('id="fig-08-map"') < ch08.indexOf('class="closure"'), "08章圖1b應在收束句之前");
+});
+
+test("figure 5 shows configuration/environment/replay gates before failed/retry/replay outcomes, with all four blocked reasons independently visible", () => {
+    const html = pages.get("/06-recovery/");
+    const figure = html.slice(
+        html.indexOf('id="fig-06-planner"'),
+        html.indexOf("</figure>", html.indexOf('id="fig-06-planner"')),
+    );
+    for (const reason of [
+        "configuration_changed",
+        "environment_changed",
+        "replay_declaration_changed",
+        "attempts_exhausted",
+    ]) {
+        assert.match(figure, new RegExp(reason), `圖5缺少 blocked reason: ${reason}`);
+    }
+    // configuration/environment 閘門必須先於 stepFailed 判斷出現在文件順序中（不能暗示 stepFailed 永遠先被檢查）
+    assert.ok(
+        figure.indexOf("configurationDigest 不符") < figure.indexOf("已 <code>stepFailed</code>"),
+        "圖5的 configuration 閘門應在 stepFailed 分支之前出現",
+    );
+    assert.match(
+        figure,
+        /只有先通過上面兩關/,
+        "圖5必須明確說明 stepFailed 不保證優先於 configuration/environment 檢查",
+    );
+});
+
+test("figure 5 only labels Aborted and Failed as terminal; blocked/retry/replay/start/synthetic nodes never say (終局)", () => {
+    const html = pages.get("/06-recovery/");
+    const figure = html.slice(
+        html.indexOf('id="fig-06-planner"'),
+        html.indexOf("</figure>", html.indexOf('id="fig-06-planner"')),
+    );
+    const outcomeSpans = [...figure.matchAll(/<span class="outcome([^"]*)">([\s\S]*?)<\/span>/g)];
+    assert.ok(outcomeSpans.length > 0, "圖5應至少有一個 outcome span");
+    let terminalCount = 0;
+    for (const [, classSuffix, text] of outcomeSpans) {
+        const isTerminal = classSuffix.includes("terminal");
+        if (isTerminal) {
+            terminalCount += 1;
+            assert.match(text, /終局/, `終局節點應包含「終局」字樣：${text}`);
+        } else {
+            assert.doesNotMatch(text, /（終局/, `非終局節點不應寫「（終局」：${text}`);
+        }
+    }
+    assert.equal(terminalCount, 2, "只有 Aborted 與 Failed 兩個節點應標記為 terminal");
+});
+
+test("figure 3 is collapsed by default via native <details>, not JavaScript", () => {
+    const html = pages.get("/05-durable-session/");
+    assert.match(html, /<details class="reading-branch">/, '05章應有預設收合的 <details class="reading-branch">');
+    assert.doesNotMatch(html, /<details class="reading-branch"[^>]*\bopen\b/, "圖3的 <details> 不應帶 open 屬性");
+});
+
+test("figure 6 and figure 7 captions disambiguate track alignment and responsibility-vs-process boundaries", () => {
+    const ch07 = pages.get("/07-cancel-compact/");
+    assert.match(ch07, /找不到user邊界就放棄本次compact/, "圖6 caption 應說明兩軌對齊的防護機制");
+    const ch08 = pages.get("/08-test-observe-secure/");
+    assert.match(ch08, /不是process邊界/, "圖7 caption 應明確排除「兩個process」的誤讀");
+});
+
+test("diagram CSS components degrade on narrow viewports and print via stylesheet rules, not inline style", async () => {
+    const css = await readFile(join(root, "src/assets/styles.css"), "utf8");
+    assert.match(css, /html \{[^}]*overflow-x: clip;/, "off-canvas drawer must not widen the document");
+    assert.match(css, /@media \(max-width: 860px\) \{[\s\S]*?\.step-flow ol \{ flex-direction: column; \}/);
+    assert.match(
+        css,
+        /@media \(max-width: 860px\) \{[\s\S]*?\.decision-tree ol, \.decision-tree ul \{ padding-left: \.85rem; \}/,
+    );
+    assert.match(css, /@media print \{[\s\S]*?\.step-flow li, \.decision-tree li \{ break-inside: avoid; \}/);
+    assert.doesNotMatch(css, /\.track-grid/, "track-grid 元件已被移除，07章圖6改用原生 table");
+    assert.doesNotMatch(css, /style="/);
+});
+
+test("figure 2's loop-back marker keeps the return condition readable to screen readers", () => {
+    const html = pages.get("/01-first-principles/");
+    assert.match(
+        html,
+        /<li class="step-loop-back"><span aria-hidden="true">↻<\/span> 回到 messages，直到不再有 tool_calls<\/li>/,
+        "loop-back li 本身不應整個 aria-hidden；只有↻符號用 span aria-hidden，終止條件文字須保留給 screen reader",
+    );
 });
 
 test("chapters contain substantial required concepts and exercises", () => {

@@ -13,6 +13,41 @@
     effect是否可能已經發生。本章要建立一種durable格式，讓上面這個問題有明確答案，而不是猜測。
 </p>
 
+<details class="reading-branch">
+    <summary>延伸閱讀：02章與05章其實是同一次request的兩個切面（選讀）</summary>
+    <figure class="step-flow" id="fig-05-bridge" aria-labelledby="fig-05-bridge-caption">
+        <ol>
+            <li>
+                <span class="step-label">寫入 stepAttempt</span>
+                <p>含 configurationDigest</p>
+            </li>
+            <li class="step-arrow" aria-hidden="true">→</li>
+            <li>
+                <span class="step-label">組 provider request</span>
+                <p>ch02 Provider Adapter</p>
+            </li>
+            <li class="step-arrow" aria-hidden="true">→</li>
+            <li>
+                <span class="step-label">OpenRouter 回應</span>
+                <p>含 reasoning/refusal 等 wire 欄位</p>
+            </li>
+            <li class="step-arrow" aria-hidden="true">→</li>
+            <li>
+                <span class="step-label">正規化成 canonical message</span>
+                <p>ch02 normalizeAssistantMessage</p>
+            </li>
+            <li class="step-arrow" aria-hidden="true">→</li>
+            <li>
+                <span class="step-label">寫入 settled assistant entry</span>
+                <p>對回同一筆 stepAttempt</p>
+            </li>
+        </ol>
+        <figcaption id="fig-05-bridge-caption">
+            圖3：一次 provider request 如何同時是 ch02 的正規化對象，也是 ch05 的 durable record。
+        </figcaption>
+    </figure>
+</details>
+
 <h2 id="promise">Durability 的精確定義</h2>
 <p>
     Tiny-agent承諾<strong>process-crash durability</strong>：一筆已接受的LF-terminated
@@ -47,6 +82,34 @@
 </p>
 <pre><code>錯誤：execute effect → persist result
 正確：persist toolStarted → execute effect → persist result</code></pre>
+
+<figure class="step-flow" id="fig-05-intent-effect" aria-labelledby="fig-05-intent-effect-caption">
+    <ol>
+        <li>
+            <span class="step-label">寫入 toolStarted</span>
+            <p>intent，含 replayKey</p>
+            <p class="crash-note">⚠ 此刻crash → recovery已知「打算做這件事」</p>
+        </li>
+        <li class="step-arrow" aria-hidden="true">→</li>
+        <li>
+            <span class="step-label">執行 effect</span>
+            <p>檔案系統／bash</p>
+            <p class="crash-note">
+                ⚠ 此刻crash → recovery依replay policy判斷：safe read可重播；write/edit/bash/MCP一律標interrupted
+            </p>
+        </li>
+        <li class="step-arrow" aria-hidden="true">→</li>
+        <li>
+            <span class="step-label">寫入 tool result entry</span>
+            <p class="crash-note">⚠ 此刻crash → 已完成，recovery什麼都不用做</p>
+        </li>
+    </ol>
+    <figcaption id="fig-05-intent-effect-caption">
+        圖4：intent先於effect的時間軸。usage只在tool本身會回報用量時才會有（例如部分MCP tool）；多數built-in
+        tool的一般tool result不會連帶一筆usage。
+    </figcaption>
+</figure>
+
 <p>
     <code>toolStarted</code>會保存有效arguments、tool identity、replay policy、environment identity與預留的result entry
     ID。Crash後看到 intent卻沒有result，就能明確得到：

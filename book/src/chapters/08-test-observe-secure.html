@@ -67,6 +67,58 @@ turn 4  89.7%</code></pre>
 <p class="responsibility-backref">
     還記得第1章的責任表嗎？這裡把「介面與部署」那一欄攤開，順便把「產生副作用」與「持續與恢復」兩欄裡「不該負責什麼」的部分也交代清楚。
 </p>
+<figure id="fig-08-responsibility" aria-labelledby="fig-08-responsibility-caption">
+    <table>
+        <thead>
+            <tr>
+                <th>責任</th>
+                <th>由誰負責</th>
+                <th>不該負責什麼</th>
+                <th>08章對應說明</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>選擇下一步</td>
+                <td>Model</td>
+                <td>直接取得 host credential</td>
+                <td>Model output視為untrusted input，不是trusted code的一部分</td>
+            </tr>
+            <tr>
+                <td>控制迴圈</td>
+                <td>Agent runtime</td>
+                <td>理解每個領域的業務規則</td>
+                <td>Agent implementation本身是trusted code，但執行的是untrusted model決定的tool calls</td>
+            </tr>
+            <tr>
+                <td>產生副作用</td>
+                <td>Tool adapter</td>
+                <td>自行改變授權範圍</td>
+                <td>
+                    MCP是Tool adapter，不是authorization或sandbox；<code>--plugin</code>是capability
+                    selector，不是tenant ACL
+                </td>
+            </tr>
+            <tr>
+                <td>持續與恢復</td>
+                <td>Session</td>
+                <td>猜測未記錄的 effect 是否成功</td>
+                <td>Session只保存durable facts；tenant scope是外層控制器的責任</td>
+            </tr>
+            <tr>
+                <td>介面與部署</td>
+                <td>CLI / trusted host</td>
+                <td>把 deployment security 假裝成 agent 功能</td>
+                <td>Tool registration是trusted deployment action；多租戶需要Execution Capsule（見下一節）</td>
+            </tr>
+        </tbody>
+    </table>
+    <figcaption id="fig-08-responsibility-caption">
+        圖7：第1章責任表的展開版。這裡的分欄是責任邊界，不是process邊界——同一個CLI process同時扮演「介面」與「執行Agent
+        runtime」兩個角色，不代表實際部署會拆成兩個服務。
+    </figcaption>
+</figure>
+
 <ul>
     <li>Agent implementation與 server operator是trusted code。</li>
     <li>Model output、prompt、repository與 dependency scripts視為untrusted。</li>
@@ -114,7 +166,33 @@ find eval/tasks -name 'verify.mjs' -o -name 'test.sh' | sort</code></pre>
     或 <code>--plugin</code>，就跨錯邊界了。
 </p>
 
-<p class="closure">你現在有一個能正確處理失敗、可觀測、並劃清邊界的迴圈——這是這本書目前教到的地方。</p>
+<figure class="step-flow" id="fig-08-map" aria-labelledby="fig-08-map-caption">
+    <ol>
+        <li>
+            <span class="step-label">第一部｜最小閉環</span>
+            <p>無壓力</p>
+        </li>
+        <li class="step-arrow" aria-hidden="true">→</li>
+        <li>
+            <span class="step-label">第二部｜能力邊界</span>
+            <p>能力壓力</p>
+        </li>
+        <li class="step-arrow" aria-hidden="true">→</li>
+        <li>
+            <span class="step-label">第三部｜可靠執行</span>
+            <p>失敗壓力</p>
+        </li>
+        <li class="step-arrow" aria-hidden="true">→</li>
+        <li class="step-here">
+            <span class="step-label">第四部｜走向 Production</span>
+            <p>觀測與信任壓力・你在這裡</p>
+        </li>
+    </ol>
+    <figcaption id="fig-08-map-caption">圖1：全書地圖（收束版）。</figcaption>
+</figure>
+
+<p class="closure">一個迴圈 + 一份誠實的帳本——現在你知道帳本怎麼記了。</p>
+<p>接下來要寫什麼，見<a href="/#planned-title">首頁的既有規劃</a>。</p>
 
 <aside class="note">
     <strong>繼續閱讀</strong
