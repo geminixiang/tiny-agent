@@ -391,17 +391,12 @@ pub fn project_idle(
     for value in &state.active_context {
         messages.push(serde_json::from_value(value.clone()).map_err(|error| error.to_string())?);
     }
-    let denominator = state.usage.input + state.usage.cache_read + state.usage.cache_write;
     let usage = UsageState {
         input: state.usage.input,
         output: state.usage.output,
         cache_read: state.usage.cache_read,
         cache_write: state.usage.cache_write,
-        cache_hit_rate: if denominator == 0 {
-            0.0
-        } else {
-            state.usage.cache_read as f64 / denominator as f64 * 100.0
-        },
+        cache_hit_rate: -1.0,
     };
     Ok(SessionProjection { messages, usage })
 }

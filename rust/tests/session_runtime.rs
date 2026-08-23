@@ -134,7 +134,15 @@ fn commits_normal_run_and_projects_idle_transcript_and_usage() {
     assert_eq!(projection.usage.input, 10);
     assert_eq!(projection.usage.output, 2);
     assert_eq!(projection.usage.cache_read, 3);
-    assert!((projection.usage.cache_hit_rate - 3.0 / 13.0 * 100.0).abs() < f64::EPSILON);
+    assert_eq!(projection.usage.cache_hit_rate, -1.0);
+    assert_eq!(
+        reopened
+            .latest_assistant_usage()
+            .unwrap()
+            .unwrap()
+            .cache_read,
+        3
+    );
     reopened.close().unwrap();
 }
 

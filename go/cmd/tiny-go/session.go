@@ -200,6 +200,57 @@ func (s *SessionStore) State() sessionState {
 	return s.state
 }
 
+func (s *SessionStore) LatestAssistantUsage() (Usage, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	facts := []map[string]any{}
+	for _, line := range bytes.Split(bytes.TrimSpace(s.data), []byte{'\n'})[1:] {
+		value, err := sessionDecode(line)
+		if err != nil {
+			continue
+		}
+		if transaction, ok := value.([]any); ok {
+			for _, raw := range transaction {
+				if fact, ok := raw.(map[string]any); ok {
+					facts = append(facts, fact)
+				}
+			}
+		} else if fact, ok := value.(map[string]any); ok {
+			facts = append(facts, fact)
+		}
+	}
+	byAttempt := map[string]Usage{}
+	for _, fact := range facts {
+		attempt, ok := fact["attemptId"].(string)
+		usage, usageOK := fact["usage"].(map[string]any)
+		if fact["kind"] != "usage" || !ok || !usageOK {
+			continue
+		}
+		number := func(key string) int {
+			switch value := usage[key].(type) {
+			case json.Number:
+				number, _ := value.Int64()
+				return int(number)
+			case float64:
+				return int(value)
+			}
+			return 0
+		}
+		byAttempt[attempt] = Usage{Input: number("input"), Output: number("output"), CacheRead: number("cacheRead"), CacheWrite: number("cacheWrite")}
+	}
+	for index := len(facts) - 1; index >= 0; index-- {
+		entry, ok := facts[index]["entry"].(map[string]any)
+		message, messageOK := entry["message"].(map[string]any)
+		attempt, attemptOK := entry["attemptId"].(string)
+		if facts[index]["kind"] != "entry" || !ok || !messageOK || message["role"] != "assistant" || !attemptOK {
+			continue
+		}
+		usage, found := byAttempt[attempt]
+		return usage, found
+	}
+	return Usage{}, false
+}
+
 // Commit appends one atomic JSONL transaction. Facts may contain references to
 // IDs allocated with NewID; missing top-level id/seq/timestamp fields are filled.
 func (s *SessionStore) Commit(facts []map[string]any) error {

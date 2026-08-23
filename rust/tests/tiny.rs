@@ -1560,7 +1560,7 @@ fn runs_tool_loop_and_compacts_through_mock() {
     assert_eq!(agent.usage.input, 135);
     assert_eq!(agent.usage.output, 15);
     assert_eq!(agent.usage.cache_read, 85);
-    assert!(agent.usage.cache_hit_rate > 49.9 && agent.usage.cache_hit_rate < 50.1); // compact
+    assert!(agent.usage.cache_hit_rate > 49.9 && agent.usage.cache_hit_rate < 50.1); // latest assistant request
     agent.run_agent_loop("question 1").unwrap();
     agent.run_agent_loop("question 2").unwrap();
     agent.run_agent_loop("question 3").unwrap();

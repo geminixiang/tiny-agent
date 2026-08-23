@@ -545,9 +545,12 @@ func (a *Agent) addUsage(usage Usage) {
 	a.Usage.Output += usage.Output
 	a.Usage.CacheRead += usage.CacheRead
 	a.Usage.CacheWrite += usage.CacheWrite
-	prompt := a.Usage.Input + a.Usage.CacheRead + a.Usage.CacheWrite
+}
+
+func (a *Agent) setLatestCacheHitRate(usage Usage) {
+	prompt := usage.Input + usage.CacheRead + usage.CacheWrite
 	if prompt > 0 {
-		rate := float64(a.Usage.CacheRead) / float64(prompt) * 100
+		rate := float64(usage.CacheRead) / float64(prompt) * 100
 		a.Usage.CacheHitRate = &rate
 	}
 }

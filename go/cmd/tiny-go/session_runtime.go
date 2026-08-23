@@ -95,10 +95,8 @@ func (a *Agent) projectSession() error {
 		a.Messages = append(a.Messages, message)
 	}
 	a.Usage = Usage{Input: int(state.Usage.Input), Output: int(state.Usage.Output), CacheRead: int(state.Usage.CacheRead), CacheWrite: int(state.Usage.CacheWrite)}
-	prompt := a.Usage.Input + a.Usage.CacheRead + a.Usage.CacheWrite
-	if prompt > 0 {
-		rate := float64(a.Usage.CacheRead) / float64(prompt) * 100
-		a.Usage.CacheHitRate = &rate
+	if usage, ok := a.Session.LatestAssistantUsage(); ok {
+		a.setLatestCacheHitRate(usage)
 	}
 	return nil
 }
@@ -176,6 +174,7 @@ func (a *Agent) failModelResponse(run durableRun, response ModelResponse, err er
 }
 
 func (a *Agent) settleFailedAssistant(run *durableRun, response ModelResponse, err error) error {
+	a.setLatestCacheHitRate(response.Usage)
 	if a.Session == nil {
 		return err
 	}
@@ -189,6 +188,7 @@ func (a *Agent) settleFailedAssistant(run *durableRun, response ModelResponse, e
 }
 
 func (a *Agent) settleAssistant(run *durableRun, response ModelResponse, finish bool) (string, error) {
+	a.setLatestCacheHitRate(response.Usage)
 	if a.Session == nil {
 		return "", nil
 	}

@@ -402,6 +402,7 @@ ${list}
             const state = await this.session.load();
             this.restoreState(state);
             if (state.operation.kind === "idle") {
+                await this.restoreLatestCacheHitRate();
                 if (recoveryError) throw recoveryError;
                 return;
             }
@@ -527,6 +528,7 @@ ${list}
                     },
                     { kind: "usage", operationId, attemptId, usage: response.usage },
                 ]);
+                this.setLatestCacheHitRate(response.usage);
             } catch (error) {
                 recoveryError = error instanceof Error ? error : Error(String(error));
                 await this.session.append([
@@ -550,8 +552,29 @@ ${list}
     private restoreState(state: Awaited<ReturnType<SessionStore["load"]>>) {
         this.messages = [this.messages[0], ...state.activeContext];
         this.usage = { ...state.usage };
-        const totalPrompt = this.usage.input + this.usage.cacheRead + this.usage.cacheWrite;
-        if (totalPrompt > 0) this.usage.cacheHitRate = (this.usage.cacheRead / totalPrompt) * 100;
+    }
+    private setLatestCacheHitRate(usage: Usage) {
+        const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
+        if (prompt > 0) this.usage.cacheHitRate = (usage.cacheRead / prompt) * 100;
+    }
+    private async restoreLatestCacheHitRate() {
+        if (!this.session) return;
+        const facts = await this.session.facts();
+        const usageByAttempt = new Map<string, Usage>();
+        for (const fact of facts) {
+            if (fact.kind !== "usage" || typeof fact.attemptId !== "string") continue;
+            usageByAttempt.set(fact.attemptId, fact.usage as Usage);
+        }
+        for (const fact of facts.toReversed()) {
+            const entry = fact.entry as Record<string, unknown> | undefined;
+            const message = entry?.message as Record<string, unknown> | undefined;
+            if (fact.kind !== "entry" || entry?.type !== "message" || message?.role !== "assistant") continue;
+            const requestUsage = usageByAttempt.get(String(entry.attemptId));
+            if (!requestUsage) continue;
+            const prompt = requestUsage.input + requestUsage.cacheRead + requestUsage.cacheWrite;
+            if (prompt > 0) this.setLatestCacheHitRate(requestUsage);
+            return;
+        }
     }
     private syntheticRecoveryFact(stepId: string, result: SyntheticResult): SessionFactInput {
         return {
@@ -669,8 +692,6 @@ ${list}
         this.usage.cacheWrite += cacheWrite;
         const prompt = input + cacheRead + cacheWrite,
             cacheHitRate = prompt > 0 ? (cacheRead / prompt) * 100 : undefined;
-        const totalPrompt = this.usage.input + this.usage.cacheRead + this.usage.cacheWrite;
-        if (totalPrompt > 0) this.usage.cacheHitRate = (this.usage.cacheRead / totalPrompt) * 100;
         const choice = data.choices?.[0];
         const usage = { input, output: u.completion_tokens ?? 0, cacheRead, cacheWrite };
         if (!choice?.message) throw new ModelResponseError("OpenRouter returned no assistant message", usage);
@@ -774,6 +795,7 @@ ${list}
                 },
                 { kind: "usage", operationId, attemptId, usage },
             ]);
+            this.setLatestCacheHitRate(usage);
             this.messages.push(answer);
             contextThroughEntryId = assistantEntryId;
             if (!answer.tool_calls?.length) {
@@ -949,6 +971,7 @@ ${list}
             buildConfiguration(this.systemPrompt, this.tools),
         );
         this.restoreState(await this.session.load());
+        await this.restoreLatestCacheHitRate();
         return result;
     }
 

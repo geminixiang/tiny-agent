@@ -1043,6 +1043,7 @@ impl Agent {
             let projection = project_idle(&state, &system_prompt)?;
             self.messages = projection.messages;
             self.usage = projection.usage;
+            self.restore_latest_cache_hit_rate()?;
             return Ok(());
         }
         self.recover_session()?;
@@ -1050,6 +1051,24 @@ impl Agent {
         let projection = project_idle(&state, &system_prompt)?;
         self.messages = projection.messages;
         self.usage = projection.usage;
+        self.restore_latest_cache_hit_rate()?;
+        Ok(())
+    }
+
+    fn restore_latest_cache_hit_rate(&mut self) -> Result<(), String> {
+        let Some(request) = self
+            .session
+            .as_ref()
+            .map(Session::latest_assistant_usage)
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(());
+        };
+        let prompt = request.input + request.cache_read + request.cache_write;
+        if prompt > 0 {
+            self.usage.cache_hit_rate = request.cache_read as f64 / prompt as f64 * 100.0;
+        }
         Ok(())
     }
 
@@ -1329,6 +1348,7 @@ impl Agent {
         )?;
         self.messages = projection.messages;
         self.usage = projection.usage;
+        self.restore_latest_cache_hit_rate()?;
         Ok(())
     }
 

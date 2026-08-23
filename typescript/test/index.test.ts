@@ -621,7 +621,7 @@ test("persists malformed normal-run usage atomically and restores its ledger", a
         try {
             const restored = new Agent([], fetch, reopened);
             await restored.resumeSession();
-            assert.deepEqual(restored.usage, { ...item.usage, cacheHitRate: 0 });
+            assert.deepEqual(restored.usage, item.usage);
             assert.deepEqual((await reopened.load()).usage, item.usage);
         } finally {
             await reopened.close();
@@ -738,7 +738,7 @@ test("persists malformed recovery-attempt usage atomically and restores its ledg
         try {
             const restored = new Agent([], fetch, reopened);
             await restored.resumeSession();
-            assert.deepEqual(restored.usage, { ...item.usage, cacheHitRate: 0 });
+            assert.deepEqual(restored.usage, item.usage);
             assert.deepEqual((await reopened.load()).usage, item.usage);
             assert.equal((await facts(reopened)).filter((fact) => fact.kind === "usage").length, 1);
         } finally {
@@ -939,9 +939,19 @@ test("REGRESSION: resuming after a safe-tool replay finishes cleanly once the mo
     try {
         await writeFile("replay-regression.txt", "replayed");
         const readTool = builtInTools.find((tool) => tool.name === "read")!;
-        const settled = await appendSettledToolStep(session, new Agent([], fetch, session, () => {}, "", () => {}, [readTool]), [
-            { id: "safe-call", name: "read", arguments: '{"path":"replay-regression.txt"}' },
-        ]);
+        const settled = await appendSettledToolStep(
+            session,
+            new Agent(
+                [],
+                fetch,
+                session,
+                () => {},
+                "",
+                () => {},
+                [readTool],
+            ),
+            [{ id: "safe-call", name: "read", arguments: '{"path":"replay-regression.txt"}' }],
+        );
         const resultEntryId = session.allocateId();
         await session.append({
             kind: "record",
@@ -973,7 +983,15 @@ test("REGRESSION: resuming after a safe-tool replay finishes cleanly once the mo
                 { status: 200 },
             );
         }) as typeof fetch;
-        const agent = new Agent([], fetcher, session, () => {}, "", () => {}, [readTool]);
+        const agent = new Agent(
+            [],
+            fetcher,
+            session,
+            () => {},
+            "",
+            () => {},
+            [readTool],
+        );
 
         await agent.resumeSession();
 
@@ -1415,7 +1433,6 @@ test("durable compaction abort wins while its append races model settlement", as
             output: 2,
             cacheRead: 0,
             cacheWrite: 0,
-            cacheHitRate: 0,
         });
         assert.deepEqual((await session.load()).operation, { kind: "idle" });
     } finally {
@@ -1492,7 +1509,6 @@ test("persists malformed model usage when a compaction abort races response vali
             output: 5,
             cacheRead: 0,
             cacheWrite: 0,
-            cacheHitRate: 0,
         });
     } finally {
         await session.close();
@@ -2369,7 +2385,7 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
         output: 15,
         cacheRead: 85,
         cacheWrite: 0,
-        cacheHitRate: 38.63636363636363,
+        cacheHitRate: 50,
     });
     assert.equal(await executeTool("read", { path: "made.txt" }), "yes");
     const persisted = await facts(session);

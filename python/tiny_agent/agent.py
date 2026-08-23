@@ -356,8 +356,8 @@ class Agent:
 
     def add_usage(self, usage: dict, cache_rate: bool = True) -> None:
         for key in ("input", "output", "cacheRead", "cacheWrite"): self.usage[key] += usage.get(key, 0)
-        prompt = self.usage["input"] + self.usage["cacheRead"] + self.usage["cacheWrite"]
-        if cache_rate and prompt: self.usage["cacheHitRate"] = self.usage["cacheRead"] / prompt * 100
+        prompt = sum(usage.get(key, 0) for key in ("input", "cacheRead", "cacheWrite"))
+        if cache_rate and prompt: self.usage["cacheHitRate"] = usage.get("cacheRead", 0) / prompt * 100
 
     def _replay_declaration(self, tool: dict) -> tuple[str, str]:
         if tool is TOOL_DEFINITIONS[1]:
@@ -379,9 +379,19 @@ class Agent:
     def _restore_projection(self) -> None:
         state = self.session.load()
         self.messages = [self.messages[0], *state["activeContext"]]
-        self.usage.update(state["usage"])
-        prompt = sum(state["usage"][key] for key in ("input", "cacheRead", "cacheWrite"))
-        if prompt: self.usage["cacheHitRate"] = state["usage"]["cacheRead"] / prompt * 100
+        self.usage = {**state["usage"]}
+        usage_by_attempt = {
+            fact["attemptId"]: fact["usage"] for fact in self._facts()
+            if fact.get("kind") == "usage" and "attemptId" in fact
+        }
+        for fact in reversed(self._facts()):
+            entry = fact.get("entry", {})
+            if fact.get("kind") != "entry" or entry.get("type") != "message" or entry.get("message", {}).get("role") != "assistant": continue
+            request_usage = usage_by_attempt.get(entry.get("attemptId"))
+            if not request_usage: continue
+            prompt = sum(request_usage.get(key, 0) for key in ("input", "cacheRead", "cacheWrite"))
+            if prompt: self.usage["cacheHitRate"] = request_usage.get("cacheRead", 0) / prompt * 100
+            break
 
     async def resume_session(self) -> str | None:
         if not self.session: return None

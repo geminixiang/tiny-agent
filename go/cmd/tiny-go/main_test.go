@@ -394,7 +394,7 @@ func TestModelToolLoopAndCache(t *testing.T) {
 	if calls != 2 || agent.Usage.Input != 135 || agent.Usage.CacheRead != 85 || agent.Usage.Output != 15 {
 		t.Fatalf("calls=%d usage=%+v", calls, agent.Usage)
 	}
-	if rate := *agent.Usage.CacheHitRate; rate != float64(85)/220*100 {
+	if rate := *agent.Usage.CacheHitRate; rate != float64(60)/120*100 {
 		t.Fatalf("cache rate: %v", rate)
 	}
 	b, _ := os.ReadFile(filepath.Join(cwd, "made.txt"))

@@ -414,7 +414,7 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
 
         session = tiny.Session.create(tiny.ROOT); agent = tiny.Agent(session=session, requester=request, on_tool=events.append)
         self.assertEqual(await agent.run_agent_loop("make it"), "done")
-        self.assertAlmostEqual(agent.usage["cacheHitRate"], 85 / 220 * 100)
+        self.assertAlmostEqual(agent.usage["cacheHitRate"], 60 / 120 * 100)
         self.assertEqual({key: agent.usage[key] for key in ("input", "output", "cacheRead", "cacheWrite")}, {"input": 135, "output": 15, "cacheRead": 85, "cacheWrite": 0})
         self.assertEqual((tiny.ROOT / "made.txt").read_text(encoding="utf-8"), "yes")
         self.assertEqual([event["phase"] for event in events], ["start", "end"])

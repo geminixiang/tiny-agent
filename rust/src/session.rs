@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value};
 
 use crate::session_reducer::{SessionState, reduce_session};
-use crate::{model_name, uuid7, uuid7_at};
+use crate::{UsageJSON, model_name, uuid7, uuid7_at};
 
 pub type SessionFact = Map<String, Value>;
 
@@ -451,6 +451,51 @@ impl Session {
                 )
             })
             .collect())
+    }
+
+    pub fn latest_assistant_usage(&self) -> Result<Option<UsageJSON>, String> {
+        let inner = self.inner.lock().unwrap();
+        if inner.closed {
+            return Err("Session is closed".into());
+        }
+        let facts = parse_facts(&inner.bytes)?;
+        let mut by_attempt = std::collections::HashMap::new();
+        for fact in &facts {
+            if fact.get("kind").and_then(Value::as_str) != Some("usage") {
+                continue;
+            }
+            let (Some(attempt_id), Some(value)) = (
+                fact.get("attemptId").and_then(Value::as_str),
+                fact.get("usage"),
+            ) else {
+                continue;
+            };
+            if let Ok(usage) = serde_json::from_value::<UsageJSON>(value.clone()) {
+                by_attempt.insert(attempt_id.to_string(), usage);
+            }
+        }
+        for fact in facts.iter().rev() {
+            let Some(entry) = fact.get("entry").and_then(Value::as_object) else {
+                continue;
+            };
+            let role = entry
+                .get("message")
+                .and_then(Value::as_object)
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str);
+            if fact.get("kind").and_then(Value::as_str) != Some("entry")
+                || entry.get("type").and_then(Value::as_str) != Some("message")
+                || role != Some("assistant")
+            {
+                continue;
+            }
+            return Ok(entry
+                .get("attemptId")
+                .and_then(Value::as_str)
+                .and_then(|attempt_id| by_attempt.get(attempt_id))
+                .copied());
+        }
+        Ok(None)
     }
 
     pub fn load(&self) -> Result<SessionState, String> {
