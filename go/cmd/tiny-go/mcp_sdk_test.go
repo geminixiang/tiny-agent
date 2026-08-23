@@ -85,7 +85,7 @@ func TestSDKAutoNegotiatesStatefulLegacyMCP(t *testing.T) {
 	if err := loaded.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(calls, ",") != "server/discover,server/discover,initialize,notifications/initialized,tools/list,tools/call" {
+	if strings.Join(calls, ",") != "server/discover,initialize,notifications/initialized,tools/list,tools/call" {
 		t.Fatalf("calls=%v", calls)
 	}
 }

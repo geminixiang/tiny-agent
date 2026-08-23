@@ -99,27 +99,75 @@ func (b *mcpBoundedBody) Read(p []byte) (int, error) {
 }
 
 type mcpLifecycleTransport struct {
-	base        http.RoundTripper
+	base  http.RoundTripper
+	state *mcpLifecycleState
+}
+type mcpLifecycleState struct {
+	mu          sync.Mutex
 	allowLegacy bool
 }
 
-func (t mcpLifecycleTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if t.allowLegacy || request.Method != http.MethodPost {
-		return t.base.RoundTrip(request)
-	}
-	body, err := io.ReadAll(request.Body)
+func (t mcpLifecycleTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	method, err := mcpRequestMethod(r)
 	if err != nil {
 		return nil, err
 	}
-	request.Body.Close()
-	request.Body = io.NopCloser(bytes.NewReader(body))
-	var envelope struct {
-		Method string `json:"method"`
-	}
-	if json.Unmarshal(body, &envelope) == nil && envelope.Method == "initialize" {
+	t.state.mu.Lock()
+	allowed := t.state.allowLegacy
+	t.state.allowLegacy = false
+	t.state.mu.Unlock()
+	if method == "initialize" && !allowed {
 		return nil, errors.New("MCP legacy fallback was not authorized by server/discover")
 	}
-	return t.base.RoundTrip(request)
+	response, err := t.base.RoundTrip(r)
+	if err != nil || method != "server/discover" || response == nil || response.Body == nil {
+		return response, err
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	if readErr != nil {
+		return nil, readErr
+	}
+	t.state.mu.Lock()
+	t.state.allowLegacy = mcpLegacyDiscoverSignal(body)
+	t.state.mu.Unlock()
+	return response, nil
+}
+func mcpRequestMethod(r *http.Request) (string, error) {
+	if r.Method != http.MethodPost || r.Body == nil {
+		return "", nil
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var e struct {
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return "", nil
+	}
+	return e.Method, nil
+}
+func mcpLegacyDiscoverSignal(body []byte) bool {
+	var e struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &e) == nil && e.Error != nil {
+		return e.Error.Code == -32601
+	}
+	lines := []string{}
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, "data:") {
+			lines = append(lines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	return json.Unmarshal([]byte(strings.Join(lines, "\n")), &e) == nil && e.Error != nil && e.Error.Code == -32601
 }
 
 type mcpAuthTransport struct {
@@ -327,11 +375,7 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	if config.Token != "" {
 		base = mcpAuthTransport{base: base, header: config.AuthHeader, token: config.Token}
 	}
-	allowLegacy, err := preflightMCPProtocol(ctx, endpoint, base)
-	if err != nil {
-		return nil, err
-	}
-	clone.Transport = mcpLifecycleTransport{base: base, allowLegacy: allowLegacy}
+	clone.Transport = mcpLifecycleTransport{base: base, state: &mcpLifecycleState{}}
 	transport := &sdk.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &clone, DisableStandaloneSSE: true, MaxRetries: -1}
 	session, err := sdk.NewClient(&sdk.Implementation{Name: "tiny-agent", Version: "0.1.0"}, nil).Connect(ctx, transport, nil)
 	if err != nil {
@@ -351,7 +395,7 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	for _, name := range config.AllowedTools {
 		allowed[name] = true
 	}
-	endpointDigest := digestMCPIdentity(map[string]any{"endpoint": endpoint, "auth": config.AuthHeader, "authEnv": config.AuthEnv, "protocol": mcp.protocolVersion})
+	endpointDigest := digestMCPIdentity(map[string]any{"endpoint": endpoint, "auth": config.AuthHeader, "protocol": mcp.protocolVersion})
 	seenRemote := map[string]bool{}
 	seenMapped := map[string]bool{}
 	for _, remote := range listed.Tools {
@@ -442,44 +486,6 @@ func listAllMCPTools(ctx context.Context, session *sdk.ClientSession) (*sdk.List
 		seen[listed.NextCursor] = true
 		cursor = listed.NextCursor
 	}
-}
-
-func preflightMCPProtocol(ctx context.Context, endpoint string, client http.RoundTripper) (bool, error) {
-	body := []byte(`{"jsonrpc":"2.0","id":0,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"tiny-agent","version":"0.1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}`)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return false, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json, text/event-stream")
-	request.Header.Set("Mcp-Protocol-Version", modernMCPVersion)
-	response, err := client.RoundTrip(request)
-	if err != nil {
-		return false, fmt.Errorf("MCP protocol preflight: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		if _, err := io.Copy(io.Discard, response.Body); err != nil {
-			return false, fmt.Errorf("MCP protocol preflight: %w", err)
-		}
-		return false, fmt.Errorf("MCP protocol preflight: HTTP %d", response.StatusCode)
-	}
-	var envelope struct {
-		Result json.RawMessage `json:"result"`
-		Error  *struct {
-			Code int `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
-		return false, fmt.Errorf("MCP protocol preflight: %w", err)
-	}
-	if len(envelope.Result) > 0 {
-		return false, nil
-	}
-	if envelope.Error != nil && envelope.Error.Code == -32601 {
-		return true, nil
-	}
-	return false, errors.New("MCP protocol preflight rejected server/discover")
 }
 
 func digestMCPIdentity(value any) string {

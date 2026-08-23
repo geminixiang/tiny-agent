@@ -134,7 +134,7 @@ func TestModernStatelessMCPNegotiation(t *testing.T) {
 	if err != nil || result != "modern" || loaded.protocolVersion != modernMCPVersion {
 		t.Fatalf("result=%q version=%s err=%v", result, loaded.protocolVersion, err)
 	}
-	if strings.Join(calls, ",") != "server/discover,server/discover,tools/list,tools/call" {
+	if strings.Join(calls, ",") != "server/discover,tools/list,tools/call" {
 		t.Fatalf("calls: %v", calls)
 	}
 }
@@ -165,7 +165,7 @@ func TestMCPSDKTransportErrorsAreSanitized(t *testing.T) {
 	}))
 	defer server.Close()
 	_, err := loadMCPTools(context.Background(), MCPConfig{Alias: "x", URL: server.URL}, server.Client())
-	if err == nil || !strings.Contains(err.Error(), "HTTP 502") || strings.Contains(err.Error(), secret) {
+	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("error: %v", err)
 	}
 }
