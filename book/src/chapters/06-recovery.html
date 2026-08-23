@@ -11,6 +11,11 @@ planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
     reason。這樣的分離讓每個crash prefix都能用deterministic fixtures驗證。
 </p>
 
+<p class="three-interfaces-summary">
+    這是本書第三次看到同一招：把複雜度收進一個小而深的介面。Tool的execute、SessionStore的commit/load，都靠這招把I/O細節藏起來，呼叫方不需要知道內部怎麼做——但它們自己就會真的去讀檔、寫檔、呼叫bash，是會碰I/O的殼。reducer/planner把這招再往前推一步：不只是藏細節，還把「決定要做什麼」和「真的去做」拆成兩個函數——一個不碰I/O的純函數（reducer、planner本身），配一個真的會碰I/O的殼（SessionStore、Agent
+    loop）。
+</p>
+
 <h2 id="state">Reducer 重建什麼</h2>
 <pre data-lang="ts"><code>type SessionState = {
     transcript: Message[];
@@ -50,6 +55,13 @@ planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
 <p>
     Live 429、5xx或timeout會寫<code>stepFailed</code>，不會自動retry。這份設計只允許process crash造成的unknown
     attempt多一次機會，避免無界重複計費。
+</p>
+<p class="four-outcomes">
+    其實有四種可能結局，不是兩種：<strong>retry</strong>（同一個model
+    attempt再送一次）、<strong>replay</strong>（同一個safe tool
+    effect再執行一次）、<strong>blocked</strong>（configuration或replay宣告不符，需要人為介入，不寫終局）、<strong>failed</strong>（<code>stepFailed</code>是live
+    request已經記錄的失敗，runtime選擇不自動retry）。混淆retry與replay是最常見的誤解；混淆blocked與failed是第二常見——blocked代表「recovery在目前configuration/environment下無法安全自動繼續，必須停下來交給人」，failed代表「這次live
+    request已經寫入<code>stepFailed</code>，runtime選擇不自動retry，避免無界重複計費」；timeout之類的錯誤本來就無法證明server端到底有沒有處理完，failed因此不等於「已經確定這次沒成功」。
 </p>
 
 <h2 id="planner-table">核心 Recovery 決策</h2>
@@ -142,6 +154,10 @@ cat ../schemas/session/planner-fixtures/interrupted-never-tool.expected.json</co
     比較兩份 plan：safe read 必須包含相同的 <code>replayKey</code> 與 environment identity；never tool 只能 materialize
     <code>interrupted</code> synthetic result，不能再次執行 effect。再將 fixture 的 current configuration 中任一 digest
     改掉，重跑 planner 測試，預期結果應是 blocked，而且原 JSONL bytes 不得改變。
+</p>
+
+<p class="bridge">
+    以上都是process crash後被動發現的狀態。如果使用者按下Esc是主動要求中斷，情況又不一樣——下一章處理這條路徑。
 </p>
 
 <aside class="note">

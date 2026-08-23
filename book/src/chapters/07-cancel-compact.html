@@ -56,6 +56,13 @@
     這也是為什麼durable Session不只靠<code>AbortController.signal.aborted</code>：memory flag無法解釋crash後的先後順序。
 </p>
 
+<p class="transition">
+    你剛才看到的abort
+    race，其實是「系統要主動改變狀態，且必須先durable才能改」這類問題的一種——這裡改的是operation本身進行到哪一步。compaction是同一類問題的另一種：它自己也是一個獨立的durable
+    operation（跟run一樣有<code>compactionStarted</code>/<code>operationFinished</code>），但它要多處理一層——active
+    context該怎麼跟著變。
+</p>
+
 <h2 id="compaction">Compaction 不是刪除歷史</h2>
 <p>
     <code>/compact</code>呼叫目前model產生summary，然後重建active context。原始facts仍留在append-only
@@ -116,6 +123,10 @@ grep -R 'abortRequested\|compactionStarted\|sourceDigest' \
     檢查順序：先找到 <code>abortRequested</code>，再確認對應的 attempt/tool reconciliation 與
     <code>operationFinished</code>；compaction 則比對 source partition、<code>sourceDigest</code> 與 materialized
     retained tail。最後重跑同一個 recovery test，確認第二次 resume 不會再次呼叫模型或重複寫入 outcome。
+</p>
+
+<p class="bridge">
+    到此為止，你已經有一個能正確處理失敗的迴圈——下一章要問的是，你怎麼知道它平常做得好不好、做得對不對。
 </p>
 
 <aside class="note">

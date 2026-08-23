@@ -1,7 +1,16 @@
 <p class="lead">
+    設想這個情境：Agent剛送出 <code>bash rm old.log &amp;&amp; deploy.sh</code>，process在tool執行中被<code
+        >kill -9</code
+    >。重開後，<code>deploy.sh</code>到底跑了沒有？（這只是用來說明問題的情境，不需要你實際執行。）
+</p>
+
+<p><strong>核心規則：intent必須早於effect。</strong></p>
+
+<p>
     如果假設model
     request永遠成功、tool不會失敗、process也不會突然停止，那麼幾十行就能寫出一個Agent。真正困難的是失敗之後的狀態：process
-    crash之後，系統仍必須判斷工作是否已接受、model是否呼叫過，以及tool effect是否可能已經發生。
+    crash之後，系統仍必須判斷工作是否已接受、model是否呼叫過，以及tool
+    effect是否可能已經發生。本章要建立一種durable格式，讓上面這個問題有明確答案，而不是猜測。
 </p>
 
 <h2 id="promise">Durability 的精確定義</h2>
@@ -99,6 +108,10 @@
     repair與pure reduction。刪除這個module會讓複雜度重新散回agent loop，因此它是真正通過deletion test的deep module。
 </p>
 
+<p class="deep-interface-callback">
+    稍後你會再看到這個形狀：<code>commit</code>/<code>load</code>隱藏了seq、ID、framing，這是全書第二次看到「小而深的介面」。
+</p>
+
 <h2 id="hands-on">親手驗證</h2>
 <p>先用標準函式庫親手建立一個最小 append-only JSONL，再故意留下沒有 LF 的 torn tail。這個練習不需要模型或網路：</p>
 <pre data-lang="sh"><code>tmp=$(mktemp)
@@ -120,6 +133,8 @@ node --import tsx --test --test-name-pattern="repairs a torn tail" test/session.
     最後開啟 <code>schemas/session/fixtures/torn-tail.jsonl</code> 與其 expected state，對照手作版本和 canonical
     contract 的差別。
 </p>
+
+<p class="bridge">重建出的SessionState本身不能決定下一步該做什麼——這是下一章Planner的責任。</p>
 
 <aside class="note">
     <strong>閱讀原始碼</strong

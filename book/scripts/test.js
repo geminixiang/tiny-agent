@@ -158,6 +158,77 @@ test("repository source links point at real, current code", async () => {
     }
 });
 
+test("chapters 01-07 close with a reader-facing bridge, chapter 08 closes with a closure", () => {
+    for (const chapter of chapters) {
+        const html = pages.get(`/${chapter.slug}/`);
+        const isLast = chapter.slug === "08-test-observe-secure";
+        const markerClass = isLast ? "closure" : "bridge";
+        const otherClass = isLast ? "bridge" : "closure";
+        const matches = [...html.matchAll(new RegExp(`<p class="${markerClass}">`, "g"))];
+        assert.equal(matches.length, 1, `${chapter.slug} 應恰好有一個 <p class="${markerClass}">`);
+        assert.ok(!html.includes(`<p class="${otherClass}">`), `${chapter.slug} 不應包含 <p class="${otherClass}">`);
+        // 必須落在最後一個 <h2> 之後的尾段，不能是章節中段的過渡句
+        const lastH2Index = html.lastIndexOf("<h2 ");
+        const markerIndex = html.indexOf(`<p class="${markerClass}">`);
+        assert.ok(markerIndex > lastH2Index, `${chapter.slug} 的 ${markerClass} 應該在最後一個 <h2> 之後`);
+    }
+});
+
+test("chapter 03 and 05 foreshadow the deep-interface callback exactly once each with the fixed anchor phrase", () => {
+    const anchor = "稍後你會再看到這個形狀";
+    for (const slug of ["03-tools", "05-durable-session"]) {
+        const html = pages.get(`/${slug}/`);
+        const callbacks = [...html.matchAll(/<p class="deep-interface-callback">([\s\S]*?)<\/p>/g)];
+        assert.equal(callbacks.length, 1, `${slug} 應恰好有一個 deep-interface-callback`);
+        assert.ok(callbacks[0][1].includes(anchor), `${slug} 的 callback 必須包含固定錨句「${anchor}」`);
+    }
+});
+
+test("chapter 06 names all three deep-interface seams and all four recovery outcomes", () => {
+    const html = pages.get("/06-recovery/");
+    const summary = html.match(/<p class="three-interfaces-summary">([\s\S]*?)<\/p>/);
+    assert.ok(summary, "06章缺少 three-interfaces-summary");
+    assert.match(summary[1], /第三次/);
+    assert.match(summary[1], /Tool的execute/);
+    assert.match(summary[1], /SessionStore的commit\/load/);
+    assert.match(summary[1], /reducer\/planner/);
+    const outcomes = html.match(/<p class="four-outcomes">([\s\S]*?)<\/p>/);
+    assert.ok(outcomes, "06章缺少 four-outcomes");
+    for (const term of ["retry", "replay", "blocked", "failed"]) {
+        assert.match(outcomes[1], new RegExp(`<strong>${term}</strong>`, "i"), `four-outcomes 缺少 ${term}`);
+    }
+});
+
+test("chapter 05 opens with three visually distinct paragraphs naming a core rule", () => {
+    const html = pages.get("/05-durable-session/");
+    const leadBlock = html.slice(html.indexOf('<p class="lead">'), html.indexOf('<h2 id="promise"'));
+    const paragraphs = [...leadBlock.matchAll(/<p[^>]*>[\s\S]*?<\/p>/g)];
+    assert.equal(paragraphs.length, 3, "05章開場應為三個獨立段落，不是一段散文");
+    assert.match(leadBlock, /<strong>核心規則/, "第二段應以<strong>明確命名核心規則");
+});
+
+test("chapter 07 places a transition between the abort-race and compaction sections", () => {
+    const html = pages.get("/07-cancel-compact/");
+    const raceIndex = html.indexOf('<h2 id="race">');
+    const compactionIndex = html.indexOf('<h2 id="compaction">');
+    const transitionIndex = html.indexOf('<p class="transition">');
+    assert.ok(
+        transitionIndex > raceIndex && transitionIndex < compactionIndex,
+        "transition 應位於 race 與 compaction 兩個 h2 之間",
+    );
+    assert.match(
+        html.slice(raceIndex, compactionIndex),
+        /durable\s*\n?\s*operation/i,
+        "transition 必須說明 compaction 本身也是 durable operation",
+    );
+});
+
+test("chapter 08 backreferences the chapter 1 responsibility table inside the security section", () => {
+    const html = pages.get("/08-test-observe-secure/");
+    const securitySection = html.slice(html.indexOf('<h2 id="security"'), html.indexOf('<h2 id="multi-tenant"'));
+    assert.match(securitySection, /第1章的責任表/);
+});
+
 test("chapters contain substantial required concepts and exercises", () => {
     const all = chapters.map((chapter) => pages.get(`/${chapter.slug}/`)).join("\n");
     for (const term of [
