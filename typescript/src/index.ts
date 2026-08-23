@@ -195,13 +195,57 @@ export async function loadSkills(extra: string[] = []) {
 
 type StopReason = "stop" | "length" | "toolUse";
 
+function normalizeAssistantMessage(value: unknown): Message {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("invalid assistant message");
+    const message = value as Record<string, unknown>;
+    if (message.role !== "assistant") throw Error("invalid assistant message role");
+    if (message.content !== null && typeof message.content !== "string") throw Error("invalid assistant content");
+    const normalized: Message = { role: "assistant", content: message.content };
+    if (message.tool_calls === undefined || message.tool_calls === null) return normalized;
+    if (!Array.isArray(message.tool_calls) || !message.tool_calls.length) throw Error("invalid assistant tool_calls");
+    normalized.tool_calls = message.tool_calls.map((value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("invalid assistant tool call");
+        const call = value as Record<string, unknown>;
+        const fn = call.function;
+        if (
+            typeof call.id !== "string" ||
+            !call.id ||
+            call.type !== "function" ||
+            !fn ||
+            typeof fn !== "object" ||
+            Array.isArray(fn)
+        )
+            throw Error("invalid assistant tool call");
+        const definition = fn as Record<string, unknown>;
+        if (typeof definition.name !== "string" || !definition.name || typeof definition.arguments !== "string")
+            throw Error("invalid assistant tool call function");
+        return {
+            id: call.id,
+            type: "function",
+            function: { name: definition.name, arguments: definition.arguments },
+        };
+    });
+    return normalized;
+}
+
 function stopReason(finishReason: string | null | undefined, message: Message): StopReason {
     if (finishReason === "length") return "length";
-    if (finishReason === "tool_calls" || finishReason === "function_call") return "toolUse";
+    if (finishReason === "tool_calls" || finishReason === "function_call") {
+        if (!message.tool_calls?.length) throw Error(`Provider finish_reason ${finishReason} requires tool calls`);
+        return "toolUse";
+    }
     if (finishReason === "content_filter" || finishReason === "network_error")
         throw Error(`Provider finish_reason: ${finishReason}`);
     if (finishReason && finishReason !== "stop") throw Error(`Unknown provider finish_reason: ${finishReason}`);
     return message.tool_calls?.length ? "toolUse" : "stop";
+}
+
+function validateRunResponse<T extends { message: Message; stopReason: StopReason; usage: Usage }>(
+    response: T | undefined,
+): T | undefined {
+    if (response?.stopReason === "length" && !response.message.tool_calls?.length)
+        throw new ModelResponseError("Provider finish_reason length requires tool calls", response.usage);
+    return response;
 }
 
 function parseToolArgs(value: string): ToolArgs {
@@ -471,13 +515,15 @@ ${list}
                 },
             });
             try {
-                const response = await this.runModelRequest(
-                    this.messages,
-                    toolDefinitions(this.tools),
-                    "model",
-                    operationId,
-                    stepId,
-                    attemptId,
+                const response = validateRunResponse(
+                    await this.runModelRequest(
+                        this.messages,
+                        toolDefinitions(this.tools),
+                        "model",
+                        operationId,
+                        stepId,
+                        attemptId,
+                    ),
                 );
                 if (!response) continue;
                 const assistantEntryId = this.session.allocateId();
@@ -642,14 +688,16 @@ ${list}
         const choice = data.choices?.[0];
         const usage = { input, output: u.completion_tokens ?? 0, cacheRead, cacheWrite };
         if (!choice?.message) throw new ModelResponseError("OpenRouter returned no assistant message", usage);
+        let message: Message;
         let reason: StopReason;
         try {
-            reason = stopReason(choice.finish_reason, choice.message);
+            message = normalizeAssistantMessage(choice.message);
+            reason = stopReason(choice.finish_reason, message);
         } catch (error) {
             throw new ModelResponseError(error instanceof Error ? error.message : String(error), usage);
         }
         return {
-            message: choice.message as Message,
+            message,
             stopReason: reason,
             usage,
             cacheHitRate,
@@ -687,13 +735,15 @@ ${list}
             });
             let response: Awaited<ReturnType<Agent["callModel"]>> | undefined;
             try {
-                response = await this.runModelRequest(
-                    this.messages,
-                    toolDefinitions(this.tools),
-                    "model",
-                    operationId,
-                    stepId,
-                    attemptId,
+                response = validateRunResponse(
+                    await this.runModelRequest(
+                        this.messages,
+                        toolDefinitions(this.tools),
+                        "model",
+                        operationId,
+                        stepId,
+                        attemptId,
+                    ),
                 );
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);

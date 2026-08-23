@@ -1,4 +1,4 @@
-.PHONY: install install-ts install-go install-py install-rs test test-mcp test-ts test-go test-py test-rs check check-ts check-go check-py check-rs eval build build-ts build-go build-py build-rs format format-ts format-go format-py format-rs
+.PHONY: install install-ts install-go install-py install-rs test test-eval test-mcp test-ts test-go test-py test-rs check check-ts check-go check-py check-rs eval build build-ts build-go build-py build-rs format format-ts format-go format-py format-rs
 
 install: install-ts install-go install-py install-rs
 
@@ -15,7 +15,10 @@ install-py:
 install-rs:
 	cargo install --path ./rust --force
 
-test: test-ts test-go test-py test-rs
+test: test-ts test-go test-py test-rs test-eval
+
+test-eval:
+	cd typescript && node --import tsx --test ../eval/run.test.ts
 
 test-rs:
 	cd rust && cargo test --offline

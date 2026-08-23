@@ -207,6 +207,279 @@ test("persists durable run/model lifecycle and restores an idle session", async 
     await reopened.close();
 });
 
+test("normalizes provider-only assistant fields before durable persistence", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-03T04:00:00.000Z"));
+    const agent = new Agent(
+        [],
+        (async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "stop",
+                            message: {
+                                role: "assistant",
+                                content: "ok",
+                                refusal: null,
+                                reasoning: "provider-only",
+                                reasoning_details: [{ type: "summary", text: "provider-only" }],
+                            },
+                        },
+                    ],
+                    usage: { prompt_tokens: 7, completion_tokens: 2 },
+                }),
+                { status: 200 },
+            )) as typeof fetch,
+        session,
+    );
+
+    assert.equal(await agent.runAgentLoop("hello"), "ok");
+    const assistant = (await facts(session)).find(
+        (fact) => fact.kind === "entry" && fact.entry?.message?.role === "assistant",
+    ).entry.message;
+    assert.deepEqual(assistant, { role: "assistant", content: "ok" });
+    await session.close();
+
+    const reopened = await SessionStore.open(session.id, dir);
+    try {
+        const restored = new Agent([], fetch, reopened);
+        await restored.resumeSession();
+        assert.deepEqual(restored.messages.at(-1), { role: "assistant", content: "ok" });
+    } finally {
+        await reopened.close();
+    }
+});
+
+test("normalizes provider-only tool call fields and executes the canonical call", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-03T04:05:00.000Z"));
+    let requests = 0;
+    let executed = 0;
+    const agent = new Agent(
+        [],
+        (async () => {
+            requests++;
+            return new Response(
+                JSON.stringify(
+                    requests === 1
+                        ? {
+                              choices: [
+                                  {
+                                      finish_reason: "tool_calls",
+                                      message: {
+                                          role: "assistant",
+                                          content: null,
+                                          reasoning: "provider-only",
+                                          tool_calls: [
+                                              {
+                                                  id: "call-extra",
+                                                  type: "function",
+                                                  index: 0,
+                                                  provider: "extra",
+                                                  function: {
+                                                      name: "lookup",
+                                                      arguments: '{"query":"revenue"}',
+                                                      parsed_arguments: { query: "revenue" },
+                                                  },
+                                              },
+                                          ],
+                                      },
+                                  },
+                              ],
+                              usage: { prompt_tokens: 8, completion_tokens: 3 },
+                          }
+                        : {
+                              choices: [{ finish_reason: "stop", message: { role: "assistant", content: "42" } }],
+                              usage: { prompt_tokens: 9, completion_tokens: 1 },
+                          },
+                ),
+                { status: 200 },
+            );
+        }) as typeof fetch,
+        session,
+        () => {},
+        "",
+        () => {},
+        [
+            {
+                name: "lookup",
+                description: "Look up a fact.",
+                parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+                async execute(args) {
+                    executed++;
+                    assert.deepEqual(args, { query: "revenue" });
+                    return "42";
+                },
+            },
+        ],
+    );
+
+    assert.equal(await agent.runAgentLoop("lookup"), "42");
+    assert.equal(executed, 1);
+    const assistant = (await facts(session)).find((fact) => fact.kind === "entry" && fact.entry?.message?.tool_calls)
+        .entry.message;
+    assert.deepEqual(assistant, {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+            {
+                id: "call-extra",
+                type: "function",
+                function: { name: "lookup", arguments: '{"query":"revenue"}' },
+            },
+        ],
+    });
+    await session.close();
+});
+
+test("rejects malformed provider assistant shapes and persists usage once", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-03T04:10:00.000Z"));
+    const agent = new Agent(
+        [],
+        (async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        {
+                            finish_reason: "tool_calls",
+                            message: {
+                                role: "assistant",
+                                content: null,
+                                tool_calls: [
+                                    {
+                                        id: "bad",
+                                        type: "function",
+                                        function: { name: "read", arguments: { path: "README.md" } },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                    usage: { prompt_tokens: 13, completion_tokens: 4 },
+                }),
+                { status: 200 },
+            )) as typeof fetch,
+        session,
+    );
+
+    await assert.rejects(() => agent.runAgentLoop("bad provider shape"), /invalid assistant tool call function/);
+    const persisted = await facts(session);
+    assert.equal(persisted.filter((fact) => fact.kind === "usage").length, 1);
+    assert.deepEqual(persisted.find((fact) => fact.kind === "usage").usage, {
+        input: 13,
+        output: 4,
+        cacheRead: 0,
+        cacheWrite: 0,
+    });
+    assert.equal(persisted.filter((fact) => fact.record?.type === "stepFailed").length, 1);
+    assert.equal(persisted.at(-1).record.outcome, "failed");
+    await session.close();
+
+    const reopened = await SessionStore.open(session.id, dir);
+    try {
+        const restored = new Agent([], fetch, reopened);
+        await restored.resumeSession();
+        assert.deepEqual((await reopened.load()).usage, { input: 13, output: 4, cacheRead: 0, cacheWrite: 0 });
+        assert.equal((await facts(reopened)).filter((fact) => fact.kind === "usage").length, 1);
+    } finally {
+        await reopened.close();
+    }
+});
+
+test("rejects tool finish reasons without calls and durably settles failed", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    for (const finishReason of ["tool_calls", "function_call"]) {
+        const session = await openStore();
+        const agent = new Agent(
+            [],
+            (async () =>
+                new Response(
+                    JSON.stringify({
+                        choices: [{ finish_reason: finishReason, message: { role: "assistant", content: null } }],
+                        usage: { prompt_tokens: 12, completion_tokens: 3 },
+                    }),
+                    { status: 200 },
+                )) as typeof fetch,
+            session,
+        );
+
+        await assert.rejects(() => agent.runAgentLoop("invalid tool finish"), /requires tool calls/);
+        const persisted = await facts(session);
+        assert.equal(persisted.filter((fact) => fact.kind === "usage").length, 1);
+        assert.deepEqual(persisted.find((fact) => fact.kind === "usage").usage, {
+            input: 12,
+            output: 3,
+            cacheRead: 0,
+            cacheWrite: 0,
+        });
+        assert.equal(persisted.filter((fact) => fact.record?.type === "stepFailed").length, 1);
+        assert.equal(persisted.at(-1).record.outcome, "failed");
+        assert.deepEqual((await session.load()).operation, { kind: "idle" });
+        await session.close();
+
+        const reopened = await SessionStore.open(session.id, dir);
+        try {
+            const restored = new Agent([], fetch, reopened);
+            await restored.resumeSession();
+            await restored.resumeSession();
+            assert.deepEqual((await reopened.load()).operation, { kind: "idle" });
+            assert.equal((await facts(reopened)).filter((fact) => fact.kind === "usage").length, 1);
+        } finally {
+            await reopened.close();
+        }
+    }
+});
+
+test("fails length without calls durably instead of leaking an invalid session fact", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    for (const content of ["  partial answer  ", "\n"] as const) {
+        const session = await openStore();
+        const agent = new Agent(
+            [],
+            (async () =>
+                new Response(
+                    JSON.stringify({
+                        choices: [{ finish_reason: "length", message: { role: "assistant", content } }],
+                        usage: { prompt_tokens: 14, completion_tokens: 5 },
+                    }),
+                    { status: 200 },
+                )) as typeof fetch,
+            session,
+        );
+
+        await assert.rejects(() => agent.runAgentLoop("truncate"), /Provider finish_reason length requires tool calls/);
+        const persisted = await facts(session);
+        assert.equal(
+            persisted.filter((fact) => fact.kind === "entry" && fact.entry?.message?.role === "assistant").length,
+            0,
+        );
+        assert.equal(persisted.filter((fact) => fact.kind === "usage").length, 1);
+        assert.deepEqual(persisted.find((fact) => fact.kind === "usage").usage, {
+            input: 14,
+            output: 5,
+            cacheRead: 0,
+            cacheWrite: 0,
+        });
+        assert.equal(persisted.filter((fact) => fact.record?.type === "stepFailed").length, 1);
+        assert.equal(persisted.at(-1).record.outcome, "failed");
+        assert.deepEqual((await session.load()).operation, { kind: "idle" });
+        await session.close();
+
+        const reopened = await SessionStore.open(session.id, dir);
+        try {
+            const restored = new Agent([], fetch, reopened);
+            await restored.resumeSession();
+            await restored.resumeSession();
+            assert.deepEqual((await reopened.load()).operation, { kind: "idle" });
+            assert.equal((await facts(reopened)).filter((fact) => fact.kind === "usage").length, 1);
+        } finally {
+            await reopened.close();
+        }
+    }
+});
+
 test("persists failed and truncated model outcomes", async () => {
     process.env.OPENROUTER_API_KEY = "test";
     const failedSession = await openStore(new Date("2026-08-04T00:00:00Z"));

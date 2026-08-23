@@ -25,7 +25,13 @@ type Result = {
     detail: string;
 };
 
-function run(command: string, args: string[], cwd: string, timeoutMs: number, env = process.env): Promise<CommandResult> {
+function run(
+    command: string,
+    args: string[],
+    cwd: string,
+    timeoutMs: number,
+    env = process.env,
+): Promise<CommandResult> {
     return new Promise((done, fail) => {
         const child = spawn(command, args, {
             cwd,
@@ -51,6 +57,35 @@ function run(command: string, args: string[], cwd: string, timeoutMs: number, en
     });
 }
 
+export function sessionStatsFromJsonl(text: string) {
+    const facts = text
+        .trim()
+        .split("\n")
+        .slice(1)
+        .flatMap((line) => {
+            const value: unknown = JSON.parse(line);
+            return Array.isArray(value) ? value : [value];
+        });
+    let tokens = 0;
+    let toolCalls = 0;
+    for (const value of facts) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        const fact = value as Record<string, unknown>;
+        if (fact.kind === "usage" && fact.usage && typeof fact.usage === "object") {
+            const usage = fact.usage as Record<string, unknown>;
+            for (const name of ["input", "output"]) {
+                if (typeof usage[name] === "number") tokens += usage[name];
+            }
+        }
+        if (fact.kind !== "entry" || !fact.entry || typeof fact.entry !== "object") continue;
+        const entry = fact.entry as Record<string, unknown>;
+        if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
+        const message = entry.message as Record<string, unknown>;
+        if (message.role === "assistant" && Array.isArray(message.tool_calls)) toolCalls += message.tool_calls.length;
+    }
+    return { tokens, toolCalls };
+}
+
 async function sessionStats(workspace: string) {
     const dir = join(workspace, ".tiny-agent/sessions");
     let files: string[];
@@ -59,21 +94,12 @@ async function sessionStats(workspace: string) {
     } catch {
         return { tokens: 0, toolCalls: 0 };
     }
-    const latest = files.filter((file) => file.endsWith(".jsonl")).sort().at(-1);
+    const latest = files
+        .filter((file) => file.endsWith(".jsonl"))
+        .sort()
+        .at(-1);
     if (!latest) return { tokens: 0, toolCalls: 0 };
-    const records = (await readFile(join(dir, latest), "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-    let tokens = 0;
-    let toolCalls = 0;
-    for (const record of records) {
-        if (record.usage) {
-            tokens += record.usage.input + record.usage.output;
-        }
-        toolCalls += record.message?.tool_calls?.length ?? 0;
-    }
-    return { tokens, toolCalls };
+    return sessionStatsFromJsonl(await readFile(join(dir, latest), "utf8"));
 }
 
 async function evaluate(task: string, agent: string): Promise<Result> {
@@ -94,15 +120,7 @@ async function evaluate(task: string, agent: string): Promise<Result> {
         if (staged.code !== 0) throw new Error(`Could not stage eval fixture: ${staged.stderr}`);
         const committed = await run(
             "git",
-            [
-                "-c",
-                "user.name=tiny-eval",
-                "-c",
-                "user.email=eval@tiny-agent.local",
-                "commit",
-                "-qm",
-                "eval fixture",
-            ],
+            ["-c", "user.name=tiny-eval", "-c", "user.email=eval@tiny-agent.local", "commit", "-qm", "eval fixture"],
             workspace,
             10_000,
         );
@@ -167,7 +185,9 @@ async function main() {
     if (results.some((result) => !result.passed)) process.exitCode = 1;
 }
 
-main().catch((error) => {
-    console.error(error.message);
-    process.exitCode = 1;
-});
+const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain)
+    main().catch((error) => {
+        console.error(error.message);
+        process.exitCode = 1;
+    });
