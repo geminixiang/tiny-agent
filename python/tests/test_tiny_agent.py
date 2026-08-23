@@ -422,6 +422,60 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[0]["model"], os.getenv("TINY_MODEL") or tiny.DEFAULT_MODEL)
         session.close()
 
+    async def test_provider_fields_are_normalized_before_session_persistence(self):
+        response = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "hello",
+                    "reasoning": "provider-only",
+                    "reasoning_details": [{"type": "summary", "text": "provider-only"}],
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {},
+        }
+        session = tiny.Session.create(tiny.ROOT)
+        agent = tiny.Agent(session=session, requester=lambda *_: async_value(response))
+        self.assertEqual(await agent.run_agent_loop("hi"), "hello")
+        assistant = next(message for message in agent.messages if message["role"] == "assistant")
+        self.assertEqual(assistant, {"role": "assistant", "content": "hello"})
+        self.assertNotIn("provider-only", session.path.read_text(encoding="utf-8"))
+        session.close()
+
+    async def test_provider_tool_call_fields_are_normalized(self):
+        responses = iter([
+            {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning": "provider-only",
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "index": 0,
+                            "function": {"name": "read", "arguments": '{"path":"README.md"}', "extra": True},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {},
+            },
+            {"choices": [{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}], "usage": {}},
+        ])
+        session = tiny.Session.create(tiny.ROOT)
+        agent = tiny.Agent(session=session, requester=lambda *_: async_value(next(responses)))
+        self.assertEqual(await agent.run_agent_loop("read"), "done")
+        assistant = next(message for message in agent.messages if message.get("tool_calls"))
+        self.assertEqual(assistant["tool_calls"], [{
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "read", "arguments": '{"path":"README.md"}'},
+        }])
+        self.assertNotIn("provider-only", session.path.read_text(encoding="utf-8"))
+        session.close()
+
     async def test_model_failure_and_length_are_terminal(self):
         session = tiny.Session.create(tiny.ROOT)
         agent = tiny.Agent(session=session, requester=lambda *_: async_value((_ for _ in ())).throw(RuntimeError("provider failed")))
