@@ -1,14 +1,14 @@
 # 主流 Coding Agent 長對話壓縮比較
 
-> 查核日期：2026-08-20。這裡的「壓縮」是縮小後續送給模型的 active context；session 原始紀錄是否保留，是另一件事。
+> 外部實作查核日期：2026-08-20；tiny-agent 現況更新：2026-08-23。這裡的「壓縮」是縮小後續送給模型的 active context；session 原始紀錄是否保留，是另一件事。
 
 ## 先看結論
 
-`tiny-agent` 的 `/compact` 是 **client-side、由目前設定的 DeepSeek 模型產生摘要**：它透過 OpenRouter Chat Completions 發出另一個 LLM request，不是本機演算法壓縮，也沒有使用 OpenRouter/OpenAI/Anthropic 的 provider-side compaction API。成功後，記憶體 context 變成 `system + 摘要 + 最近 6 則 message`；JSONL 則追加 compaction record，保留先前 audit trail。[tiny-agent 實作](../typescript/src/index.ts)
+`tiny-agent`的`/compact`是**client-side、由目前設定的模型產生摘要**：它透過OpenRouter Chat Completions發出另一個LLM request，不是本機演算法壓縮，也沒有使用OpenRouter/OpenAI/Anthropic的provider-side compaction API。它先從reducer materialized active context選擇切點：保留至少最近6則message，再向前移到user boundary，避免拆散完整turn。成功後，active context變成`system + 摘要 + retained message tail`。Canonical transactional JSONL則另外記錄durable source message-entry prefix的partition、digest、materialized retained tail及operation facts，保留先前audit trail。[tiny-agent實作](../typescript/src/index.ts)
 
 | 實作                                | 壓縮機制                                                                                                            | 觸發門檻                                                                                     | 保留近期內容                                                                                                | 持久化與 resume                                                                                                                                       |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **tiny-agent（目前）**              | 將較舊 messages JSON 化後，送到目前的 `deepseek/deepseek-v4-flash-0731` 摘要                                        | 只有手動 `/compact`；沒有 token threshold                                                    | 固定最近 **6 messages**                                                                                     | JSONL 追加 `compaction`；resume replay 到 compaction 時重建為 summary + kept suffix                                                                   |
+| **tiny-agent（目前）**              | 將目前 active context 中較舊的 messages 送到目前設定的模型摘要                                                      | 只有手動 `/compact`；沒有 token threshold                                                    | 至少最近 **6 messages**，再向前對齊 user boundary，保留完整 turn                                           | transactional JSONL 保存 compaction intent、attempt、checkpoint、usage 與 outcome；resume 由 summary + materialized retained tail 重建 active context |
 | **pi-coding-agent / pi-agent-core** | client-side LLM 結構化摘要；重複 compact 時把 previous summary 與新內容合併                                         | 自動：`contextTokens > contextWindow - reserveTokens`；也可 `/compact [instructions]`        | 預設約 **20k tokens**，按合法切點保留；不在 tool result 前斷開                                              | append-only `CompactionEntry` 保存 summary、`firstKeptEntryId`、usage；resume 由 summary + kept entries 重建 active context                           |
 | **Claude Code**                     | 官方只公開為「summarizes older history」的 model summarization                                                      | 接近 auto-compact window；也可 `/compact [instructions]`                                     | **官方文件未公開**精確保留量或切點演算法                                                                    | 官方說 session 可 `/resume`；但未公開 compact record schema、原文是否完整保留、resume replay 細節                                                     |
 | **OpenAI Codex CLI**                | 兩條路：client-side model summary；支援時也可呼叫 Responses compaction                                              | 自動 token limit（model/config 決定），也有手動 compact                                      | local 路徑重建為摘要，另最多帶入約 **20k tokens 的 user messages**；remote 路徑使用 opaque compaction items | compacted replacement history 會存成 checkpoint；live 與 persisted history 使用同一 replacement；精確 rollout/resume 細節以 source 為準               |
@@ -17,28 +17,27 @@
 
 ## tiny-agent 現況
 
-`Agent.compact()` 的流程如下（目前位於 [`typescript/src/index.ts`](../typescript/src/index.ts)）：
+`Agent.compact()` 的 production 流程如下（TypeScript reference位於 [`typescript/src/index.ts`](../typescript/src/index.ts)，其他語言遵循相同observable contract）：
 
-1. 固定 `keep = 6`，把 system message 排除後切成 `old` 與 `recent`。
-2. 呼叫同一個 `Agent.call()`；因此 endpoint 仍是 OpenRouter `/api/v1/chat/completions`，model 仍是 `MODEL = deepseek/deepseek-v4-flash-0731`。
-3. request 不帶 tools，輸入為摘要 system prompt 加上 `JSON.stringify(old)`。
-4. 成功後把 active context 替換成：
+1. 從reducer materialized current active context開始，先取至少最近6則message，再將切點向前移到user boundary，避免拆散完整turn。
+2. 先持久化`compactionStarted`與實體`stepAttempt`，再透過OpenRouter `/api/v1/chat/completions`呼叫目前設定的模型產生摘要；request不帶tools。
+3. 成功後以一個durable compaction checkpoint保存summary、durable source message-entry prefix的partition/digest與materialized retained tail；usage寫入獨立ledger，最後寫入`operationFinished(completed)`。重複compact時，prior summary會參與摘要輸入，但本身不是source message entry。
+4. Active context重建為：
 
     ```text
     system
     + user: [Compacted history]\n<model-generated summary>
-    + last 6 messages
+    + retained message tail
     ```
 
-5. Session 追加 `{ type: "compaction", summary, compactedMessages, keptMessages: 6, usage }`。它不刪舊 JSONL lines。
-6. Resume replay 時遇到 compaction record，做同樣的 context replacement；之後再接續 replay 新 messages。
+5. 原始JSONL facts不刪除。Resume由durable facts重建checkpoint；中斷、open attempt或已寫checkpoint但缺terminal outcome等crash prefix依recovery plan補齊，且重複resume保持idempotent。
 
 因此它同時包含兩種技術，但角色不同：
 
-- **本機切分**：決定哪些舊 messages 送去摘要、哪些 6 則原樣保留。
-- **模型摘要**：真正把舊內容濃縮；會花 input/output tokens，也可能遺漏資訊。
+- **本機partition**：決定哪些active-context messages送去摘要、哪些完整turn原樣保留。
+- **模型摘要**：真正把較舊內容濃縮；會花input/output tokens，也可能遺漏資訊。
 
-目前沒有 auto-compaction；若使用者不下 `/compact`，context 會持續成長直到 provider/model 拒絕請求。另有一個邊界：固定按 message 數切分，不像 pi 會避開破壞 assistant tool call 與 tool result 的關係；若第 6 則邊界落在一組 tool transcript 中間，後續 request 可能成為不完整 transcript。
+目前沒有auto-compaction；若使用者不下`/compact`，context會持續成長直到provider/model拒絕請求。
 
 ## 各家作法與證據
 
@@ -132,4 +131,4 @@ Gemini CLI 的第一方 source 顯示混合策略：
 | Model-generated summarization | Client 組 prompt，呼叫一般模型產生可讀摘要                                        | tiny-agent、pi、Claude Code（官方描述）、Codex local、Gemini CLI                       |
 | Provider-side compaction API  | Provider 產生 opaque compact item，保留模型狀態/推理，client 不解析為自然語言摘要 | OpenAI Responses server-side / standalone compaction；Codex remote；Agents SDK wrapper |
 
-這三者可以混用。Gemini CLI 先 truncation 再 summarization；Codex 可按 provider capability 選 local summary 或 Responses compaction。`tiny-agent` 現在只有固定 recent-message retention 加 model summary。
+這三者可以混用。Gemini CLI 先 truncation 再 summarization；Codex 可按 provider capability 選 local summary 或 Responses compaction。`tiny-agent` 現在使用對齊user boundary的recent-message retention、model summary與durable compaction checkpoint。

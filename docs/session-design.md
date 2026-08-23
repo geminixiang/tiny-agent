@@ -1,6 +1,8 @@
 # Session design
 
-Status: canonical shared contract. Production writer and agent-loop integration are intentionally deferred.
+Status: implemented canonical production contract in TypeScript, Go, Python, and Rust.
+
+The production writers, agent loops, resume/recovery paths, and manual compaction use this contract. Shared reducer and recovery-planner fixtures keep the four implementations aligned.
 
 This design was drafted from first principles, then revised after reading Pi Harness v2 and Pi's evolving JSONL implementation at commit `c77ab55ecfc96291d2b81f05bb23856f68644556`.
 
@@ -17,7 +19,7 @@ Session adds durable operation facts around the existing model transcript. It do
 
 ## What changes
 
-The legacy format stores only:
+Before the clean cutover, the legacy format stored only:
 
 ```text
 session | message | compaction | interruption
@@ -323,7 +325,7 @@ compactionStarted → stepAttempt(stepKind=compaction)
 → compaction entry → operationFinished(completed)
 ```
 
-`compactionStarted` provisions the compaction entry ID and records its input boundary. Abort uses `abortRequested` with that operation ID. Recovery may create at most one additional physical summary attempt, under the same digest and attempt-cap rules as assistant steps. A committed compaction entry followed by a missing terminal record only needs `operationFinished`. Threshold/overflow compaction may reuse this procedure later, but is deferred from the first writer.
+`compactionStarted` provisions the compaction entry ID and records its input boundary. Abort uses `abortRequested` with that operation ID. Recovery may create at most one additional physical summary attempt, under the same digest and attempt-cap rules as assistant steps. A committed compaction entry followed by a missing terminal record only needs `operationFinished`. Production currently uses this procedure for manual `/compact`; automatic threshold/overflow compaction remains deferred.
 
 ### Interruption and terminal outcome
 
@@ -410,7 +412,7 @@ planRecovery(SessionState, CurrentConfiguration)
 → RecoveryAction | RecoveryBlocked
 ```
 
-`reduce` never receives current tools or configuration and never emits `configuration_changed`. Milestone 1 golden fixtures cover only `reduce`. Separate planner fixtures provide the current configuration and assert replay/block/abort decisions.
+`reduce` never receives current tools or configuration and never emits `configuration_changed`. Shared golden fixtures cover `reduce`; separate planner fixtures provide the current configuration and assert replay/block/abort decisions.
 
 Minimal state:
 
@@ -513,23 +515,23 @@ function planRecovery(state: SessionState, current: CurrentConfiguration): Recov
 - complete-line transaction parsing;
 - pure reduction and invariant validation.
 
-The session format remains single-writer. Cross-process leases are explicitly deferred.
+The session format follows a single-writer contract. Runtime ownership tracking prevents duplicate writers only within one process; an outer job runner must prevent concurrent writers across processes. Cross-process leases and takeover remain explicitly deferred.
 
 Candidate transactions are reduced before append, and rejected candidates leave disk bytes, sequence, and in-memory state unchanged. Session lookup accepts only regular files under the canonical sessions directory; Unix implementations additionally open with `O_NOFOLLOW`. Platforms without no-follow support retain the canonical-parent and non-symlink checks as best-effort protection.
 
-The current language file APIs do not expose a shared portable short-write injection seam. Adding a test-only filesystem abstraction is deferred until production integration needs fault injection; this milestone tests invalid-candidate consistency instead.
+The current language file APIs do not expose a shared portable short-write injection seam. A test-only filesystem abstraction remains deferred; current storage tests cover invalid-candidate consistency, torn-tail repair, exclusive creation, symlink rejection, and process-local writer ownership.
 
 ## Format cutover
 
-Session is a clean break:
+The production cutover is complete:
 
-- New writers emit only v2.
-- Readers accept only v2.
-- Existing legacy session files are unsupported after the cutover.
+- Current writers emit only version 2.
+- Current readers accept only version 2.
+- Legacy session files are unsupported.
 - There is no migration, import, compatibility projection, dual reader, or `--resume-as-v2` path.
-- Development sessions may be deleted before installing the new version.
+- Development sessions created by older versions may be deleted.
 
-This removes legacy normalization from the implementation and keeps all four languages on one schema from the first v2 commit.
+This removes legacy normalization from production and keeps all four languages on one schema. The `version: 2` header remains the format version even though this is the only supported production format.
 
 ## Lessons adopted from Pi JSONL
 
@@ -546,7 +548,7 @@ At Pi commit `c77ab55ecfc96291d2b81f05bb23856f68644556`:
 
 ## Deliberate differences from Pi
 
-Tiny-agent does **not** initially copy Pi's generic entry/value/list storage engine because tiny-agent has no real second adapter or query workload that needs it. Encoding operation state as typed records keeps the teaching interface smaller.
+Tiny-agent does **not** copy Pi's generic entry/value/list storage engine because tiny-agent has no real second adapter or query workload that needs it. Encoding operation state as typed records keeps the teaching interface smaller.
 
 Also deferred:
 
@@ -564,26 +566,26 @@ If tiny-agent later adds branches, multiple lanes, or a SQLite backend, the stor
 
 ## Durability contract
 
-The session format initially promises **process-crash durability**: once acceptance resolves, a complete newline-terminated transaction has been handed to the operating system; on reopen, a torn final append is discarded and the complete prefix is repaired. It does not promise survival across power loss or storage-controller failure.
+The session format promises **process-crash durability**: once acceptance resolves, a complete newline-terminated transaction has been handed to the operating system; on reopen, a torn final append is discarded and the complete prefix is repaired. It does not promise survival across power loss or storage-controller failure.
 
 A future power-loss durable mode requires file sync after each accepted transaction and directory sync for temp-file replacement, implemented and tested consistently in all four languages. Until then, the document uses “accepted” or “process-crash durable,” not unqualified “durable.”
 
-## Decisions before implementation
+## Implemented decisions
 
-1. Format cutover is immediate; v1 is unsupported and has no migration path.
-2. Only built-in `read` is replay-safe initially; `bash`, `write`, `edit`, and all MCP calls are `never`.
+1. The format cutover is complete; v1 is unsupported and has no migration path.
+2. Only the exact built-in `read` implementation is replay-safe; custom same-name tools, `bash`, `write`, `edit`, plugins, and all MCP calls are `never`.
 3. The effective-configuration digest contains model ID, system prompt, ordered encoded model-facing tool definitions, adapter identity, routing identity, and output-options digest. Replay policy and environment identity are deliberately excluded: replay stays on `toolStarted`, while the header and each tool intent bind the effect environment. Credentials and volatile connection state are excluded.
 4. A configuration mismatch suspends recovery without appending a terminal failure or executing effects.
-5. Session writers remain disabled until TypeScript, Go, Python, and Rust reducers pass the same golden fixtures.
+5. Production writers were enabled only after TypeScript, Go, Python, and Rust reducers and recovery planners passed the shared golden fixtures.
 
-## Implementation order
+## Completed implementation sequence
 
-1. Add shared golden JSONL prefix fixtures and expected reduced states.
-2. Implement read-only session reducer in all four languages.
-3. Add transaction writers and `runStarted` / `stepAttempt` / terminal records without automatic recovery.
-4. Add `toolStarted`, `replayKey`, replay declarations, and crash-prefix recovery.
-5. Move compaction to an operation with identity boundary plus materialized retained tail.
-6. Delete legacy reader/writer code and enable session writers only after cross-language conformance passes.
+1. Added shared golden JSONL prefix fixtures and expected reduced states.
+2. Implemented read-only session reducers in all four languages.
+3. Added transaction writers and durable run/model-attempt/terminal records.
+4. Added `toolStarted`, `replayKey`, replay declarations, abort reconciliation, and crash-prefix recovery.
+5. Moved manual compaction to a durable operation with an identity boundary and materialized retained tail.
+6. Deleted legacy reader/writer code and enabled the canonical production writers after cross-language conformance passed.
 
 ## Fixed synthetic tool results
 
@@ -601,12 +603,12 @@ Synthetic results are ordered by assistant `toolIndex`. Abort planning has prior
 
 ## Environment identity
 
-Production will resolve `environmentIdentity` from `TINY_AGENT_ENVIRONMENT_IDENTITY` when non-empty, otherwise from the canonical realpath of the current working directory. This helper is deferred with writer integration. Session files and recovery plans are portable data; external effects are not portable and may run only when the current environment identity matches the persisted tool intent.
+Production resolves `environmentIdentity` from `TINY_AGENT_ENVIRONMENT_IDENTITY` when non-empty, otherwise from the canonical realpath of the current working directory. Session files and recovery plans are portable data; external effects are not portable and may run only when the current environment identity matches the persisted tool intent.
 
 ## Compaction source digest
 
-`compactedEntryIds + retainedEntryIds` is the exact ordered partition of all model-visible source message entry IDs through `inputThroughEntryId`. `sourceDigest` is SHA-256 over the same closed canonical JSON form used by configuration digests, applied to the ordered array `[{sourceEntryId,message}, ...]` for that complete source prefix. This binds IDs, message values, order, and partition boundary.
+`/compact` first chooses its cut from the reducer's materialized active context. It separately records `compactedEntryIds + retainedEntryIds` as the exact ordered partition of all durable source message-entry IDs through `inputThroughEntryId`. `sourceDigest` is SHA-256 over the same closed canonical JSON form used by configuration digests, applied to the ordered array `[{sourceEntryId,message}, ...]` for that complete source prefix. This binds IDs, message values, order, and partition boundary. During repeated compaction, the prior summary participates in the summarization input but is not itself a durable source message entry.
 
-## Shared tool-definition JSON Schema subset
+## Tool-definition JSON Schema
 
-`definitionDigest` canonicalizes the model-facing `{name, description, parameters}` definition. Parameters use the shared subset: objects, arrays, strings, numbers, integers, booleans, null, `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `oneOf`, numeric bounds, string length/pattern, and array bounds. Unsupported schema keywords must be rejected before a configuration snapshot is admitted. Production argument validation remains deferred; `planRecovery` receives preclassified current tool declarations.
+`definitionDigest` records the model-facing `{name, description, parameters}` definition, and shared fixtures define its canonical representation. The four implementations do not yet uniformly enforce the full documented JSON Schema subset when admitting every configuration snapshot. Built-in tools validate the fields they execute; MCP calls require object arguments, while complete validation against each MCP `inputSchema` remains the remote server's responsibility. `planRecovery` receives preclassified current tool declarations.

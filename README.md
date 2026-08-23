@@ -10,7 +10,7 @@
 
 ```mermaid
 flowchart TD
-    Host["Trusted host / deployment"] --> Catalog["MCP catalog + short-lived token"]
+    Host["Trusted host / deployment"] --> Catalog["Trusted MCP catalog + tokenEnv"]
     CLI["tiny-ts / tiny-go / tiny-py / tiny-rs"] --> Context["AGENTS.md + skills + session"]
     Catalog --> CLI
     Context --> Loop["Agent loop"]
@@ -18,20 +18,20 @@ flowchart TD
     Loop --> Model["OpenRouter / LLM"]
     Model --> Decision{"tool calls?"}
     Decision -- no --> Answer["Final answer"]
-    Decision -- yes --> Dispatch["Injected Tool interface"]
+    Decision -- yes --> Dispatch["Tool dispatch"]
     Dispatch --> Local["Local tools\nbash / read / write / edit"]
-    Dispatch --> MCP["MCP adapter\ntrusted named servers"]
+    Dispatch --> MCP["MCP tools\ntrusted named servers"]
     Local --> Results["Tool results"]
     MCP --> Results
     Results --> Loop
-    Loop --> Session["Append-only JSONL session"]
-    Loop --> Events["Structured run events"]
+    Loop --> Session["Durable operation facts\ncanonical transactional JSONL"]
+    Loop -. "tiny-ts --json" .-> Events["Structured run events"]
     CLI -- "Esc / Ctrl+C" --> Cancel["Cancellation + cleanup"]
     Cancel --> Model
     Cancel --> Dispatch
 ```
 
-Agent loop 的核心保持不變；MCP 只是另一種 Tool adapter：
+Agent loop 的核心保持不變；MCP不改變tool-call/result語意。TypeScript、Go與Python將MCP tools適配到通用Tool seam；Rust目前仍使用獨立的`McpTool` dispatch，後續再收斂到相同seam：
 
 ```text
 messages → model → tool calls → tool results → model
@@ -43,18 +43,19 @@ messages → model → tool calls → tool results → model
 
 - OpenRouter與可覆寫的 `TINY_MODEL`
 - Agent loop與 `bash`、`read`、`write`、`edit`
-- `AGENTS.md`、skills、compaction與JSONL session
+- Local `--plugin` capability allowlist
+- `AGENTS.md`、skills、durable compaction與canonical JSONL session
 - Cancellation、token與prompt-cache usage
 - Trusted named Streamable HTTP MCP servers
 - MCP discovery、calling、timeouts、bounds與cleanup
 
-TypeScript另外提供injectable `Tool[]`、local `--plugin` allowlist與`--json` structured monitoring。
+TypeScript另外提供programmatic injectable `Tool[]` seam與`--json` structured monitoring。
 
 核心實作：[`typescript/src/index.ts`](typescript/src/index.ts)、[`typescript/src/tools.ts`](typescript/src/tools.ts)、[`typescript/src/mcp.ts`](typescript/src/mcp.ts)、[`typescript/src/cli.ts`](typescript/src/cli.ts)、[`go/cmd/tiny-go/main.go`](go/cmd/tiny-go/main.go)、[`python/tiny_agent/agent.py`](python/tiny_agent/agent.py)、[`python/tiny_agent/cli.py`](python/tiny_agent/cli.py)、[`rust/src/lib.rs`](rust/src/lib.rs)、[`rust/src/terminal.rs`](rust/src/terminal.rs)。共用的 skills、session schema與文件留在repo root。
 
 ## 安裝
 
-需要 Node.js 22+、Go 1.24+、Rust 1.85+（`cargo`）、[uv](https://docs.astral.sh/uv/) 與 [OpenRouter API key](https://openrouter.ai/settings/keys)：
+本專案的安裝與開發前置需求為 Node.js 22+、Go 1.24+、Python 3.12+（由 [uv](https://docs.astral.sh/uv/) 管理）、Rust 1.85+（edition 2024，需 `cargo`），以及 [OpenRouter API key](https://openrouter.ai/settings/keys)：
 
 ```bash
 git clone https://github.com/geminixiang/tiny-agent.git
@@ -105,10 +106,10 @@ TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 
 ```bash
 export TINY_MCP_TOKEN_SENTRY=...
-tiny-ts --mcp sentry "調查 issue"
-tiny-go --mcp sentry "調查 issue"
-tiny-py --mcp sentry "調查 issue"
-tiny-rs --mcp sentry "調查 issue"
+tiny-ts --mcp sentry --plugin read "調查 issue"
+tiny-go --mcp sentry --plugin read "調查 issue"
+tiny-py --mcp sentry --plugin read "調查 issue"
+tiny-rs --mcp sentry --plugin read "調查 issue"
 ```
 
 `--mcp`可重複或用逗號分隔。啟動後會顯示實際能力：
@@ -119,7 +120,7 @@ tools: read, mcp:sentry/search_issues, mcp:sentry/get_issue
 mcp: sentry
 ```
 
-Catalog只保存token的環境變數名稱。`TINY_MCP_CONFIG=/trusted/path/mcp.json`可指定其他trusted catalog；不會讀取repository config，也不接受CLI傳入URL、header或token。
+Catalog只保存token的環境變數名稱；runtime不會驗證credential是否短效。`TINY_MCP_CONFIG=/trusted/path/mcp.json`可指定其他trusted catalog；不會讀取repository config，也不接受CLI傳入URL、header或token。正式多租戶部署應由trusted gateway注入短效、tenant/job-scoped credential；這是部署建議，不是tiny-agent runtime保證。
 
 目前支援modern Streamable HTTP、`tools/list`與`tools/call`。多租戶部署應連到trusted gateway；MCP不是sandbox或authorization boundary。
 
@@ -142,7 +143,7 @@ tiny-rs "讀取 README 並摘要"
 互動指令：
 
 ```text
-/compact       摘要舊對話，保留至少最近 6 則完整 turn
+/compact       摘要舊對話，保留至少最近 6 則 message，並將切點移到 user boundary
 /skill:hello   明確載入 hello skill
 /exit          結束並顯示 session 恢復指令
 Esc            中斷目前的 model、tool 或 compact operation
@@ -156,7 +157,7 @@ Tool 執行時只在終端顯示精簡 log：
   └ 1.4k chars
 ```
 
-TUI log 不寫入 session；模型 transcript 所需的 tool call/result 會保存。Bash output 超過 50KB 時，完整內容另存於 `.tiny-agent/tool-output/`，session 只保留尾端與回查 path。
+TUI log不寫入session；模型transcript所需的tool call/result會保存。Bash output超過50KB時會截短送入模型；若該語言實作已完整捕獲輸出，完整內容會另存於`.tiny-agent/tool-output/`並留下回查path。各實作另有約10MB的capture safety limit；超限時不保證完整輸出，可能回傳capped-output標記或tool error。確切cap與stdout/stderr合併方式屬於語言實作限制。
 
 ## Session
 
@@ -178,9 +179,11 @@ tiny-ts --session <session-id>
 tiny-ts --session <session-id> "繼續剛才的工作"
 ```
 
-Session 使用 canonical append-only JSONL；每一行都是完整 transaction，保存 accepted prompt、model attempt、assistant message、tool intent/result、operation outcome、compaction、interruption與獨立 usage ledger。正式格式與 recovery invariants 見 [`schemas/session.schema.json`](schemas/session.schema.json) 及 [`docs/session-design.md`](docs/session-design.md)。
+Session使用canonical transactional JSONL：第一行是session header，其後每一行是一個完整transaction。它保存accepted prompt、model attempt、assistant message，以及即將執行外部effect的tool intent；invalid、unknown或truncated tool calls則保存未執行的synthetic result。Session也保存tool results、abort requests、operation outcomes、compaction checkpoints與獨立usage ledger。正式格式與recovery invariants見[`schemas/session.schema.json`](schemas/session.schema.json)及[`docs/session-design.md`](docs/session-design.md)。
 
-Process crash 後，`--session` 會先由 durable facts 重建狀態，再執行 recovery plan：不確定的 model request 最多重試一次；只有完全相同的內建 `read` 可安全 replay；`bash`、`write`、`edit`、plugin與MCP tool一律不自動重播。Configuration或environment identity不符時，resume會停止且不執行 effect。Session只承諾 process-crash durability，且同一session只允許單一process writer。
+Process crash 後，`--session` 會先由 durable facts 重建狀態，再執行 recovery plan：不確定的 model request 最多重試一次；只有完全相同的內建 `read` 可安全 replay；`bash`、`write`、`edit`、plugin與MCP tool一律不自動重播。Configuration或environment identity不符時，resume會停止且不執行 effect。
+
+Session只承諾process-crash durability，不承諾power-loss durability。格式採single-writer contract；runtime只在同一process內阻止重複writer，跨process互斥必須由外層job runner保證。
 
 ## Skills 與專案指令
 
@@ -200,10 +203,10 @@ tiny-ts "say hello"
 
 ## Compact
 
-`/compact` 是獨立的 durable operation：摘要目前 active context，materialize保留的tail，再以canonical source partition與digest寫入session。active context改為：
+`/compact`是獨立的durable operation。它先從reducer materialized active context選擇切點：保留至少最近6則message，再向前移到user boundary，避免拆散完整turn。Session另外記錄截至`inputThroughEntryId`的durable source message-entry partition、digest與materialized retained tail；重複compact時，prior summary會參與摘要輸入，但本身不是source message entry。成功後active context改為：
 
 ```text
-system prompt + compacted summary + 最近至少 6 則完整 turn
+system prompt + compacted summary + retained message tail
 ```
 
 原始 JSONL records 不刪除，因此 session 仍可 audit 與 resume。主流 coding agent 的做法比較見 [`docs/compaction-comparison.md`](docs/compaction-comparison.md)。
@@ -214,7 +217,7 @@ system prompt + compacted summary + 最近至少 6 則完整 turn
 
 ```bash
 make test
-make test-mcp     # deterministic local MCP fixture，不使用公開server
+make test-mcp     # TypeScript reference MCP fixture；其他語言由各自test suite覆蓋
 make check
 make format
 make build
@@ -224,14 +227,14 @@ make build
 
 ## 四語言狀態
 
-| CLI | Agent / session / skills | MCP | Structured monitoring |
-|---|---:|---:|---:|
-| `tiny-ts` | ✓ | ✓ | `--json` |
-| `tiny-go` | ✓ | ✓ | — |
-| `tiny-py` | ✓ | ✓ | — |
-| `tiny-rs` | ✓ | ✓ | — |
+| CLI       | Agent / session / skills | MCP | Structured monitoring |
+| --------- | -----------------------: | --: | --------------------: |
+| `tiny-ts` |                        ✓ |   ✓ |              `--json` |
+| `tiny-go` |                        ✓ |   ✓ |                     — |
+| `tiny-py` |                        ✓ |   ✓ |                     — |
+| `tiny-rs` |                        ✓ |   ✓ |                     — |
 
-四種實作共用CLI、catalog、validation、tool result與cleanup語意。
+四種實作以相同observable CLI、catalog、tool-result與cleanup contract為目標。Canonical Session reducer與recovery planner由shared fixtures直接驗證；MCP、CLI與tool lifecycle目前由各語言測試分別覆蓋，因此仍可能存在語言限制與observable差異。
 
 Rust 版使用 `ureq`（blocking HTTP）、`libc` + `unicode-width`（raw terminal 與 CJK 顯示寬度）、`serde`（session/JSON）。model request 設有 connect/read/write timeout；按 Esc 會立即停止前景等待，但 `ureq` 的 blocking transport thread 可能在 timeout 前繼續完成。Bash 工具則會清除整個 process group。
 
