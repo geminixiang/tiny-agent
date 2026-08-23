@@ -1,4 +1,4 @@
-.PHONY: install install-ts install-go install-py install-rs test test-eval test-mcp test-ts test-go test-py test-rs check check-ts check-go check-py check-rs eval build build-ts build-go build-py build-rs format format-ts format-go format-py format-rs book-build book-test book-check
+.PHONY: install install-ts install-go install-py install-rs test test-eval test-mcp test-mcp-live test-ts test-go test-py test-rs check check-ts check-go check-py check-rs eval build build-ts build-go build-py build-rs format format-ts format-go format-py format-rs book-build book-test book-check
 
 install: install-ts install-go install-py install-rs
 
@@ -28,6 +28,9 @@ test-ts:
 
 test-mcp:
 	npm --prefix typescript run test:mcp
+
+test-mcp-live:
+	npm --prefix typescript run test:mcp:live
 
 test-go:
 	go -C go test ./...

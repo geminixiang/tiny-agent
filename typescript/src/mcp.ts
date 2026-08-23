@@ -202,17 +202,34 @@ function isInputRequired(result: unknown) {
 }
 
 function normalizeResult(result: {
-    content?: Array<{ type: string; text?: string }>;
+    content?: Array<{
+        type: string;
+        text?: string;
+        resource?: { uri?: string; mimeType?: string; text?: string; blob?: string };
+    }>;
     structuredContent?: unknown;
     isError?: boolean;
 }) {
-    const unsupported = (result.content ?? []).filter((item) => item.type !== "text");
+    const unsupported = (result.content ?? []).filter(
+        (item) =>
+            item.type !== "text" &&
+            !(
+                item.type === "resource" &&
+                typeof item.resource?.text === "string" &&
+                typeof item.resource.blob !== "string"
+            ),
+    );
     if (unsupported.length) {
         throw Error(`Unsupported MCP content type: ${unsupported.map((item) => item.type).join(", ")}`);
     }
-    const parts = (result.content ?? [])
-        .filter((item) => typeof item.text === "string")
-        .map((item) => item.text as string);
+    const parts = (result.content ?? []).flatMap((item) => {
+        if (item.type === "text" && typeof item.text === "string") return [item.text];
+        if (item.type === "resource" && typeof item.resource?.text === "string") {
+            const source = item.resource.uri ? `Resource: ${item.resource.uri}\n` : "";
+            return [`${source}${item.resource.text}`];
+        }
+        return [];
+    });
     if (result.structuredContent !== undefined) {
         parts.push(`Structured content:\n${JSON.stringify(result.structuredContent)}`);
     }

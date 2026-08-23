@@ -184,7 +184,21 @@ Passing loopback adapter tests does not satisfy these gates.
 
 Public mocks are optional and non-gating. Their uptime and exact content are not controlled by tiny-agent.
 
-Observed on 2026-08-22:
+GitHub's hosted MCP is the reference authenticated smoke. It verifies modern negotiation, static Bearer authentication, tool discovery, a real `get_file_contents` call, and embedded text-resource normalization without invoking a model:
+
+```bash
+TINY_GITHUB_MCP_TOKEN="$(gh auth token)" make test-mcp-live
+```
+
+The token stays in the process environment; the test does not write it to the catalog, Session, output, or repository. Use a least-privilege token in CI or shared environments.
+
+Observed on 2026-08-23:
+
+| Endpoint | Observed behavior |
+|---|---|
+| `https://api.githubcopilot.com/mcp/` | Bearer authentication succeeds; negotiates `2026-07-28`; `get_file_contents` returns text plus embedded `resource` content |
+
+Observed public fixtures on 2026-08-22:
 
 | Endpoint | Observed behavior |
 |---|---|

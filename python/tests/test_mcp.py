@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from mcp_fixture import McpFixture
-from tiny_agent.mcp import McpConfig, _encode_mcp_param_value, display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases
+from tiny_agent.mcp import McpConfig, _encode_mcp_param_value, _normalize_result, display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases
 
 
 class McpTest(unittest.TestCase):
@@ -36,10 +36,25 @@ class McpTest(unittest.TestCase):
                     self.assertEqual(loaded.tools[1]["execute"]({}), 'count: 2\n\nStructured content:\n{"count":2}')
                     with self.assertRaisesRegex(RuntimeError, "MCP tool error: not found"): loaded.tools[2]["execute"]({})
                     with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: image"): loaded.tools[3]["execute"]({})
+                    self.assertEqual(loaded.tools[5]["execute"]({}), "Resource: file:///README.md\nresource body")
+                    truncated = loaded.tools[5]["execute"]({"text": "你" * 20_000})
+                    self.assertLessEqual(len(truncated.encode()), 50 * 1024)
+                    self.assertTrue(truncated.endswith("[MCP result truncated to 50KB]"))
+                    with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: resource"): loaded.tools[6]["execute"]({})
                     self.assertTrue(all(call["authorization"] == "Bearer secret" for call in fixture.calls))
                     loaded.close(); loaded.close()
                     with self.assertRaisesRegex(RuntimeError, "connection is closed"): loaded.tools[0]["execute"]({"message": "x"})
                 finally: fixture.close()
+
+    def test_resource_normalization_rejects_blob_and_allows_missing_uri(self):
+        self.assertEqual(
+            _normalize_result({"content": [{"type": "resource", "resource": {"text": "body"}}]}),
+            "body",
+        )
+        with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: resource"):
+            _normalize_result({
+                "content": [{"type": "resource", "resource": {"text": "body", "blob": "AA=="}}]
+            })
 
     def test_http_errors_are_sanitized_and_never_fall_back(self):
         canary = "SECRET-CANARY-DO-NOT-LEAK"

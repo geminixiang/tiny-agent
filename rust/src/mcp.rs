@@ -984,15 +984,34 @@ fn normalize_result(result: &Value) -> Result<String, String> {
                 .get("type")
                 .and_then(Value::as_str)
                 .ok_or("MCP tool content type must be a string")?;
-            if kind != "text" {
-                return Err(format!("Unsupported MCP content type: {kind}"));
+            match kind {
+                "text" => parts.push(
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .ok_or("MCP text content must contain string text")?
+                        .to_string(),
+                ),
+                "resource" => {
+                    let resource = item
+                        .get("resource")
+                        .and_then(Value::as_object)
+                        .ok_or("MCP resource content must contain an object resource")?;
+                    if resource.contains_key("blob") {
+                        return Err("Unsupported MCP content type: resource".into());
+                    }
+                    let text = resource
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or("Unsupported MCP content type: resource")?;
+                    let source = resource
+                        .get("uri")
+                        .and_then(Value::as_str)
+                        .map(|uri| format!("Resource: {uri}\n"))
+                        .unwrap_or_default();
+                    parts.push(format!("{source}{text}"));
+                }
+                _ => return Err(format!("Unsupported MCP content type: {kind}")),
             }
-            parts.push(
-                item.get("text")
-                    .and_then(Value::as_str)
-                    .ok_or("MCP text content must contain string text")?
-                    .to_string(),
-            );
         }
     }
     if let Some(v) = result.get("structuredContent") {
@@ -1023,6 +1042,22 @@ fn truncate_utf8(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resource_normalization_rejects_blob_and_allows_missing_uri() {
+        assert_eq!(
+            normalize_result(&json!({"content":[{"type":"resource","resource":{"text":"body"}}]}))
+                .unwrap(),
+            "body"
+        );
+        assert_eq!(
+            normalize_result(
+                &json!({"content":[{"type":"resource","resource":{"text":"body","blob":"AA=="}}]})
+            )
+            .unwrap_err(),
+            "Unsupported MCP content type: resource"
+        );
+    }
+
     #[test]
     fn catalog_validates_unselected_entries() {
         let catalog =

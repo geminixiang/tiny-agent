@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestSplitListsPluginSelectionAndDisplayName(t *testing.T) {
@@ -288,6 +289,53 @@ func TestMCPReplayKeyUsesCanonicalCredentialFreeEndpoint(t *testing.T) {
 	}
 	if strings.Contains(endpoint, "token") || strings.Contains(endpoint, "Bearer") {
 		t.Fatalf("credential leaked: %s", endpoint)
+	}
+}
+
+func TestMCPTextResourceAndBinaryResource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ID     int            `json:"id"`
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		switch request.Method {
+		case "server/discover":
+			writeRPC(w, request.ID, map[string]any{"supportedVersions": []string{modernMCPVersion}, "capabilities": map[string]any{"tools": map[string]any{}}})
+		case "tools/list":
+			tools := []any{}
+			for _, name := range []string{"resource", "blob", "large"} {
+				tools = append(tools, map[string]any{"name": name, "inputSchema": map[string]any{"type": "object"}})
+			}
+			writeRPC(w, request.ID, map[string]any{"tools": tools})
+		case "tools/call":
+			switch request.Params["name"] {
+			case "resource":
+				writeRPC(w, request.ID, map[string]any{"content": []any{map[string]any{"type": "resource", "resource": map[string]any{"uri": "repo://README.md", "mimeType": "text/markdown", "text": "hello"}}}})
+			case "blob":
+				writeRPC(w, request.ID, map[string]any{"content": []any{map[string]any{"type": "resource", "resource": map[string]any{"uri": "repo://image.png", "blob": "aGVsbG8="}}}})
+			case "large":
+				writeRPC(w, request.ID, map[string]any{"content": []any{map[string]any{"type": "resource", "resource": map[string]any{"uri": "repo://large.txt", "text": strings.Repeat("你", maxMCPResultBytes)}}}})
+			}
+		}
+	}))
+	defer server.Close()
+	loaded, err := loadMCPTools(context.Background(), MCPConfig{Alias: "fixture", URL: server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loaded.Close()
+	result, err := loaded.tools[0].Execute(context.Background(), map[string]any{})
+	if err != nil || result != "Resource: repo://README.md\nhello" {
+		t.Fatalf("resource=%q err=%v", result, err)
+	}
+	if _, err := loaded.tools[1].Execute(context.Background(), map[string]any{}); err == nil || !strings.Contains(err.Error(), "Unsupported MCP content type: resource") {
+		t.Fatalf("blob error: %v", err)
+	}
+	result, err = loaded.tools[2].Execute(context.Background(), map[string]any{})
+	if err != nil || len([]byte(result)) > maxMCPResultBytes || !strings.HasSuffix(result, "[MCP result truncated to 50KB]") || !utf8.ValidString(result) {
+		t.Fatalf("large bytes=%d valid=%v err=%v", len([]byte(result)), utf8.ValidString(result), err)
 	}
 }
 

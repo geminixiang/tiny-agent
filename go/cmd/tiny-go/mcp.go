@@ -490,8 +490,14 @@ func (m *MCPClient) callTool(ctx context.Context, name string, args map[string]a
 	defer cancel()
 	var result struct {
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Resource *struct {
+				URI      string  `json:"uri"`
+				MimeType string  `json:"mimeType"`
+				Text     *string `json:"text"`
+				Blob     *string `json:"blob"`
+			} `json:"resource"`
 		} `json:"content"`
 		StructuredContent json.RawMessage `json:"structuredContent"`
 		IsError           bool            `json:"isError"`
@@ -505,10 +511,19 @@ func (m *MCPClient) callTool(ctx context.Context, name string, args map[string]a
 	}
 	parts := []string{}
 	for _, item := range result.Content {
-		if item.Type != "text" {
-			return "", fmt.Errorf("Unsupported MCP content type: %s", item.Type)
+		if item.Type == "text" {
+			parts = append(parts, item.Text)
+			continue
 		}
-		parts = append(parts, item.Text)
+		if item.Type == "resource" && item.Resource != nil && item.Resource.Text != nil && item.Resource.Blob == nil {
+			prefix := ""
+			if item.Resource.URI != "" {
+				prefix = "Resource: " + item.Resource.URI + "\n"
+			}
+			parts = append(parts, prefix+*item.Resource.Text)
+			continue
+		}
+		return "", fmt.Errorf("Unsupported MCP content type: %s", item.Type)
 	}
 	if result.StructuredContent != nil {
 		parts = append(parts, "Structured content:\n"+string(result.StructuredContent))

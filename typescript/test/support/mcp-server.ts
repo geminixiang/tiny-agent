@@ -21,6 +21,7 @@ export async function startTestMcpServer(
         largeSchema?: boolean;
         tooManyTools?: boolean;
         unsupportedContent?: boolean;
+        resourceContent?: boolean;
     } = {},
 ): Promise<TestMcpServer> {
     const slowCalls = { started: 0, aborted: 0, completed: 0 };
@@ -108,6 +109,25 @@ export async function startTestMcpServer(
                     async () => ({ content: [{ type: "text", text: "unused" }] }),
                 );
             }
+        }
+        if (options.resourceContent) {
+            server.registerTool(
+                "resource",
+                { description: "Return embedded text resource content.", inputSchema: z.object({}) },
+                async () =>
+                    ({
+                        content: [
+                            {
+                                type: "resource",
+                                resource: {
+                                    uri: "file:///README.md",
+                                    mimeType: "text/markdown",
+                                    text: "# tiny-agent",
+                                },
+                            },
+                        ],
+                    }) as never,
+            );
         }
         if (options.unsupportedContent) {
             server.registerTool(

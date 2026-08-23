@@ -167,6 +167,65 @@ fn strict_modern_is_stateless_and_repeats_metadata() {
 }
 
 #[test]
+fn normalizes_text_resources_and_rejects_binary_resources() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        for index in 0..4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let result = match index {
+                0 => {
+                    json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}})
+                }
+                1 => json!({
+                    "resultType":"complete",
+                    "ttlMs":0,
+                    "cacheScope":"private",
+                    "tools":[
+                        {"name":"text_resource","inputSchema":{"type":"object"}},
+                        {"name":"binary_resource","inputSchema":{"type":"object"}}
+                    ]
+                }),
+                2 => json!({
+                    "resultType":"complete",
+                    "content":[{"type":"resource","resource":{
+                        "uri":"repo://README.md",
+                        "mimeType":"text/markdown",
+                        "text":"# tiny-agent"
+                    }}]
+                }),
+                _ => json!({
+                    "resultType":"complete",
+                    "content":[{"type":"resource","resource":{
+                        "uri":"repo://image.png",
+                        "mimeType":"image/png",
+                        "blob":"iVBORw0KGgo="
+                    }}]
+                }),
+            };
+            respond(
+                &mut stream,
+                200,
+                json!({"jsonrpc":"2.0","id":request.1["id"],"result":result}),
+            );
+        }
+    });
+    let loaded = load_mcp_tools(config(url)).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    assert_eq!(
+        loaded.tools[0].execute(json!({}), &cancel).unwrap(),
+        "Resource: repo://README.md\n# tiny-agent"
+    );
+    assert_eq!(
+        loaded.tools[1].execute(json!({}), &cancel).unwrap_err(),
+        "Unsupported MCP content type: resource"
+    );
+    loaded.close();
+    server.join().unwrap();
+}
+
+#[test]
 fn modern_input_required_is_explicitly_unsupported() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());

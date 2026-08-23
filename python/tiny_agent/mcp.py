@@ -503,9 +503,20 @@ def display_tool_name(name: str) -> str:
 def _normalize_result(result: dict) -> str:
     content = result.get("content", [])
     if not isinstance(content, list): raise RuntimeError("Invalid MCP tool content")
-    unsupported = [item.get("type") if isinstance(item, dict) else "unknown" for item in content if not isinstance(item, dict) or item.get("type") != "text"]
+    parts: list[str] = []
+    unsupported: list[object] = []
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+            parts.append(item["text"]); continue
+        resource = item.get("resource") if isinstance(item, dict) and item.get("type") == "resource" else None
+        if isinstance(resource, dict) and isinstance(resource.get("text"), str) and "blob" not in resource:
+            uri = resource.get("uri")
+            if uri is None:
+                parts.append(resource["text"]); continue
+            if isinstance(uri, str):
+                parts.append(f"Resource: {uri}\n{resource['text']}"); continue
+        unsupported.append(item.get("type") if isinstance(item, dict) else "unknown")
     if unsupported: raise RuntimeError(f"Unsupported MCP content type: {', '.join(str(item) for item in unsupported)}")
-    parts = [item["text"] for item in content if isinstance(item.get("text"), str)]
     if "structuredContent" in result:
         try: structured = json.dumps(result["structuredContent"], ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError): raise RuntimeError("MCP structured content is not JSON-serializable") from None

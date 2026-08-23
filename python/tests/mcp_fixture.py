@@ -33,6 +33,8 @@ class McpFixture:
             {"name": "fail", "inputSchema": {"type": "object"}},
             {"name": "image", "inputSchema": {"type": "object"}},
             {"name": "slow", "inputSchema": {"type": "object"}},
+            {"name": "text_resource", "inputSchema": {"type": "object"}},
+            {"name": "binary_resource", "inputSchema": {"type": "object"}},
         ]
         fixture = self
 
@@ -103,6 +105,8 @@ class McpFixture:
                 if name == "image": return {"content": [{"type": "image", "data": "AA=="}]}
                 if name == "slow":
                     time.sleep(args.get("delay", 1)); return {"content": [{"type": "text", "text": "done"}]}
+                if name == "text_resource": return {"content": [{"type": "resource", "resource": {"uri": "file:///README.md", "mimeType": "text/markdown", "text": args.get("text", "resource body")}}]}
+                if name == "binary_resource": return {"content": [{"type": "resource", "resource": {"uri": "file:///image.png", "mimeType": "image/png", "blob": "AA=="}}]}
                 raise AssertionError(f"unknown tool {name}")
 
             def _rpc_result(self, request, result):

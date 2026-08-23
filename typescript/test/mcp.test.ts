@@ -171,7 +171,25 @@ test("loadMcpTools closes partial startup when discovered names cannot be mapped
     await server.close();
 });
 
-test("loadMcpTools rejects oversized discovery and unsupported content", async () => {
+test("loadMcpTools normalizes embedded text resources and rejects binary content", async () => {
+    const resource = await startTestMcpServer({ resourceContent: true });
+    const loaded = await loadMcpTools({ alias: "fixture", url: resource.url, allowedTools: ["resource"] });
+    assert.equal(await loaded.tools[0].execute({}), "Resource: file:///README.md\n# tiny-agent");
+    await loaded.close();
+    await resource.close();
+
+    const unsupported = await startTestMcpServer({ unsupportedContent: true });
+    const unsupportedLoaded = await loadMcpTools({
+        alias: "fixture",
+        url: unsupported.url,
+        allowedTools: ["image"],
+    });
+    await assert.rejects(() => unsupportedLoaded.tools[0].execute({}), /Unsupported MCP content type: image/);
+    await unsupportedLoaded.close();
+    await unsupported.close();
+});
+
+test("loadMcpTools rejects oversized discovery", async () => {
     const largeSchema = await startTestMcpServer({ largeSchema: true });
     await assert.rejects(() => loadMcpTools({ alias: "fixture", url: largeSchema.url }), /schema exceeds 50KB/);
     await largeSchema.close();
@@ -179,12 +197,6 @@ test("loadMcpTools rejects oversized discovery and unsupported content", async (
     const tooMany = await startTestMcpServer({ tooManyTools: true });
     await assert.rejects(() => loadMcpTools({ alias: "fixture", url: tooMany.url }), /more than 64 tools/);
     await tooMany.close();
-
-    const unsupported = await startTestMcpServer({ unsupportedContent: true });
-    const loaded = await loadMcpTools({ alias: "fixture", url: unsupported.url, allowedTools: ["image"] });
-    await assert.rejects(() => loaded.tools[0].execute({}), /Unsupported MCP content type: image/);
-    await loaded.close();
-    await unsupported.close();
 });
 
 test("loadMcpTools bounds large UTF-8 results", async (t) => {
