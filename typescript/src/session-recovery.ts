@@ -80,11 +80,15 @@ function startedSynthetic(tool: ToolCallState, reason: "interrupted"): Synthetic
 
 function assistantCalls(state: SessionState) {
     if (state.operation.kind !== "run" || !state.operation.step?.settledEntryId) return undefined;
-    const assistantIndex = state.transcript.findLastIndex(
-        (item) => item.role === "assistant" && item.tool_calls?.length,
-    );
+    // The current run step is always settled by the transcript's most recent assistant-role
+    // message: a new assistant turn can only be committed once every earlier assistant message's
+    // tool calls are fully resolved. Filtering this scan down to "the last assistant message that
+    // ever had tool calls" is wrong once the current turn's own response is a plain stop (no tool
+    // calls) — it then falls back to an older, already-resolved turn and reports its calls as
+    // still pending, which plans a stepAttempt against a now-stale contextThroughEntryId.
+    const assistantIndex = state.transcript.findLastIndex((item) => item.role === "assistant");
     const message = state.transcript[assistantIndex];
-    if (!message || message.role !== "assistant") return undefined;
+    if (!message || message.role !== "assistant" || !message.tool_calls?.length) return undefined;
     const completedResults = state.transcript.slice(assistantIndex + 1).filter((item) => item.role === "tool").length;
     return {
         assistantEntryId: state.operation.step.settledEntryId,
