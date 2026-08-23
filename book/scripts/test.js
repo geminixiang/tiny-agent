@@ -32,7 +32,12 @@ const assets = new Set(outputFiles.map((file) => file.slice(out.length).replaceA
 const pages = new Map();
 for (const file of htmlFiles) {
     const relative = file.slice(out.length).replaceAll("\\", "/");
-    const route = relative === "/index.html" ? "/" : relative === "/404.html" ? "/404.html" : relative.replace(/index\.html$/, "");
+    const route =
+        relative === "/index.html"
+            ? "/"
+            : relative === "/404.html"
+              ? "/404.html"
+              : relative.replace(/index\.html$/, "");
     pages.set(route, await readFile(file, "utf8"));
 }
 
@@ -52,7 +57,15 @@ test("chapter registry is unique and complete", () => {
 });
 
 test("build emits Cloudflare Pages files and content-hashed assets", async () => {
-    for (const file of ["index.html", "404.html", "sitemap.xml", "robots.txt", "_headers", "_redirects", "search-index.json"]) {
+    for (const file of [
+        "index.html",
+        "404.html",
+        "sitemap.xml",
+        "robots.txt",
+        "_headers",
+        "_redirects",
+        "search-index.json",
+    ]) {
         assert.ok((await stat(join(out, file))).isFile(), file);
     }
     assert.ok(cssAsset, "hashed CSS asset");
@@ -73,7 +86,12 @@ test("every page has accessible and canonical HTML basics", () => {
         assert.match(html, /<meta name="viewport"/);
         assert.match(html, /<main id="main"/);
         assert.match(html, /<h1[ >]/);
-        assert.match(html, new RegExp(`<link rel="canonical" href="https://tiny-agent\\.geminixiang\\.com${route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}">`));
+        assert.match(
+            html,
+            new RegExp(
+                `<link rel="canonical" href="https://tiny-agent\\.geminixiang\\.com${route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}">`,
+            ),
+        );
         const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
         assert.equal(new Set(ids).size, ids.length, `duplicate id in ${route}`);
     }
@@ -87,14 +105,77 @@ test("internal links resolve", () => {
             const [path, anchor] = href.split("#");
             if (path.startsWith("/assets/")) assert.ok(assets.has(path), `${route} → ${href}`);
             else assert.ok(pages.has(path || route), `${route} → ${href}`);
-            if (anchor) assert.match(pages.get(path || route), new RegExp(`id="${anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`));
+            if (anchor)
+                assert.match(
+                    pages.get(path || route),
+                    new RegExp(`id="${anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`),
+                );
+        }
+    }
+});
+
+test("repository source links point at real, current code", async () => {
+    const repoRoot = resolve(root, "..");
+    const blobPrefix = "https://github.com/geminixiang/tiny-agent/blob/main/";
+    const treePrefix = "https://github.com/geminixiang/tiny-agent/tree/main/";
+    for (const [route, html] of pages) {
+        for (const asideMatch of html.matchAll(/<aside class="note">[\s\S]*?<\/aside>/g)) {
+            for (const [, href, innerHtml] of asideMatch[0].matchAll(/<a href="([^"]+)">([\s\S]*?)<\/a>/g)) {
+                if (href.startsWith(treePrefix)) {
+                    const dirPath = href.slice(treePrefix.length).split("#")[0];
+                    assert.ok(
+                        (await stat(join(repoRoot, dirPath))).isDirectory(),
+                        `${route}: ${href} 指向不存在的目錄`,
+                    );
+                    continue;
+                }
+                if (!href.startsWith(blobPrefix)) continue;
+                const [filePath, lineAnchor] = href.slice(blobPrefix.length).split("#");
+                const absPath = join(repoRoot, filePath);
+                assert.ok((await stat(absPath)).isFile(), `${route}: ${href} 指向不存在的檔案 ${filePath}`);
+                if (!lineAnchor) continue;
+                const lineNum = Number(lineAnchor.replace(/^L/, ""));
+                const lines = (await readFile(absPath, "utf8")).split("\n");
+                assert.ok(
+                    lineNum >= 1 && lineNum <= lines.length,
+                    `${route}: ${href} 行號 ${lineNum} 超出檔案長度 ${lines.length}`,
+                );
+                const codeMatch = innerHtml.match(/<code>([^<]+)<\/code>/);
+                assert.ok(
+                    codeMatch,
+                    `${route}: ${href} 帶行號但連結文字沒有 <code>符號</code>，無法驗證連結是否指向正確位置`,
+                );
+                const symbol = codeMatch[1].replace(/\(\)$/, "").split(".").pop().trim();
+                const windowStart = Math.max(0, lineNum - 6);
+                const windowEnd = Math.min(lines.length, lineNum + 40);
+                const window = lines.slice(windowStart, windowEnd).join("\n");
+                assert.ok(
+                    window.includes(symbol),
+                    `${route}: ${href} 的 <code>${symbol}</code> 在 ${filePath}:${lineNum} 附近 ${windowStart + 1}-${windowEnd} 行範圍內找不到，連結可能已經漂移`,
+                );
+            }
         }
     }
 });
 
 test("chapters contain substantial required concepts and exercises", () => {
     const all = chapters.map((chapter) => pages.get(`/${chapter.slug}/`)).join("\n");
-    for (const term of ["runAgentLoop", "normalizeAssistantMessage", "Tool", "AGENTS.md", "progressive", "toolStarted", "process-crash", "planRecovery", "replayKey", "abortRequested", "source partition", "--json", "MCP", "authorization"]) {
+    for (const term of [
+        "runAgentLoop",
+        "normalizeAssistantMessage",
+        "Tool",
+        "AGENTS.md",
+        "progressive",
+        "toolStarted",
+        "process-crash",
+        "planRecovery",
+        "replayKey",
+        "abortRequested",
+        "source partition",
+        "--json",
+        "MCP",
+        "authorization",
+    ]) {
         assert.ok(all.includes(term), `missing concept: ${term}`);
     }
     for (const chapter of chapters) {
@@ -112,11 +193,88 @@ test("home acknowledges Pi without claiming a fork", () => {
     assert.match(home, /感謝 Pi 帶來的啟發/);
     assert.match(home, /href="https:\/\/github\.com\/earendil-works\/pi"/);
     assert.match(home, /不是Pi的fork或移植/);
+    assert.match(home, /本書內容對照 repository 目前狀態/);
 });
 
 test("source prose and interface strings use zh-TW", async () => {
     const deny = [
-        "章节", "筛选", "复制", "软件工程师", "代码", "数据", "服务器", "连接", "执行结果", "错误信息", "验证", "测试计划", "系统", "创建", "支持", "设置", "当前", "开始", "学习路径", "页面", "链接", "用户", "实现", "调用", "返回", "历史", "默认", "继续阅读", "加载", "读取", "档案", "进程", "恢复", "必须", "应该", "不会", "这些", "这个", "之后", "来自", "显示", "选择", "完整目录", "没有符合", "输入关键词", "分钟", "繁体中文（台湾）", "几十", "精确", "可见", "隐藏", "复杂", "阅读", "什么", "认识", "这样", "给", "触碰", "机会", "补出", "维护", "当测试", "等价", "尽力", "终止", "三条", "两者", "Repo内", "适配", "占用", "步骤", "成长", "下一轮", "变长", "减少", "单独", "规則",
+        "章节",
+        "筛选",
+        "复制",
+        "软件工程师",
+        "代码",
+        "数据",
+        "服务器",
+        "连接",
+        "执行结果",
+        "错误信息",
+        "验证",
+        "测试计划",
+        "系统",
+        "创建",
+        "支持",
+        "设置",
+        "当前",
+        "开始",
+        "学习路径",
+        "页面",
+        "链接",
+        "用户",
+        "实现",
+        "调用",
+        "返回",
+        "历史",
+        "默认",
+        "继续阅读",
+        "加载",
+        "读取",
+        "档案",
+        "进程",
+        "恢复",
+        "必须",
+        "应该",
+        "不会",
+        "这些",
+        "这个",
+        "之后",
+        "来自",
+        "显示",
+        "选择",
+        "完整目录",
+        "没有符合",
+        "输入关键词",
+        "分钟",
+        "繁体中文（台湾）",
+        "几十",
+        "精确",
+        "可见",
+        "隐藏",
+        "复杂",
+        "阅读",
+        "什么",
+        "认识",
+        "这样",
+        "给",
+        "触碰",
+        "机会",
+        "补出",
+        "维护",
+        "当测试",
+        "等价",
+        "尽力",
+        "终止",
+        "三条",
+        "两者",
+        "Repo内",
+        "适配",
+        "占用",
+        "步骤",
+        "成长",
+        "下一轮",
+        "变长",
+        "减少",
+        "单独",
+        "规則",
     ];
     const sourceFiles = [
         join(root, "README.md"),
@@ -128,7 +286,8 @@ test("source prose and interface strings use zh-TW", async () => {
     for (const file of sourceFiles) {
         let source = await readFile(file, "utf8");
         if (file.endsWith(".html")) source = source.replace(/<(pre|code)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
-        for (const phrase of deny) assert.ok(!source.includes(phrase), `${file.slice(root.length + 1)} contains ${phrase}`);
+        for (const phrase of deny)
+            assert.ok(!source.includes(phrase), `${file.slice(root.length + 1)} contains ${phrase}`);
     }
 });
 

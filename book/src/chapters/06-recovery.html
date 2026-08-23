@@ -1,9 +1,15 @@
-<p class="lead">重開檔案不應該直接執行effect。第一步是用pure reducer回答「durable facts表示什麼狀態」；第二步才由pure planner回答「在目前configuration下，允許做什麼」。</p>
+<p class="lead">
+    重開檔案不應該直接執行effect。第一步是用pure reducer回答「durable facts表示什麼狀態」；第二步才由pure
+    planner回答「在目前configuration下，允許做什麼」。
+</p>
 
 <h2 id="two-functions">兩個Pure Functions</h2>
 <pre><code>reduceSession(bytes) → SessionState
 planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
-<p>Reducer不認識目前tools、model或environment，也不執行I/O。Planner不寫Session、不分配ID、不呼叫model/tool，只描述下一項effect或blocked reason。這樣的分離讓每個crash prefix都能用deterministic fixtures驗證。</p>
+<p>
+    Reducer不認識目前tools、model或environment，也不執行I/O。Planner不寫Session、不分配ID、不呼叫model/tool，只描述下一項effect或blocked
+    reason。這樣的分離讓每個crash prefix都能用deterministic fixtures驗證。
+</p>
 
 <h2 id="state">Reducer 重建什麼</h2>
 <pre data-lang="ts"><code>type SessionState = {
@@ -15,30 +21,87 @@ planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
         | { kind: "run"; step?: StepState; toolCalls: ToolCallState[] }
         | { kind: "compaction"; step?: StepState; resultEntryId: string };
 };</code></pre>
-<p><code>transcript</code>保留完整model-visible歷史；<code>activeContext</code>反映最新compaction投影；<code>operation</code>說明目前是否有未完成run/compaction。</p>
+<p>
+    <code>transcript</code
+    >保留完整model-visible歷史；<code>activeContext</code>反映最新compaction投影；<code>operation</code>說明目前是否有未完成run/compaction。
+</p>
 
 <h2 id="retry-replay">Retry 與 Replay 完全不同</h2>
-<div class="compare"><section><h3>Retry Model Attempt</h3><p>重送相同context給無外部副作用的provider request。</p><ul><li>只處理crash-unknown attempt</li><li>configuration digest必須一致</li><li>最多attempt 2</li></ul></section><section><h3>Replay Tool Effect</h3><p>再次執行可能觸碰外部世界的tool。</p><ul><li>預設never</li><li>只有exact built-in read是safe</li><li>replayKey與environment必須一致</li></ul></section></div>
-<p>Live 429、5xx或timeout會寫<code>stepFailed</code>，不會自動retry。這份設計只允許process crash造成的unknown attempt多一次機會，避免無界重複計費。</p>
+<div class="compare">
+    <section>
+        <h3>Retry Model Attempt</h3>
+        <p>重送相同context給無外部副作用的provider request。</p>
+        <ul>
+            <li>只處理crash-unknown attempt</li>
+            <li>configuration digest必須一致</li>
+            <li>最多attempt 2</li>
+        </ul>
+    </section>
+    <section>
+        <h3>Replay Tool Effect</h3>
+        <p>再次執行可能觸碰外部世界的tool。</p>
+        <ul>
+            <li>預設never</li>
+            <li>只有exact built-in read是safe</li>
+            <li>replayKey與environment必須一致</li>
+        </ul>
+    </section>
+</div>
+<p>
+    Live 429、5xx或timeout會寫<code>stepFailed</code>，不會自動retry。這份設計只允許process crash造成的unknown
+    attempt多一次機會，避免無界重複計費。
+</p>
 
 <h2 id="planner-table">核心 Recovery 決策</h2>
-<table><thead><tr><th>Durable prefix</th><th>Planner結果</th></tr></thead><tbody>
-<tr><td>run已接受，沒有attempt</td><td>start assistant attempt 1</td></tr>
-<tr><td>attempt 1 open，沒有settled response</td><td>config相同則attempt 2，否則blocked</td></tr>
-<tr><td>attempt 2仍open</td><td><code>attempts_exhausted</code></td></tr>
-<tr><td>length response含tool calls</td><td>補truncated synthetic results，不執行</td></tr>
-<tr><td>safe read已started、無result</td><td>identity相同才replay</td></tr>
-<tr><td>never tool已started、無result</td><td>補interrupted，不replay</td></tr>
-<tr><td>terminal assistant已有、缺finish</td><td>只補operationFinished</td></tr>
-</tbody></table>
+<table>
+    <thead>
+        <tr>
+            <th>Durable prefix</th>
+            <th>Planner結果</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>run已接受，沒有attempt</td>
+            <td>start assistant attempt 1</td>
+        </tr>
+        <tr>
+            <td>attempt 1 open，沒有settled response</td>
+            <td>config相同則attempt 2，否則blocked</td>
+        </tr>
+        <tr>
+            <td>attempt 2仍open</td>
+            <td><code>attempts_exhausted</code></td>
+        </tr>
+        <tr>
+            <td>length response含tool calls</td>
+            <td>補truncated synthetic results，不執行</td>
+        </tr>
+        <tr>
+            <td>safe read已started、無result</td>
+            <td>identity相同才replay</td>
+        </tr>
+        <tr>
+            <td>never tool已started、無result</td>
+            <td>補interrupted，不replay</td>
+        </tr>
+        <tr>
+            <td>terminal assistant已有、缺finish</td>
+            <td>只補operationFinished</td>
+        </tr>
+    </tbody>
+</table>
 
 <h2 id="configuration">Configuration Identity 防止錯誤恢復</h2>
-<p>Attempt會保存model、system prompt digest、ordered tool definitions、adapter identity、routing identity與 output options digest。Planner會比較目前configuration。</p>
+<p>
+    Attempt會保存model、system prompt digest、ordered tool definitions、adapter identity、routing identity與 output
+    options digest。Planner會比較目前configuration。
+</p>
 <p>Tool intent另外綁定：</p>
 <ul>
-<li><code>environmentIdentity</code>：預設是cwd canonical realpath，也可由trusted host覆寫。</li>
-<li><code>replayKey</code>：識別exact implementation與effect semantics。</li>
-<li><code>definitionDigest</code>：識別model-facing schema。</li>
+    <li><code>environmentIdentity</code>：預設是cwd canonical realpath，也可由trusted host覆寫。</li>
+    <li><code>replayKey</code>：識別exact implementation與effect semantics。</li>
+    <li><code>definitionDigest</code>：識別model-facing schema。</li>
 </ul>
 <p>任何不一致都回傳blocked，不執行effect，也不寫 failed terminal。恢復原本configuration或明確abort，才是合法下一步。</p>
 
@@ -52,17 +115,40 @@ interrupted      → intent已寫，effect狀態未知，不重播</code></pre>
 <p>這些內容是跨語言contract，不能localize或隨意改寫，因為它們同時進入model transcript與shared fixtures。</p>
 
 <h2 id="fixtures">把所有 Durable Prefix 當測試對象</h2>
-<p>Repo中的shared corpus包含reducer與planner fixtures。每個語言都必須從相同JSONL bytes得到等價state，從真實prefix與current configuration得到相同plan。它不是測試helper，而是四語言parity的永久merge gate。</p>
+<p>
+    Repo中的shared corpus包含reducer與planner fixtures。每個語言都必須從相同JSONL
+    bytes得到等價state，從真實prefix與current configuration得到相同plan。它不是測試helper，而是四語言parity的永久merge
+    gate。
+</p>
 <pre data-lang="sh"><code>make test
 # TypeScript / Go / Python / Rust 都會跑各自的 reducer、planner 與 production tests</code></pre>
 
 <h2 id="hands-on">親手驗證</h2>
-<p>Reducer 與 planner 都是 pure functions，因此最好的練習是直接對同一 durable prefix 執行離線測試。先跑 safe 與 never 兩條 recovery fixture：</p>
-<pre data-lang="sh"><code>npm --prefix typescript test -- \
-  --test-name-pattern="replay-safe-tool|interrupted-never-tool"
+<p>
+    Reducer 與 planner 都是 pure functions，因此最好的練習是直接對同一 durable prefix 執行離線測試。先跑 safe 與 never
+    兩條 recovery fixture：
+</p>
+<pre data-lang="sh"><code>cd typescript
+node --import tsx --test --test-name-pattern="replay-safe-tool|interrupted-never-tool" test/session-reducer.test.ts
 
-cat schemas/session/planner-fixtures/replay-safe-tool.expected.json
-cat schemas/session/planner-fixtures/interrupted-never-tool.expected.json</code></pre>
-<p>比較兩份 plan：safe read 必須包含相同的 <code>replayKey</code> 與 environment identity；never tool 只能 materialize <code>interrupted</code> synthetic result，不能再次執行 effect。再將 fixture 的 current configuration 中任一 digest 改掉，重跑 planner 測試，預期結果應是 blocked，而且原 JSONL bytes 不得改變。</p>
+cat ../schemas/session/planner-fixtures/replay-safe-tool.expected.json
+cat ../schemas/session/planner-fixtures/interrupted-never-tool.expected.json</code></pre>
+<p>
+    <code>--test-name-pattern</code>必須放在檔案路徑之前才會實際過濾；放在<code>npm test --</code
+    >之後會被接到glob尾端而完全不生效，因此這裡直接呼叫<code>node --test</code
+    >並指定單一檔案，只跑這兩個fixture對應的測試。
+</p>
+<p>
+    比較兩份 plan：safe read 必須包含相同的 <code>replayKey</code> 與 environment identity；never tool 只能 materialize
+    <code>interrupted</code> synthetic result，不能再次執行 effect。再將 fixture 的 current configuration 中任一 digest
+    改掉，重跑 planner 測試，預期結果應是 blocked，而且原 JSONL bytes 不得改變。
+</p>
 
-<aside class="note"><strong>閱讀原始碼</strong><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session-reducer.ts#L1097">reduceSession()</a>、<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session-recovery.ts#L113">planRecovery()</a>。</aside>
+<aside class="note">
+    <strong>閱讀原始碼</strong
+    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session-reducer.ts#L1097"
+        ><code>reduceSession()</code></a
+    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session-recovery.ts#L113"
+        ><code>planRecovery()</code></a
+    >。
+</aside>

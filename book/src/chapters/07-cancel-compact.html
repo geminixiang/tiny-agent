@@ -1,4 +1,7 @@
-<p class="lead">Cancellation不是「把Promise遺失掉」。可靠Agent必須先留下durable abort intent，再通知目前phase，並在退出前補齊合法transcript與operation outcome。</p>
+<p class="lead">
+    Cancellation不是「把Promise遺失掉」。可靠Agent必須先留下durable abort
+    intent，再通知目前phase，並在退出前補齊合法transcript與operation outcome。
+</p>
 
 <h2 id="abort-order">Abort 的正確順序</h2>
 <pre><code>persist abortRequested
@@ -6,26 +9,58 @@
 → reconcile open attempt 與 tool calls
 → persist operationFinished(aborted)
 → release resources</code></pre>
-<p>順序不能反過來。若先signal 後crash，Session可能完全不知道使用者曾要求abort；恢復程式可能錯誤地retry model或replay safe tool。</p>
+<p>
+    順序不能反過來。若先signal 後crash，Session可能完全不知道使用者曾要求abort；恢復程式可能錯誤地retry model或replay
+    safe tool。
+</p>
 
 <h2 id="phase-routing">Cancellation 依Phase分流</h2>
-<table><thead><tr><th>Phase</th><th>動作</th><th>Durable reconciliation</th></tr></thead><tbody>
-<tr><td>model</td><td>取消HTTP request或停止前景等待</td><td>open attempt寫<code>stepFailed(aborted)</code></td></tr>
-<tr><td>tool</td><td>signal tool；bash盡力終止process tree</td><td>started call寫interrupted；未started寫aborted</td></tr>
-<tr><td>compaction</td><td>取消summary request</td><td>關閉attempt，再結束compaction operation</td></tr>
-</tbody></table>
-<p>三條路徑互斥，不是依序執行。<code>Esc</code>只abort目前operation；<code>Ctrl+C</code>在必要時abort後，還會關閉MCP clients、Session writer並恢復terminal。</p>
+<table>
+    <thead>
+        <tr>
+            <th>Phase</th>
+            <th>動作</th>
+            <th>Durable reconciliation</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>model</td>
+            <td>取消HTTP request或停止前景等待</td>
+            <td>open attempt寫<code>stepFailed(aborted)</code></td>
+        </tr>
+        <tr>
+            <td>tool</td>
+            <td>signal tool；bash盡力終止process tree</td>
+            <td>started call寫interrupted；未started寫aborted</td>
+        </tr>
+        <tr>
+            <td>compaction</td>
+            <td>取消summary request</td>
+            <td>關閉attempt，再結束compaction operation</td>
+        </tr>
+    </tbody>
+</table>
+<p>
+    三條路徑互斥，不是依序執行。<code>Esc</code>只abort目前operation；<code>Ctrl+C</code>在必要時abort後，還會關閉MCP
+    clients、Session writer並恢復terminal。
+</p>
 
 <h2 id="race">Abort Race 的核心規則</h2>
 <p>Abort可能與model response或tool completion同一時間發生。系統必須把競爭序列化成兩種合法歷史：</p>
 <ol>
-<li>成功settlement先durable：abort看到operation已結束，不改寫結果。</li>
-<li><code>abortRequested</code>先durable：晚到的成功response不能再把operation寫成completed。</li>
+    <li>成功settlement先durable：abort看到operation已結束，不改寫結果。</li>
+    <li><code>abortRequested</code>先durable：晚到的成功response不能再把operation寫成completed。</li>
 </ol>
-<p>這也是為什麼durable Session不只靠<code>AbortController.signal.aborted</code>：memory flag無法解釋crash後的先後順序。</p>
+<p>
+    這也是為什麼durable Session不只靠<code>AbortController.signal.aborted</code>：memory flag無法解釋crash後的先後順序。
+</p>
 
 <h2 id="compaction">Compaction 不是刪除歷史</h2>
-<p><code>/compact</code>呼叫目前model產生summary，然後重建active context。原始facts仍留在append-only Session中，因此可以audit與 recovery。</p>
+<p>
+    <code>/compact</code>呼叫目前model產生summary，然後重建active context。原始facts仍留在append-only
+    Session中，因此可以audit與 recovery。
+</p>
 <pre><code>完整 durable facts
 → reducer materialized active context
 → summary + retained message tail
@@ -33,10 +68,19 @@
 
 <h2 id="two-boundaries">兩個容易混淆的邊界</h2>
 <h3>1. Active-context cut</h3>
-<p>用於決定本次摘要輸入：保留至少最近6 則<strong>message</strong>，再把cut向前移動到user boundary，避免拆散完整turn。Repeated compaction時，prior summary會參與新的摘要輸入。</p>
+<p>
+    用於決定本次摘要輸入：保留至少最近6 則<strong>message</strong>，再把cut向前移動到user
+    boundary，避免拆散完整turn。Repeated compaction時，prior summary會參與新的摘要輸入。
+</p>
 <h3>2. Durable source partition</h3>
-<p>用於稽核與 recovery：保存截至<code>inputThroughEntryId</code>的所有durable source message-entry IDs，並分成<code>compactedEntryIds</code>與<code>retainedEntryIds</code>，再計算<code>sourceDigest</code>。</p>
-<p>Prior summary不是source message entry，所以不會放進source partition；但它仍會參與active-context summarization。兩者解決不同問題。</p>
+<p>
+    用於稽核與 recovery：保存截至<code>inputThroughEntryId</code>的所有durable source message-entry
+    IDs，並分成<code>compactedEntryIds</code>與<code>retainedEntryIds</code>，再計算<code>sourceDigest</code>。
+</p>
+<p>
+    Prior summary不是source message entry，所以不會放進source partition；但它仍會參與active-context
+    summarization。兩者解決不同問題。
+</p>
 
 <h2 id="durable-compact">Compaction 也是正式 Operation</h2>
 <pre><code>compactionStarted
@@ -44,18 +88,42 @@
 → usage
 → compaction entry
 → operationFinished(completed)</code></pre>
-<p>Compaction entry保存materialized retained tail與 source IDs。若crash發生在summary已經落盤、finish尚未落盤，recovery只補<code>operationFinished</code>，不會再次呼叫model。若open attempt未知，則遵循相同attempt cap。</p>
+<p>
+    Compaction entry保存materialized retained tail與 source
+    IDs。若crash發生在summary已經落盤、finish尚未落盤，recovery只補<code>operationFinished</code>，不會再次呼叫model。若open
+    attempt未知，則遵循相同attempt cap。
+</p>
 
 <h2 id="output-limits">Tool Output 也是 Context 控制</h2>
-<p>TypeScript 與 Rust 會保留最後 2,000 行或 50KB（先達到者）；Go 與 Python 則以約 50KB 的 byte-oriented tail 為主，不承諾相同的行數語意。四種實作都有約 10MB 的 capture safety limit，但超限行為不同：有的回傳 capped-output 診斷，有的將它視為 tool error。只有在實作確實捕獲完整輸出時，才會另存 <code>.tiny-agent/tool-output/</code>並回傳路徑。</p>
+<p>
+    TypeScript 與 Rust 會保留最後 2,000 行或 50KB（先達到者）；Go 與 Python 則以約 50KB 的 byte-oriented tail
+    為主，不承諾相同的行數語意。四種實作都有約 10MB 的 capture safety limit，但超限行為不同：有的回傳 capped-output
+    診斷，有的將它視為 tool error。只有在實作確實捕獲完整輸出時，才會另存
+    <code>.tiny-agent/tool-output/</code>並回傳路徑。
+</p>
 
 <h2 id="hands-on">親手驗證</h2>
-<p>以下練習完全使用 repository 的 deterministic tests，不需要 OpenRouter key。先觀察 cancellation 與 compaction 的 production regression tests，再閱讀固定的 durable facts：</p>
+<p>
+    以下練習完全使用 repository 的 deterministic tests，不需要 OpenRouter key。先觀察 cancellation 與 compaction 的
+    production regression tests，再閱讀固定的 durable facts：
+</p>
 <pre data-lang="sh"><code>npm --prefix typescript test -- \
   --test-name-pattern="abort|compaction"
 
 grep -R 'abortRequested\|compactionStarted\|sourceDigest' \
   schemas/session/fixtures schemas/session/planner-fixtures | head -40</code></pre>
-<p>檢查順序：先找到 <code>abortRequested</code>，再確認對應的 attempt/tool reconciliation 與 <code>operationFinished</code>；compaction 則比對 source partition、<code>sourceDigest</code> 與 materialized retained tail。最後重跑同一個 recovery test，確認第二次 resume 不會再次呼叫模型或重複寫入 outcome。</p>
+<p>
+    檢查順序：先找到 <code>abortRequested</code>，再確認對應的 attempt/tool reconciliation 與
+    <code>operationFinished</code>；compaction 則比對 source partition、<code>sourceDigest</code> 與 materialized
+    retained tail。最後重跑同一個 recovery test，確認第二次 resume 不會再次呼叫模型或重複寫入 outcome。
+</p>
 
-<aside class="note"><strong>閱讀原始碼</strong><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L929">durable compact()</a>、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/compaction-comparison.md">主流compaction比較</a>。</aside>
+<aside class="note">
+    <strong>閱讀原始碼</strong
+    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L929"
+        >durable <code>compact()</code></a
+    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/compaction-comparison.md">主流compaction比較</a
+    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/lang-behavior-matrix.md"
+        >四語言bash output行為完整矩陣</a
+    >。
+</aside>

@@ -8,15 +8,18 @@ const bookRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const out = resolve(process.env.BOOK_OUT_DIR || join(bookRoot, "dist"));
 const origin = "https://tiny-agent.geminixiang.com";
 const repo = "https://github.com/geminixiang/tiny-agent";
-const escape = (value) => String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+const escape = (value) =>
+    String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 const hash = (content) => createHash("sha256").update(content).digest("hex").slice(0, 12);
 
 function chapterGroups(current) {
     let part = "";
-    return chapters.map((chapter, index) => {
-        const heading = chapter.part === part ? "" : `<li class="nav-part">${escape((part = chapter.part))}</li>`;
-        return `${heading}<li data-search-item><a href="/${chapter.slug}/"${chapter.slug === current ? ' aria-current="page"' : ""}><span class="chapter-number">${String(index + 1).padStart(2, "0")}</span><span>${escape(chapter.title)}</span></a></li>`;
-    }).join("");
+    return chapters
+        .map((chapter, index) => {
+            const heading = chapter.part === part ? "" : `<li class="nav-part">${escape((part = chapter.part))}</li>`;
+            return `${heading}<li data-search-item><a href="/${chapter.slug}/"${chapter.slug === current ? ' aria-current="page"' : ""}><span class="chapter-number">${String(index + 1).padStart(2, "0")}</span><span>${escape(chapter.title)}</span></a></li>`;
+        })
+        .join("");
 }
 
 function layout({ title, description, path, current = "", body, assets, type = "article" }) {
@@ -78,14 +81,20 @@ ${next ? `<a href="/${next.slug}/"><small>下一章</small>${escape(next.title)}
 
 function homePage(assets) {
     const total = chapters.reduce((sum, chapter) => sum + chapter.minutes, 0);
-    const cards = chapters.map((chapter, index) => `<a class="path-card" href="/${chapter.slug}/"><span class="index">${String(index + 1).padStart(2, "0")}</span><span><h2>${escape(chapter.title)}</h2><p>${escape(chapter.description)}</p></span><time>${chapter.minutes} 分鐘</time></a>`).join("");
+    const cards = chapters
+        .map(
+            (chapter, index) =>
+                `<a class="path-card" href="/${chapter.slug}/"><span class="index">${String(index + 1).padStart(2, "0")}</span><span><h2>${escape(chapter.title)}</h2><p>${escape(chapter.description)}</p></span><time>${chapter.minutes} 分鐘</time></a>`,
+        )
+        .join("");
     return layout({
         title: "從第一性原理打造可靠 AI Agent",
-        description: "給軟體工程師的繁體中文 AI Agent 工程教材：從最小迴圈、tools 與 context，一路走到 durable Session、recovery、測試與安全邊界。",
+        description:
+            "給軟體工程師的繁體中文 AI Agent 工程教材：從最小迴圈、tools 與 context，一路走到 durable Session、recovery、測試與安全邊界。",
         path: "/",
         type: "home",
         assets,
-        body: `<article class="article home-intro"><p class="eyebrow">繁體中文（臺灣）· 開源工程教材</p><h1>從第一性原理，打造能穩定執行的 AI Agent</h1><p class="deck">這不是功能清單，也不是 prompt 技巧合集。我們從不可再刪的 model → tool → result 閉環開始，逐步推導 context、durable intent、crash recovery 與 production 邊界。</p><div class="meta"><span>${chapters.length} 章</span><span>約 ${total} 分鐘</span><span>TypeScript / Go / Python / Rust</span></div><a href="/${chapters[0].slug}/">開始第一章 →</a><section class="path" aria-labelledby="path-title"><h2 id="path-title">學習路徑</h2>${cards}</section><aside class="acknowledgement"><h2>感謝 Pi 帶來的啟發</h2><p>這本書與tiny-agent的許多設計思考受到<a href="https://github.com/earendil-works/pi">Pi</a>啟發，尤其是精簡的agent loop、Tool模型、skills漸進載入、compaction，以及讓coding agent保持可理解與可操作的工程取向。感謝Pi及其貢獻者公開實作與文件。</p><p>Tiny-agent不是Pi的fork或移植；它是獨立的四語言教學實作，並針對transactional Session、crash recovery與跨語言conformance發展自己的contract。</p></aside><section class="planned"><h2>接下來會寫</h2><p>以下是已規劃的 polyglot 與企業實戰篇；先顯示路線，不建立空白頁面。</p><ul>${planned.map((item) => `<li>${escape(item)}</li>`).join("")}</ul></section></article>`,
+        body: `<article class="article home-intro"><p class="eyebrow">繁體中文（臺灣）· 開源工程教材</p><h1>從第一性原理，打造能穩定執行的 AI Agent</h1><p class="deck">這不是功能清單，也不是 prompt 技巧合集。我們從不可再刪的 model → tool → result 閉環開始，逐步推導 context、durable intent、crash recovery 與 production 邊界。</p><div class="meta"><span>${chapters.length} 章</span><span>約 ${total} 分鐘</span><span>TypeScript / Go / Python / Rust</span></div><a href="/${chapters[0].slug}/">開始第一章 →</a><section class="path" aria-labelledby="path-title"><h2 id="path-title">學習路徑</h2>${cards}</section><aside class="acknowledgement"><h2>感謝 Pi 帶來的啟發</h2><p>這本書與tiny-agent的許多設計思考受到<a href="https://github.com/earendil-works/pi">Pi</a>啟發，尤其是精簡的agent loop、Tool模型、skills漸進載入、compaction，以及讓coding agent保持可理解與可操作的工程取向。感謝Pi及其貢獻者公開實作與文件。</p><p>Tiny-agent不是Pi的fork或移植；它是獨立的四語言教學實作，並針對transactional Session、crash recovery與跨語言conformance發展自己的contract。</p></aside><p class="version-note">本書內容對照 repository 目前狀態；四語言能力差異等細節請以 repo 原始碼為準。</p><section class="planned"><h2>接下來會寫</h2><p>以下是已規劃的 polyglot 與企業實戰篇；先顯示路線，不建立空白頁面。</p><ul>${planned.map((item) => `<li>${escape(item)}</li>`).join("")}</ul></section></article>`,
     });
 }
 
@@ -109,12 +118,34 @@ async function main() {
         await writeFile(join(directory, "index.html"), articlePage(chapter, index, content, assets));
     }
     const urls = ["/", ...chapters.map((chapter) => `/${chapter.slug}/`)];
-    await writeFile(join(out, "sitemap.xml"), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((path) => `  <url><loc>${origin}${path}</loc></url>`).join("\n")}\n</urlset>\n`);
+    await writeFile(
+        join(out, "sitemap.xml"),
+        `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((path) => `  <url><loc>${origin}${path}</loc></url>`).join("\n")}\n</urlset>\n`,
+    );
     await writeFile(join(out, "robots.txt"), `User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`);
-    await writeFile(join(out, "404.html"), layout({ title: "找不到頁面", description: "這個頁面不存在。", path: "/404.html", assets, body: `<article class="article"><p class="eyebrow">404</p><h1>這裡沒有章節</h1><p class="deck">連結可能已經改變，回到學習路徑繼續閱讀。</p><p><a href="/">返回全書目錄 →</a></p></article>` }));
-    await writeFile(join(out, "_headers"), `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`);
+    await writeFile(
+        join(out, "404.html"),
+        layout({
+            title: "找不到頁面",
+            description: "這個頁面不存在。",
+            path: "/404.html",
+            assets,
+            body: `<article class="article"><p class="eyebrow">404</p><h1>這裡沒有章節</h1><p class="deck">連結可能已經改變，回到學習路徑繼續閱讀。</p><p><a href="/">返回全書目錄 →</a></p></article>`,
+        }),
+    );
+    await writeFile(
+        join(out, "_headers"),
+        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
+    );
     await writeFile(join(out, "_redirects"), `/index.html / 301\n`);
-    await writeFile(join(out, "search-index.json"), JSON.stringify(chapters.map(({ slug, title, description, part }) => ({ slug, title, description, part })), null, 2));
+    await writeFile(
+        join(out, "search-index.json"),
+        JSON.stringify(
+            chapters.map(({ slug, title, description, part }) => ({ slug, title, description, part })),
+            null,
+            2,
+        ),
+    );
     console.log(`Built ${chapters.length + 1} pages in ${out}`);
 }
 
