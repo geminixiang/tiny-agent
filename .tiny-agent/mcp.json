@@ -1,0 +1,10 @@
+{
+    "servers": {
+        "github": {
+            "url": "https://api.githubcopilot.com/mcp/",
+            "tokenEnv": "GITHUB_MCP_TOKEN",
+            "allowedTools": ["get_file_contents", "search_code"],
+            "callTimeoutMs": 30000
+        }
+    }
+}

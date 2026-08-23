@@ -79,30 +79,17 @@ Ctrl+C   離開
 
 ## MCP
 
-建立 GitHub personal access token，並將它放在環境變數中。Catalog 只記錄環境變數名稱：
+Repository 已提供 [`.tiny-agent/mcp.json`](.tiny-agent/mcp.json)，其中只記錄 GitHub endpoint、tool allowlist 與 credential 的環境變數名稱，不包含 token。
 
-```json
-{
-    "servers": {
-        "github": {
-            "url": "https://api.githubcopilot.com/mcp/",
-            "tokenEnv": "GITHUB_MCP_TOKEN",
-            "allowedTools": ["get_file_contents", "search_code"],
-            "callTimeoutMs": 30000
-        }
-    }
-}
-```
-
-指定 catalog，再使用 GitHub server：
+設定 catalog 路徑與 GitHub token：
 
 ```bash
-export TINY_MCP_CONFIG=/path/to/mcp.json
-export GITHUB_MCP_TOKEN=...
+export TINY_MCP_CONFIG="$PWD/.tiny-agent/mcp.json"
+export GITHUB_MCP_TOKEN="$(gh auth token)"
 tiny-ts --mcp github --plugin read "只使用 GitHub MCP 的 get_file_contents，讀取 geminixiang/tiny-agent 的 README"
 ```
 
-`TINY_MCP_CONFIG` 是使用 MCP 時唯一的 catalog 來源。tiny-agent 不會讀取 home directory 或 repository 內的預設 MCP 設定。
+`TINY_MCP_CONFIG` 是使用 MCP 時唯一的 catalog 來源。tiny-agent 不會自動讀取 repository 或 home directory 內的設定。
 
 ## 致謝
 
