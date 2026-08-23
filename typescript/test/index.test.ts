@@ -166,8 +166,16 @@ test("buildConfiguration rejects a lone surrogate instead of silently digesting 
 test("MCP adapter identity changes durable tool definitions without exposing endpoint or token", async (t) => {
     const server = await startTestMcpServer();
     t.after(async () => server.close());
-    const first = await loadMcpTools({ alias: "fixture", url: server.url, headers: { Authorization: "Bearer one" } });
-    const second = await loadMcpTools({ alias: "fixture", url: server.url, headers: { "X-API-Key": "two" } });
+    const first = await loadMcpTools({
+        alias: "fixture",
+        url: server.url,
+        headers: { authorization: "Bearer one" },
+    });
+    const second = await loadMcpTools({
+        alias: "fixture",
+        url: server.url,
+        headers: { "x-api-key": "two" },
+    });
     t.after(async () => Promise.all([first.close(), second.close()]));
     const firstConfiguration = buildConfiguration("system", first.tools);
     const secondConfiguration = buildConfiguration("system", second.tools);

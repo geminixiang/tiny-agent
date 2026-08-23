@@ -109,8 +109,9 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
 }
 
 function mcpAuthType(headers?: Record<string, string>) {
-    if (headers?.["X-API-Key"] !== undefined) return "metabaseApiKey";
-    if (headers?.Authorization !== undefined) return "bearer";
+    const normalized = new Headers(headers);
+    if (normalized.has("x-api-key")) return "metabaseApiKey";
+    if (normalized.has("authorization")) return "bearer";
     return "none";
 }
 
