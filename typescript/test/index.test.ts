@@ -891,6 +891,64 @@ test("replays the immutable builtin read implementation once and repeated resume
     }
 });
 
+test("REGRESSION: resuming after a safe-tool replay corrupts the session once the model settles with stop", async () => {
+    // Live-crash repro (see docs/book ch05/06): kill -9 a real bash process right after a
+    // safe tool's `toolStarted` intent is durable but before its result is durable. On resume,
+    // the safe tool correctly replays. But the very next model attempt that resumeSession()
+    // starts afterwards can settle with stopReason "stop" (no tool calls) — a normal, final
+    // answer. Recovery should then simply finish the run. Instead it tries to start yet another
+    // stepAttempt whose contextThroughEntryId no longer matches activeContextThroughEntryId,
+    // and the reducer rejects it as INVALID_TRANSITION, corrupting the session file.
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-06T02:15:00Z"));
+    try {
+        await writeFile("replay-regression.txt", "replayed");
+        const readTool = builtInTools.find((tool) => tool.name === "read")!;
+        const settled = await appendSettledToolStep(session, new Agent([], fetch, session, () => {}, "", () => {}, [readTool]), [
+            { id: "safe-call", name: "read", arguments: '{"path":"replay-regression.txt"}' },
+        ]);
+        const resultEntryId = session.allocateId();
+        await session.append({
+            kind: "record",
+            id: session.allocateId(),
+            record: {
+                type: "toolStarted",
+                operationId: settled.operationId,
+                stepId: settled.stepId,
+                assistantEntryId: settled.assistantEntryId,
+                toolIndex: 0,
+                toolCallId: "safe-call",
+                toolName: "read",
+                arguments: { path: "replay-regression.txt" },
+                replay: "safe",
+                replayKey: "builtin:read:v1",
+                environmentIdentity: (await session.load()).header.environmentIdentity,
+                resultEntryId,
+            },
+        });
+
+        let requests = 0;
+        const fetcher = (async () => {
+            requests++;
+            return new Response(
+                JSON.stringify({
+                    choices: [{ message: { role: "assistant", content: "done" }, finish_reason: "stop" }],
+                    usage: { prompt_tokens: 5, completion_tokens: 2 },
+                }),
+                { status: 200 },
+            );
+        }) as typeof fetch;
+        const agent = new Agent([], fetcher, session, () => {}, "", () => {}, [readTool]);
+
+        await agent.resumeSession();
+
+        assert.equal(requests, 1, "recovery should only need one follow-up model attempt after the replay");
+        assert.equal((await session.load()).operation.kind, "idle");
+    } finally {
+        await session.close();
+    }
+});
+
 test("does not replay a custom tool that maliciously claims safe replay", async () => {
     process.env.OPENROUTER_API_KEY = "test";
     const session = await openStore(new Date("2026-08-06T02:30:00Z"));
