@@ -65,7 +65,7 @@ func TestLoadMCPConfigsStrictCatalogAndToken(t *testing.T) {
 		{`{"servers":{},"extra":true}`, "Unknown MCP catalog field"},
 		{`{"servers":{"fixture":{"url":"https://x","header":"secret"}}}`, "Unknown MCP server fixture field"},
 		{`{"servers":{"fixture":{"url":"https://x","allowedTools":null}}}`, "allowedTools must contain nonempty strings"},
-		{`{"servers":{"fixture":{"url":"https://x","allowedTools":["x","x"]}}}`, "must not contain duplicates"},
+		{`{"servers":{"fixture":{"url":"https://x","allowedTools":["x","x"]}}}`, "allowedTools must contain nonempty, unique strings"},
 		{catalog, "environment variable is not set"},
 	} {
 		if err := os.WriteFile(path, []byte(test.body), 0o644); err != nil {
@@ -101,7 +101,7 @@ func TestModernStatelessMCPNegotiation(t *testing.T) {
 			return
 		}
 		calls = append(calls, request.Method)
-		if r.Header.Get("Mcp-Protocol-Version") != modernMCPVersion || r.Header.Get("Mcp-Method") != request.Method || r.Header.Get("Mcp-Session-Id") != "" {
+		if r.Header.Get("Mcp-Protocol-Version") != modernMCPVersion || r.Header.Get("Mcp-Session-Id") != "" {
 			t.Errorf("modern headers: %#v", r.Header)
 		}
 		meta, _ := request.Params["_meta"].(map[string]any)
@@ -116,7 +116,7 @@ func TestModernStatelessMCPNegotiation(t *testing.T) {
 		case "tools/list":
 			writeRPC(w, request.ID, map[string]any{"tools": []any{map[string]any{"name": "你好", "inputSchema": map[string]any{"type": "object"}}}, "ttlMs": 1000, "cacheScope": "private"})
 		case "tools/call":
-			if r.Header.Get("Mcp-Name") != "=?base64?5L2g5aW9?=" {
+			if r.Header.Get("Mcp-Name") != "你好" {
 				t.Errorf("Mcp-Name: %q", r.Header.Get("Mcp-Name"))
 			}
 			writeRPC(w, request.ID, map[string]any{"content": []map[string]string{{"type": "text", "text": "modern"}}})
@@ -169,48 +169,30 @@ func TestModernCorrectiveRetry(t *testing.T) {
 	}
 }
 
-func TestModernOnlyRejectsServerWithoutModernSupport(t *testing.T) {
+func TestSDKRejectsUnsupportedLegacyMCP(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			ID int `json:"id"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&request)
-		writeRPCError(w, request.ID, -32022, map[string]any{"supported": []string{"2025-11-25"}})
+		writeRPCError(w, request.ID, -32022, map[string]any{"supported": []string{"2025-03-26"}})
 	}))
 	defer server.Close()
-	if _, err := loadMCPTools(context.Background(), MCPConfig{Alias: "fixture", URL: server.URL}, server.Client()); err == nil ||
-		!strings.Contains(err.Error(), "does not support the modern protocol") {
-		t.Fatalf("expected a loud modern-only rejection, got: %v", err)
+	if _, err := loadMCPTools(context.Background(), MCPConfig{Alias: "fixture", URL: server.URL}, server.Client()); err == nil {
+		t.Fatal("expected unsupported legacy MCP to fail")
 	}
 }
 
-func TestMCPResponseBoundAndSanitizedErrors(t *testing.T) {
+func TestMCPSDKTransportErrorsAreSanitized(t *testing.T) {
 	secret := "SECRET-CANARY-DO-NOT-LEAK"
-	for _, test := range []struct {
-		name    string
-		handler http.HandlerFunc
-		match   string
-	}{
-		{"status", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusBadGateway)
-			_, _ = fmt.Fprint(w, secret)
-		}, "MCP HTTP 502 (server error)"},
-		{"chunked", func(w http.ResponseWriter, r *http.Request) {
-			w.(http.Flusher).Flush()
-			chunk := strings.Repeat("x", 64*1024)
-			for written := 0; written <= maxMCPHTTPBytes; written += len(chunk) {
-				_, _ = fmt.Fprint(w, chunk)
-			}
-		}, "MCP response exceeds 10MB"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(test.handler)
-			defer server.Close()
-			_, err := loadMCPTools(context.Background(), MCPConfig{Alias: "x", URL: server.URL}, server.Client())
-			if err == nil || !strings.Contains(err.Error(), test.match) || strings.Contains(err.Error(), secret) {
-				t.Fatalf("error: %v", err)
-			}
-		})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprint(w, secret)
+	}))
+	defer server.Close()
+	_, err := loadMCPTools(context.Background(), MCPConfig{Alias: "x", URL: server.URL}, server.Client())
+	if err == nil || !strings.Contains(err.Error(), "Bad Gateway") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("error: %v", err)
 	}
 }
 

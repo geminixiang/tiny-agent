@@ -1,14 +1,14 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,12 +20,13 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const (
 	modernMCPVersion  = "2026-07-28"
 	maxMCPTools       = 64
-	maxMCPHTTPBytes   = 10 * 1024 * 1024
 	maxMCPSchemaBytes = 50 * 1024
 	maxMCPDescription = 8 * 1024
 	maxMCPSchemaDepth = 20
@@ -38,6 +39,7 @@ type Tool struct {
 	Parameters  map[string]any
 	Replay      string
 	ReplayKey   string
+	Identity    string
 	Execute     func(context.Context, map[string]any) (string, error)
 }
 
@@ -45,43 +47,38 @@ type MCPConfig struct {
 	Alias        string
 	URL          string
 	Token        string
+	AuthHeader   string
+	AuthEnv      string
 	AllowedTools []string
 	CallTimeout  time.Duration
 }
 
 type MCPClient struct {
 	config          MCPConfig
-	httpClient      *http.Client
+	session         *sdk.ClientSession
 	protocolVersion string
 	tools           []Tool
 	mu              sync.Mutex
-	nextID          int
 	closed          bool
 }
 
-type mcpHTTPError struct {
-	status int
-	body   []byte
+type mcpAuthTransport struct {
+	base   http.RoundTripper
+	header string
+	token  string
 }
 
-func (e *mcpHTTPError) Error() string {
-	class := "request failed"
-	if e.status >= 500 {
-		class = "server error"
-	} else if e.status == http.StatusUnauthorized || e.status == http.StatusForbidden {
-		class = "authentication failed"
-	} else if e.status >= 400 {
-		class = "client error"
+func (t mcpAuthTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	request = request.Clone(request.Context())
+	if t.token != "" {
+		value := t.token
+		if t.header == "Authorization" {
+			value = "Bearer " + value
+		}
+		request.Header.Set(t.header, value)
 	}
-	return fmt.Sprintf("MCP HTTP %d (%s)", e.status, class)
+	return t.base.RoundTrip(request)
 }
-
-type mcpRPCError struct {
-	code int
-	data json.RawMessage
-}
-
-func (e *mcpRPCError) Error() string { return fmt.Sprintf("MCP JSON-RPC error %d", e.code) }
 
 func splitList(values []string) []string {
 	seen := map[string]bool{}
@@ -103,8 +100,8 @@ func loadMCPConfigs(aliases []string, env map[string]string) ([]MCPConfig, error
 	if len(aliases) == 0 {
 		return nil, nil
 	}
-	override, ok := env["TINY_MCP_CONFIG"]
-	if !ok || override == "" {
+	override := env["TINY_MCP_CONFIG"]
+	if override == "" {
 		return nil, errors.New("TINY_MCP_CONFIG must be set to use --mcp")
 	}
 	path, err := filepath.Abs(override)
@@ -116,7 +113,7 @@ func loadMCPConfigs(aliases []string, env map[string]string) ([]MCPConfig, error
 		return nil, errors.New("Failed to load MCP catalog: file is missing, unreadable, or invalid JSON")
 	}
 	var root map[string]json.RawMessage
-	if err := json.Unmarshal(data, &root); err != nil || root == nil {
+	if json.Unmarshal(data, &root) != nil || root == nil {
 		return nil, errors.New("Failed to load MCP catalog: file is missing, unreadable, or invalid JSON")
 	}
 	if field := unknownField(root, "servers"); field != "" {
@@ -135,7 +132,7 @@ func loadMCPConfigs(aliases []string, env map[string]string) ([]MCPConfig, error
 		if json.Unmarshal(raw, &entry) != nil || entry == nil {
 			return nil, fmt.Errorf("MCP server %s must be an object", alias)
 		}
-		if field := unknownField(entry, "url", "tokenEnv", "allowedTools", "callTimeoutMs"); field != "" {
+		if field := unknownField(entry, "url", "tokenEnv", "auth", "allowedTools", "callTimeoutMs"); field != "" {
 			return nil, fmt.Errorf("Unknown MCP server %s field: %s", alias, field)
 		}
 		var address string
@@ -143,16 +140,32 @@ func loadMCPConfigs(aliases []string, env map[string]string) ([]MCPConfig, error
 			return nil, fmt.Errorf("MCP server %s url must be a string", alias)
 		}
 		config := MCPConfig{Alias: alias, URL: address, CallTimeout: 30 * time.Second}
+		_, tokenSet := entry["tokenEnv"]
+		_, authSet := entry["auth"]
+		if tokenSet && authSet {
+			return nil, fmt.Errorf("MCP server %s must not combine tokenEnv and auth", alias)
+		}
 		if rawToken, ok := entry["tokenEnv"]; ok {
-			var name string
-			if json.Unmarshal(rawToken, &name) != nil || !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(name) {
-				return nil, fmt.Errorf("MCP server %s tokenEnv must be an environment variable name", alias)
+			name, token, err := mcpTokenFromEnv(rawToken, env)
+			if err != nil {
+				return nil, fmt.Errorf("MCP server %s %w", alias, err)
 			}
-			token, exists := env[name]
-			if !exists || token == "" {
-				return nil, fmt.Errorf("MCP token environment variable is not set: %s", name)
+			config.Token, config.AuthEnv, config.AuthHeader = token, name, "Authorization"
+		}
+		if rawAuth, ok := entry["auth"]; ok {
+			var auth map[string]json.RawMessage
+			if json.Unmarshal(rawAuth, &auth) != nil || auth == nil || unknownField(auth, "type", "tokenEnv") != "" {
+				return nil, fmt.Errorf("MCP server %s auth must be {type: metabaseApiKey, tokenEnv}", alias)
 			}
-			config.Token = token
+			var kind string
+			if json.Unmarshal(auth["type"], &kind) != nil || kind != "metabaseApiKey" {
+				return nil, fmt.Errorf("MCP server %s auth type must be metabaseApiKey", alias)
+			}
+			name, token, err := mcpTokenFromEnv(auth["tokenEnv"], env)
+			if err != nil {
+				return nil, fmt.Errorf("MCP server %s auth %w", alias, err)
+			}
+			config.Token, config.AuthEnv, config.AuthHeader = token, name, "X-API-Key"
 		}
 		if rawAllowed, ok := entry["allowedTools"]; ok {
 			if bytes.Equal(bytes.TrimSpace(rawAllowed), []byte("null")) || json.Unmarshal(rawAllowed, &config.AllowedTools) != nil {
@@ -160,11 +173,8 @@ func loadMCPConfigs(aliases []string, env map[string]string) ([]MCPConfig, error
 			}
 			seen := map[string]bool{}
 			for _, name := range config.AllowedTools {
-				if name == "" {
-					return nil, fmt.Errorf("MCP server %s allowedTools must contain nonempty strings", alias)
-				}
-				if seen[name] {
-					return nil, fmt.Errorf("MCP server %s allowedTools must not contain duplicates", alias)
+				if name == "" || seen[name] {
+					return nil, fmt.Errorf("MCP server %s allowedTools must contain nonempty, unique strings", alias)
 				}
 				seen[name] = true
 			}
@@ -189,13 +199,21 @@ func loadMCPConfigs(aliases []string, env map[string]string) ([]MCPConfig, error
 	return result, nil
 }
 
+func mcpTokenFromEnv(raw json.RawMessage, env map[string]string) (string, string, error) {
+	var name string
+	if json.Unmarshal(raw, &name) != nil || !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(name) {
+		return "", "", errors.New("tokenEnv must be an environment variable name")
+	}
+	token := env[name]
+	if token == "" {
+		return "", "", fmt.Errorf("token environment variable is not set: %s", name)
+	}
+	return name, token, nil
+}
+
 func unknownField(value map[string]json.RawMessage, allowed ...string) string {
 	for field := range value {
-		found := false
-		for _, candidate := range allowed {
-			found = found || field == candidate
-		}
-		if !found {
+		if !slices.Contains(allowed, field) {
 			return field
 		}
 	}
@@ -221,7 +239,7 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	if err != nil || parsed.Host == "" {
 		return nil, errors.New("MCP URL must be a valid URL")
 	}
-	loopback := parsed.Hostname() == "localhost" || net.ParseIP(parsed.Hostname()) != nil && net.ParseIP(parsed.Hostname()).IsLoopback()
+	loopback := parsed.Hostname() == "localhost" || (net.ParseIP(parsed.Hostname()) != nil && net.ParseIP(parsed.Hostname()).IsLoopback())
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopback) {
 		return nil, errors.New("MCP URL must use HTTPS unless it targets loopback")
 	}
@@ -235,251 +253,89 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	if config.CallTimeout <= 0 {
 		config.CallTimeout = 30 * time.Second
 	}
-	mcp := &MCPClient{config: config, httpClient: client}
-	started := false
-	defer func() {
-		if !started {
-			_ = mcp.Close()
-		}
-	}()
-	if mcp.httpClient == nil {
-		mcp.httpClient = http.DefaultClient
+	if client == nil {
+		client = http.DefaultClient
 	}
-	if err := mcp.negotiate(ctx); err != nil {
-		return nil, err
+	clone := *client
+	base := clone.Transport
+	if base == nil {
+		base = http.DefaultTransport
 	}
-	var listed struct {
-		Tools []struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
-			InputSchema json.RawMessage `json:"inputSchema"`
-		} `json:"tools"`
+	if config.Token != "" {
+		clone.Transport = mcpAuthTransport{base: base, header: config.AuthHeader, token: config.Token}
 	}
-	if err := mcp.request(ctx, "tools/list", map[string]any{}, &listed); err != nil {
-		return nil, err
+	transport := &sdk.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &clone, DisableStandaloneSSE: true, MaxRetries: -1}
+	session, err := sdk.NewClient(&sdk.Implementation{Name: "tiny-agent", Version: "0.1.0"}, nil).Connect(ctx, transport, nil)
+	if err != nil {
+		return nil, fmt.Errorf("MCP connect: %w", err)
+	}
+	mcp := &MCPClient{config: config, session: session, protocolVersion: session.InitializeResult().ProtocolVersion}
+	listed, err := session.ListTools(ctx, nil)
+	if err != nil {
+		_ = mcp.Close()
+		return nil, fmt.Errorf("MCP tools/list: %w", err)
 	}
 	if len(listed.Tools) > maxMCPTools {
+		_ = mcp.Close()
 		return nil, fmt.Errorf("MCP server returned more than %d tools", maxMCPTools)
 	}
-	remoteNames, allowed := map[string]bool{}, map[string]bool{}
+	allowed := map[string]bool{}
 	for _, name := range config.AllowedTools {
 		allowed[name] = true
 	}
-	mapped := map[string]bool{}
+	endpointDigest := digestMCPIdentity(map[string]any{"endpoint": endpoint, "auth": config.AuthHeader, "authEnv": config.AuthEnv, "protocol": mcp.protocolVersion})
 	for _, remote := range listed.Tools {
 		if remote.Name == "" {
+			_ = mcp.Close()
 			return nil, errors.New("MCP tool name must not be empty")
 		}
-		if remoteNames[remote.Name] {
-			return nil, fmt.Errorf("duplicate MCP tool name: %s", remote.Name)
-		}
-		remoteNames[remote.Name] = true
-		if config.AllowedTools != nil && !allowed[remote.Name] {
+		if len(config.AllowedTools) > 0 && !allowed[remote.Name] {
 			continue
 		}
-		var inputSchema map[string]any
-		if len(remote.InputSchema) == 0 || bytes.Equal(bytes.TrimSpace(remote.InputSchema), []byte("null")) || json.Unmarshal(remote.InputSchema, &inputSchema) != nil || inputSchema == nil {
+		schema, ok := remote.InputSchema.(map[string]any)
+		if !ok {
+			_ = mcp.Close()
 			return nil, fmt.Errorf("MCP tool inputSchema must be an object: %s", remote.Name)
 		}
-		if err := validateMCPToolSchema(inputSchema, remote.Name); err != nil {
+		if err := validateMCPToolSchema(schema, remote.Name); err != nil {
+			_ = mcp.Close()
 			return nil, err
 		}
-		if len(remote.InputSchema) > maxMCPSchemaBytes {
+		encoded, _ := json.Marshal(schema)
+		if len(encoded) > maxMCPSchemaBytes {
+			_ = mcp.Close()
 			return nil, fmt.Errorf("MCP tool schema exceeds 50KB: %s", remote.Name)
 		}
-		if jsonDepth(inputSchema) > maxMCPSchemaDepth {
+		if jsonDepth(schema) > maxMCPSchemaDepth {
+			_ = mcp.Close()
 			return nil, fmt.Errorf("MCP tool schema exceeds depth %d: %s", maxMCPSchemaDepth, remote.Name)
 		}
-		if containsXMCPHeader(inputSchema) {
+		if containsXMCPHeader(schema) {
+			_ = mcp.Close()
 			return nil, fmt.Errorf("MCP tool x-mcp-header declarations are not supported: %s", remote.Name)
 		}
 		if len([]byte(remote.Description)) > maxMCPDescription {
+			_ = mcp.Close()
 			return nil, fmt.Errorf("MCP tool description exceeds 8KB: %s", remote.Name)
 		}
-		mappedName, err := mapMCPToolName(config.Alias, remote.Name)
+		mapped, err := mapMCPToolName(config.Alias, remote.Name)
 		if err != nil {
+			_ = mcp.Close()
 			return nil, err
 		}
-		if mapped[mappedName] {
-			return nil, fmt.Errorf("duplicate mapped MCP tool name: %s", mappedName)
-		}
-		mapped[mappedName] = true
-		description := remote.Description
-		if description == "" {
-			description = fmt.Sprintf("MCP tool %s from %s.", remote.Name, config.Alias)
-		}
 		remoteName := remote.Name
-		replayKey := "mcp:" + config.Alias + ":" + endpoint + ":" + remoteName + ":v1"
-		mcp.tools = append(mcp.tools, Tool{Name: mappedName, Description: description, Parameters: inputSchema, Replay: "never", ReplayKey: replayKey, Execute: func(callCtx context.Context, args map[string]any) (string, error) {
+		identity := digestMCPIdentity(map[string]any{"endpoint": endpointDigest, "tool": remoteName})
+		mcp.tools = append(mcp.tools, Tool{Name: mapped, Description: remote.Description, Parameters: schema, Replay: "never", ReplayKey: "mcp:" + identity, Identity: identity, Execute: func(callCtx context.Context, args map[string]any) (string, error) {
 			return mcp.callTool(callCtx, remoteName, args)
 		}})
 	}
-	missing := []string{}
-	for _, name := range config.AllowedTools {
-		if !remoteNames[name] {
-			missing = append(missing, name)
-		}
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("MCP allowed tools were not found: %s", strings.Join(missing, ", "))
-	}
-	started = true
 	return mcp, nil
 }
 
-func (m *MCPClient) negotiate(ctx context.Context) error {
-	var discovered struct {
-		SupportedVersions []string       `json:"supportedVersions"`
-		Capabilities      map[string]any `json:"capabilities"`
-	}
-	err := m.request(ctx, "server/discover", map[string]any{}, &discovered)
-	if rpc, ok := err.(*mcpRPCError); ok && rpc.code == -32022 {
-		var continuation struct {
-			Supported []string `json:"supported"`
-		}
-		if json.Unmarshal(rpc.data, &continuation) == nil && slices.Contains(continuation.Supported, modernMCPVersion) {
-			err = m.request(ctx, "server/discover", map[string]any{}, &discovered)
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("MCP server does not support the modern protocol: %w", err)
-	}
-	supported := false
-	for _, version := range discovered.SupportedVersions {
-		supported = supported || version == modernMCPVersion
-	}
-	if !supported || discovered.Capabilities == nil {
-		return errors.New("MCP server does not support the modern protocol version")
-	}
-	m.protocolVersion = modernMCPVersion
-	return nil
-}
-
-func modernMetadata() map[string]any {
-	return map[string]any{
-		"io.modelcontextprotocol/protocolVersion":    modernMCPVersion,
-		"io.modelcontextprotocol/clientInfo":         map[string]string{"name": "tiny-agent", "version": "0.1.0"},
-		"io.modelcontextprotocol/clientCapabilities": map[string]any{},
-	}
-}
-
-func (m *MCPClient) request(ctx context.Context, method string, params any, target any) error {
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return errors.New("MCP connection is closed")
-	}
-	m.nextID++
-	id := m.nextID
-	m.mu.Unlock()
-	object, ok := params.(map[string]any)
-	if !ok {
-		return errors.New("MCP modern request params must be an object")
-	}
-	requestParams := make(map[string]any, len(object)+1)
-	for key, value := range object {
-		requestParams[key] = value
-	}
-	requestParams["_meta"] = modernMetadata()
-	var response struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      int             `json:"id"`
-		Result  json.RawMessage `json:"result"`
-		Error   *struct {
-			Code    int             `json:"code"`
-			Message string          `json:"message"`
-			Data    json.RawMessage `json:"data"`
-		} `json:"error"`
-	}
-	if err := m.send(ctx, map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": requestParams}, &response, method); err != nil {
-		return err
-	}
-	if response.JSONRPC != "2.0" || response.ID != id {
-		return fmt.Errorf("MCP %s returned a mismatched JSON-RPC response", method)
-	}
-	if response.Error != nil {
-		return &mcpRPCError{code: response.Error.Code, data: response.Error.Data}
-	}
-	return json.Unmarshal(response.Result, target)
-}
-
-func (m *MCPClient) send(ctx context.Context, body any, target any, method string) error {
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.config.URL, bytes.NewReader(encoded))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Mcp-Protocol-Version", modernMCPVersion)
-	req.Header.Set("Mcp-Method", method)
-	if method == "tools/call" {
-		if envelope, ok := body.(map[string]any); ok {
-			if params, ok := envelope["params"].(map[string]any); ok {
-				if name, ok := params["name"].(string); ok {
-					req.Header.Set("Mcp-Name", encodeMCPHeaderValue(name))
-				}
-			}
-		}
-	}
-	if m.config.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+m.config.Token)
-	}
-	response, err := m.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	limited := &io.LimitedReader{R: response.Body, N: maxMCPHTTPBytes + 1}
-	data, readErr := io.ReadAll(limited)
-	if readErr != nil {
-		return readErr
-	}
-	if int64(len(data)) > maxMCPHTTPBytes {
-		return errors.New("MCP response exceeds 10MB")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return &mcpHTTPError{status: response.StatusCode, body: data}
-	}
-	if target == nil || response.StatusCode == http.StatusAccepted {
-		return nil
-	}
-	if strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
-		scanner := bufio.NewScanner(bytes.NewReader(data))
-		scanner.Buffer(make([]byte, 64*1024), maxMCPHTTPBytes)
-		data := []string{}
-		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
-				if len(data) == 0 {
-					continue
-				}
-				encodedEvent := []byte(strings.Join(data, "\n"))
-				data = data[:0]
-				var envelope struct {
-					ID *int `json:"id"`
-				}
-				if json.Unmarshal(encodedEvent, &envelope) != nil || envelope.ID == nil {
-					continue
-				}
-				return json.Unmarshal(encodedEvent, target)
-			}
-			if strings.HasPrefix(line, "data:") {
-				data = append(data, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			return err
-		}
-		if len(data) > 0 {
-			return json.Unmarshal([]byte(strings.Join(data, "\n")), target)
-		}
-		return errors.New("MCP SSE response contained no data event")
-	}
-	return json.Unmarshal(data, target)
+func digestMCPIdentity(value any) string {
+	encoded, _ := json.Marshal(value)
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (m *MCPClient) callTool(ctx context.Context, name string, args map[string]any) (string, error) {
@@ -488,45 +344,37 @@ func (m *MCPClient) callTool(ctx context.Context, name string, args map[string]a
 	}
 	ctx, cancel := context.WithTimeout(ctx, m.config.CallTimeout)
 	defer cancel()
-	var result struct {
-		Content []struct {
-			Type     string `json:"type"`
-			Text     string `json:"text"`
-			Resource *struct {
-				URI      string  `json:"uri"`
-				MimeType string  `json:"mimeType"`
-				Text     *string `json:"text"`
-				Blob     *string `json:"blob"`
-			} `json:"resource"`
-		} `json:"content"`
-		StructuredContent json.RawMessage `json:"structuredContent"`
-		IsError           bool            `json:"isError"`
-		ResultType        string          `json:"resultType"`
-	}
-	if err := m.request(ctx, "tools/call", map[string]any{"name": name, "arguments": args}, &result); err != nil {
+	result, err := m.session.CallTool(ctx, &sdk.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
 		return "", err
 	}
-	if result.ResultType == "input_required" {
+	if result.NeedsInput() {
 		return "", errors.New("MCP tool requires additional user input; input_required is not supported")
 	}
 	parts := []string{}
-	for _, item := range result.Content {
-		if item.Type == "text" {
+	for _, content := range result.Content {
+		switch item := content.(type) {
+		case *sdk.TextContent:
 			parts = append(parts, item.Text)
-			continue
-		}
-		if item.Type == "resource" && item.Resource != nil && item.Resource.Text != nil && item.Resource.Blob == nil {
+		case *sdk.EmbeddedResource:
+			if item.Resource.Blob != nil {
+				return "", errors.New("Unsupported MCP content type: resource")
+			}
 			prefix := ""
 			if item.Resource.URI != "" {
 				prefix = "Resource: " + item.Resource.URI + "\n"
 			}
-			parts = append(parts, prefix+*item.Resource.Text)
-			continue
+			parts = append(parts, prefix+item.Resource.Text)
+		default:
+			return "", fmt.Errorf("Unsupported MCP content type: %T", content)
 		}
-		return "", fmt.Errorf("Unsupported MCP content type: %s", item.Type)
 	}
 	if result.StructuredContent != nil {
-		parts = append(parts, "Structured content:\n"+string(result.StructuredContent))
+		encoded, err := json.Marshal(result.StructuredContent)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, "Structured content:\n"+string(encoded))
 	}
 	output := strings.Join(parts, "\n\n")
 	if output == "" {
@@ -541,9 +389,12 @@ func (m *MCPClient) callTool(ctx context.Context, name string, args map[string]a
 
 func (m *MCPClient) Close() error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
 	m.closed = true
-	m.mu.Unlock()
-	return nil
+	return m.session.Close()
 }
 
 func canonicalMCPEndpoint(parsed *url.URL) (string, error) {

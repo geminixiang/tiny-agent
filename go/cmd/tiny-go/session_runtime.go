@@ -45,10 +45,14 @@ func (a *Agent) currentConfiguration() (sessionConfiguration, currentConfigurati
 	currentTools := make([]currentTool, 0, len(a.Tools))
 	implementationIdentities := make([]any, 0, len(a.Tools))
 	for _, tool := range a.Tools {
-		definition := digestValue(map[string]any{"name": tool.Name, "description": tool.Description, "parameters": tool.Parameters})
+		definition := digestValue(map[string]any{"name": tool.Name, "description": tool.Description, "parameters": tool.Parameters, "identity": tool.Identity})
+		implementationIdentity := map[string]any{"name": tool.Name, "replayKey": tool.ReplayKey}
+		if tool.Identity != "" {
+			implementationIdentity["identity"] = tool.Identity
+		}
 		declarations = append(declarations, sessionToolDeclaration{Name: tool.Name, DefinitionDigest: definition})
 		currentTools = append(currentTools, currentTool{Name: tool.Name, DefinitionDigest: definition, Replay: tool.Replay, ReplayKey: tool.ReplayKey})
-		implementationIdentities = append(implementationIdentities, map[string]any{"name": tool.Name, "replayKey": tool.ReplayKey})
+		implementationIdentities = append(implementationIdentities, implementationIdentity)
 	}
 	adapterIdentity := "openrouter:chat-completions:v1;tool-implementations=" + digestValue(implementationIdentities)
 	configuration := sessionConfiguration{Model: model(), SystemPromptDigest: digestValue(value(a.Messages[0].Content)), Tools: declarations, AdapterIdentity: adapterIdentity, RoutingIdentity: "openrouter:" + model(), OutputOptionsDigest: zeroDigest}
