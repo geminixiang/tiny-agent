@@ -62,8 +62,8 @@
     controller failure 後仍存在。教材刻意保留這個區別，不用含糊的「永不遺失資料」。
 </p>
 
-<h2 id="framing">一個檔案，兩種行</h2>
-<p>第一行是唯一 header：</p>
+<h2 id="framing">單一檔案，兩類紀錄</h2>
+<p>檔案的第一行是唯一的 header（檔頭）：</p>
 <pre data-lang="json"><code>{
   "kind": "header",
   "version": 2,
@@ -74,7 +74,7 @@
   "model": "deepseek/deepseek-v4-flash-0731",
   "environmentIdentity": "/workspace"
 }</code></pre>
-<p>之後每一行是一個完整 transaction：一個 fact，或一個 non-empty facts array。Array 中的 facts 對 reducer 原子可見。</p>
+<p>其餘每一行都是一筆完整 transaction：內容可以是一個 fact，也可以是一個非空的 facts array。Reducer 會將同一個 array 內的 facts 視為一個原子單位。</p>
 <pre data-lang="json"><code>[
   {"kind":"entry","seq":1,"id":"...","entry":{"type":"message","message":{"role":"user","content":"修正bug"}}},
   {"kind":"record","seq":2,"id":"...","record":{"type":"runStarted","operationId":"...","operationKind":"run","inputEntryId":"..."}}
