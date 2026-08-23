@@ -122,7 +122,6 @@ test("--mcp connects trusted aliases, deduplicates them, and closes before exit"
     assert.deepEqual(events[0].plugins, ["read"]);
     assert.deepEqual(events[0].mcp, ["fixture"]);
     assert.equal(events[1].server, "fixture");
-    assert.equal(events[1].protocolEra, "modern");
     assert.equal(events[1].toolCount, 1);
     assert.equal(events[2].result.message, "Set OPENROUTER_API_KEY");
     assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${secret}|${escapeRegex(server.url.href)}`));

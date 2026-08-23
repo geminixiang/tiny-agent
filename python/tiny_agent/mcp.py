@@ -20,14 +20,6 @@ MAX_DESCRIPTION_BYTES = 8 * 1024
 MAX_SCHEMA_DEPTH = 20
 MAX_TOOLS = 64
 _MODERN_PROTOCOL_VERSION = "2026-07-28"
-_LEGACY_PROTOCOL_VERSION = "2025-11-25"
-_SUPPORTED_LEGACY_VERSIONS = (
-    "2025-11-25",
-    "2025-06-18",
-    "2025-03-26",
-    "2024-11-05",
-    "2024-10-07",
-)
 _MAX_HTTP_RESPONSE_BYTES = 10 * 1024 * 1024
 _CLIENT_INFO = {"name": "tiny-agent", "version": "0.1.0"}
 _CLIENT_CAPABILITIES: dict = {}
@@ -45,7 +37,6 @@ class McpConfig:
 @dataclass
 class LoadedMcpTools:
     tools: list[dict]
-    protocol_era: str
     protocol_version: str
     close: Callable[[], None]
 
@@ -59,11 +50,11 @@ def split_mcp_aliases(values: list[str] | None) -> list[str]:
     return aliases
 
 
-def load_mcp_configs(aliases: list[str], env: dict[str, str] | os._Environ[str] | None = None, home: Path | None = None) -> list[McpConfig]:
+def load_mcp_configs(aliases: list[str], env: dict[str, str] | os._Environ[str] | None = None) -> list[McpConfig]:
     if not aliases: return []
     env = os.environ if env is None else env
-    home = Path.home() if home is None else home
-    path = Path(env["TINY_MCP_CONFIG"]).resolve() if env.get("TINY_MCP_CONFIG") else (home / ".tiny-agent/mcp.json").resolve()
+    if not env.get("TINY_MCP_CONFIG"): raise ValueError("TINY_MCP_CONFIG must be set to use --mcp")
+    path = Path(env["TINY_MCP_CONFIG"]).resolve()
     try: value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): raise ValueError("Failed to load MCP catalog: file is missing, unreadable, or invalid JSON") from None
     catalog = _validate_catalog(value)
@@ -144,8 +135,6 @@ class _RpcError(RuntimeError):
 class _McpClient:
     def __init__(self, config: McpConfig):
         self.config = _validate_config(config)
-        self.session_id: str | None = None
-        self.protocol_era: str | None = None
         self.protocol_version: str | None = None
         self.closed = False
         self.next_id = 1
@@ -157,50 +146,22 @@ class _McpClient:
         corrective_retry = False
         while True:
             try:
-                discovered = self.request("server/discover", {}, cancelled, _remaining_timeout_ms(deadline), era="modern")
+                discovered = self.request("server/discover", {}, cancelled, _remaining_timeout_ms(deadline))
                 if not _valid_discovery(discovered): raise _RpcError()
-            except _HttpStatusError as error:
-                if error.status in (401, 403) or error.status >= 500: raise
-                self._connect_legacy(cancelled, deadline)
-                return
             except _RpcError as error:
-                classification = _classify_probe_rpc_error(error)
-                if classification == "corrective":
-                    if not corrective_retry:
-                        corrective_retry = True
-                        continue
-                    classification = "modern-error"
-                if classification == "modern-error":
-                    raise RuntimeError("MCP server does not support a mutually compatible modern protocol version") from None
-                self._connect_legacy(cancelled, deadline)
-                return
-            self.protocol_era = "modern"
+                if not corrective_retry and _offers_exact_modern_version(error):
+                    corrective_retry = True
+                    continue
+                raise RuntimeError("MCP server does not support the modern protocol version") from None
             self.protocol_version = _MODERN_PROTOCOL_VERSION
-            self.session_id = None
             return
 
-    def _connect_legacy(self, cancelled: threading.Event | None, deadline: float) -> None:
-        self.session_id = None
-        result = self.request("initialize", {
-            "protocolVersion": _LEGACY_PROTOCOL_VERSION,
-            "capabilities": {},
-            "clientInfo": _CLIENT_INFO,
-        }, cancelled, _remaining_timeout_ms(deadline), era="legacy")
-        if not isinstance(result, dict) or result.get("protocolVersion") not in _SUPPORTED_LEGACY_VERSIONS:
-            raise RuntimeError("MCP server did not negotiate a supported legacy protocol version")
-        self.protocol_era = "legacy"
-        self.protocol_version = result["protocolVersion"]
-        self.notify("notifications/initialized", {}, _remaining_timeout_ms(deadline))
-
-    def request(self, method: str, params: dict, cancelled: threading.Event | None, timeout_ms: float, era: str | None = None) -> object:
-        request_era = era or self.protocol_era
-        if request_era is None: raise RuntimeError("MCP server did not negotiate a protocol era")
-        if request_era == "modern":
-            params = {**params, "_meta": {
-                "io.modelcontextprotocol/protocolVersion": _MODERN_PROTOCOL_VERSION,
-                "io.modelcontextprotocol/clientInfo": _CLIENT_INFO,
-                "io.modelcontextprotocol/clientCapabilities": _CLIENT_CAPABILITIES,
-            }}
+    def request(self, method: str, params: dict, cancelled: threading.Event | None, timeout_ms: float) -> object:
+        params = {**params, "_meta": {
+            "io.modelcontextprotocol/protocolVersion": _MODERN_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientInfo": _CLIENT_INFO,
+            "io.modelcontextprotocol/clientCapabilities": _CLIENT_CAPABILITIES,
+        }}
         with self.lock:
             request_id = self.next_id
             self.next_id += 1
@@ -208,21 +169,17 @@ class _McpClient:
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
             cancelled,
             timeout_ms,
-            era=request_era,
         )
         if not isinstance(response, dict) or response.get("jsonrpc") != "2.0" or response.get("id") != request_id:
             raise _RpcError("Invalid MCP JSON-RPC response")
         if "error" in response: raise _RpcError(response["error"])
         if "result" not in response: raise _RpcError("Invalid MCP JSON-RPC response")
         result = response["result"]
-        if request_era == "modern" and (not isinstance(result, dict) or result.get("resultType") not in ("complete", "input_required")):
+        if not isinstance(result, dict) or result.get("resultType") not in ("complete", "input_required"):
             raise _RpcError("Invalid modern MCP result envelope")
         return result
 
-    def notify(self, method: str, params: dict, timeout_ms: float) -> None:
-        self._post({"jsonrpc": "2.0", "method": method, "params": params}, None, timeout_ms, notification=True, era="legacy")
-
-    def _post(self, payload: dict, cancelled: threading.Event | None, timeout_ms: float, notification: bool = False, era: str = "legacy") -> object:
+    def _post(self, payload: dict, cancelled: threading.Event | None, timeout_ms: float) -> object:
         if self.closed: raise RuntimeError("MCP connection is closed")
         if cancelled and cancelled.is_set(): raise InterruptedError("Operation aborted")
         parsed = urlsplit(self.config.url)
@@ -244,30 +201,25 @@ class _McpClient:
 
         watcher = threading.Thread(target=stop_connection, daemon=True)
         watcher.start()
-        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream", **(self.config.headers or {})}
-        if era == "legacy" and self.session_id: headers["Mcp-Session-Id"] = self.session_id
-        if era == "modern":
-            headers["MCP-Protocol-Version"] = _MODERN_PROTOCOL_VERSION
-            headers["Mcp-Method"] = payload.get("method", "")
-            if payload.get("method") == "tools/call":
-                name = payload.get("params", {}).get("name")
-                if isinstance(name, str): headers["Mcp-Name"] = _encode_mcp_param_value(name)
-                headers.update(payload.get("params", {}).pop("_mcp_param_headers", {}))
-        elif self.protocol_version:
-            headers["MCP-Protocol-Version"] = self.protocol_version
+        headers = {
+            "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": _MODERN_PROTOCOL_VERSION, "Mcp-Method": payload.get("method", ""),
+            **(self.config.headers or {}),
+        }
+        if payload.get("method") == "tools/call":
+            name = payload.get("params", {}).get("name")
+            if isinstance(name, str): headers["Mcp-Name"] = _encode_mcp_param_value(name)
+            headers.update(payload.get("params", {}).pop("_mcp_param_headers", {}))
         path = parsed.path or "/"
         if parsed.query: path += f"?{parsed.query}"
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         try:
             connection.request("POST", path, body, headers)
             response = connection.getresponse()
-            session_id = response.getheader("Mcp-Session-Id")
-            if era == "legacy" and session_id: self.session_id = session_id
-            if notification and response.status in (202, 204): return {}
             if response.status < 200 or response.status >= 300:
                 raw = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
                 if len(raw) > _MAX_HTTP_RESPONSE_BYTES: raise RuntimeError("MCP response exceeded 10MB")
-                if era == "modern" and 400 <= response.status < 500:
+                if 400 <= response.status < 500:
                     try: rpc_response = json.loads(raw)
                     except (UnicodeDecodeError, json.JSONDecodeError): rpc_response = None
                     if isinstance(rpc_response, dict) and isinstance(rpc_response.get("error"), dict):
@@ -277,7 +229,6 @@ class _McpClient:
             if content_type == "text/event-stream": return _read_sse(response, payload.get("id"))
             raw = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
             if len(raw) > _MAX_HTTP_RESPONSE_BYTES: raise RuntimeError("MCP response exceeded 10MB")
-            if notification and not raw: return {}
             return json.loads(raw)
         except (OSError, socket.timeout, http.client.HTTPException, UnicodeDecodeError, json.JSONDecodeError) as error:
             if cancelled and cancelled.is_set(): raise InterruptedError("Operation aborted") from error
@@ -293,35 +244,14 @@ class _McpClient:
             self.closed = True
             connections = list(self.connections)
         for connection in connections: connection.close()
-        if not self.session_id or self.protocol_era != "legacy": return
-        try: self._delete_session()
-        except Exception: pass
-
-    def _delete_session(self) -> None:
-        parsed = urlsplit(self.config.url)
-        connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-        connection = connection_type(parsed.hostname, parsed.port, timeout=1)
-        path = parsed.path or "/"
-        if parsed.query: path += f"?{parsed.query}"
-        headers = {**(self.config.headers or {}), "Mcp-Session-Id": self.session_id or ""}
-        if self.protocol_version: headers["MCP-Protocol-Version"] = self.protocol_version
-        try:
-            connection.request("DELETE", path, headers=headers)
-            response = connection.getresponse()
-            response.read(64 * 1024)
-        finally: connection.close()
 
 
-def _classify_probe_rpc_error(error: _RpcError) -> str:
-    if error.code != -32022: return "legacy"
+def _offers_exact_modern_version(error: _RpcError) -> bool:
+    if error.code != -32022: return False
     data = error.data
-    if not isinstance(data, dict): return "legacy"
+    if not isinstance(data, dict): return False
     supported = data.get("supported")
-    if not isinstance(supported, list) or not supported or any(not isinstance(version, str) or not version for version in supported): return "legacy"
-    modern = [version for version in supported if version >= _MODERN_PROTOCOL_VERSION]
-    if _MODERN_PROTOCOL_VERSION in modern: return "corrective"
-    if modern: return "modern-error"
-    return "legacy"
+    return isinstance(supported, list) and _MODERN_PROTOCOL_VERSION in supported
 
 
 def _valid_discovery(value: object) -> bool:
@@ -399,7 +329,7 @@ def load_mcp_tools(config: McpConfig, cancelled: threading.Event | None = None, 
             description = remote.get("description")
             if description is not None and not isinstance(description, str): raise RuntimeError(f"Invalid MCP tool description: {remote_name}")
             if description and len(description.encode()) > MAX_DESCRIPTION_BYTES: raise RuntimeError(f"MCP tool description exceeds 8KB: {remote_name}")
-            declarations = _scan_mcp_header_declarations(schema) if client.protocol_era == "modern" else []
+            declarations = _scan_mcp_header_declarations(schema)
             if declarations is None: continue
             name = _map_tool_name(client.config.alias, remote_name)
             if name in mapped_names: raise RuntimeError(f"duplicate mapped MCP tool name: {name}")
@@ -426,7 +356,7 @@ def load_mcp_tools(config: McpConfig, cancelled: threading.Event | None = None, 
         if allowed is not None:
             missing = [name for name in client.config.allowed_tools or [] if name not in remote_names]
             if missing: raise RuntimeError(f"MCP allowed tools were not found: {', '.join(missing)}")
-        return LoadedMcpTools(tools, client.protocol_era or "", client.protocol_version or "", client.close)
+        return LoadedMcpTools(tools, client.protocol_version or "", client.close)
     except BaseException:
         client.close()
         raise

@@ -100,7 +100,6 @@ async function main() {
                 type: "mcp.connected",
                 timestamp: new Date().toISOString(),
                 server: config.alias,
-                protocolEra: loaded.protocolEra,
                 protocolVersion: loaded.protocolVersion,
                 toolCount: loaded.tools.length,
                 durationMs: performance.now() - started,

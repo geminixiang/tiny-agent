@@ -12,7 +12,10 @@ test("displays encoded MCP tool names for humans", () => {
 
 test("official MCP v2 client lists and calls local Streamable HTTP tools", async (t) => {
     const server = await startTestMcpServer();
-    const client = new Client({ name: "tiny-agent-test", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+    const client = new Client(
+        { name: "tiny-agent-test", version: "1.0.0" },
+        { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
     t.after(async () => {
         await client.close();
         await server.close();
@@ -47,7 +50,10 @@ test("official MCP v2 client lists and calls local Streamable HTTP tools", async
 
 test("official MCP v2 client cancels slow calls at the server and remains usable", async (t) => {
     const server = await startTestMcpServer();
-    const client = new Client({ name: "tiny-agent-test", version: "1.0.0" }, { versionNegotiation: { mode: "auto" } });
+    const client = new Client(
+        { name: "tiny-agent-test", version: "1.0.0" },
+        { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
     t.after(async () => {
         await client.close();
         await server.close();
@@ -79,7 +85,6 @@ test("loadMcpTools maps and calls local MCP tools", async (t) => {
         await server.close();
     });
 
-    assert.equal(loaded.protocolEra, "modern");
     assert.equal(loaded.protocolVersion, "2026-07-28");
     assert.deepEqual(
         loaded.tools.map((tool) => tool.name),

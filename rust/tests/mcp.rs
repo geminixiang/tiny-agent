@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tiny_agent_rust::mcp::{McpConfig, McpProtocolEra, display_tool_name, load_mcp_tools};
+use tiny_agent_rust::mcp::{McpConfig, display_tool_name, load_mcp_tools};
 
 fn config(url: String) -> McpConfig {
     McpConfig {
@@ -49,14 +49,9 @@ fn read_request(stream: &mut TcpStream) -> (String, Value) {
     }
 }
 
-fn respond(stream: &mut TcpStream, status: u16, body: Value, session: bool) {
+fn respond(stream: &mut TcpStream, status: u16, body: Value) {
     let body = body.to_string();
-    let session = if session {
-        "Mcp-Session-Id: fixture-session\r\n"
-    } else {
-        ""
-    };
-    write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\n{session}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
 }
 
 fn modern_result(index: usize, call: Value) -> Value {
@@ -124,12 +119,10 @@ fn strict_modern_is_stateless_and_repeats_metadata() {
                 &mut stream,
                 200,
                 json!({"jsonrpc":"2.0","id":id,"result":result}),
-                false,
             );
         }
     });
     let loaded = load_mcp_tools(config(url)).unwrap();
-    assert_eq!(loaded.protocol_era, McpProtocolEra::Modern);
     assert_eq!(loaded.protocol_version, "2026-07-28");
     assert_eq!(loaded.tools.len(), 1);
     assert_eq!(display_tool_name(&loaded.tools[0].name), "mcp:fixture/echo");
@@ -174,74 +167,6 @@ fn strict_modern_is_stateless_and_repeats_metadata() {
 }
 
 #[test]
-fn strict_legacy_fallback_uses_session_and_negotiated_version() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let captured = requests.clone();
-    let server = thread::spawn(move || {
-        for index in 0..5 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            captured.lock().unwrap().push(request.clone());
-            match index {
-                0 => respond(
-                    &mut stream,
-                    200,
-                    json!({"jsonrpc":"2.0","id":request.1["id"],"error":{"code":-32601,"message":"unknown"}}),
-                    false,
-                ),
-                1 => respond(
-                    &mut stream,
-                    200,
-                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"protocolVersion":"2025-06-18","capabilities":{}}}),
-                    true,
-                ),
-                2 => respond(&mut stream, 200, Value::Null, false),
-                3 => respond(
-                    &mut stream,
-                    200,
-                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}),
-                    false,
-                ),
-                _ => respond(
-                    &mut stream,
-                    200,
-                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"content":[{"type":"text","text":"legacy"}]}}),
-                    false,
-                ),
-            }
-        }
-    });
-    let loaded = load_mcp_tools(config(url)).unwrap();
-    assert_eq!(loaded.protocol_era, McpProtocolEra::Legacy);
-    assert_eq!(loaded.protocol_version, "2025-06-18");
-    assert_eq!(
-        loaded.tools[0]
-            .execute(json!({"value":1}), &Arc::new(AtomicBool::new(false)))
-            .unwrap(),
-        "legacy"
-    );
-    loaded.close();
-    server.join().unwrap();
-    let requests = requests.lock().unwrap();
-    assert_eq!(requests[1].1["method"], "initialize");
-    assert!(requests[1].1["params"].get("_meta").is_none());
-    assert!(!requests[1].0.to_ascii_lowercase().contains("mcp-method:"));
-    assert_eq!(requests[4].1["method"], "tools/call");
-    assert_eq!(
-        requests[4].1["params"],
-        json!({"name":"echo","arguments":{"value":1}})
-    );
-    assert!(
-        requests[4]
-            .0
-            .to_ascii_lowercase()
-            .contains("mcp-session-id: fixture-session")
-    );
-}
-
-#[test]
 fn modern_input_required_is_explicitly_unsupported() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
@@ -260,7 +185,6 @@ fn modern_input_required_is_explicitly_unsupported() {
                         "inputRequests":[{"type":"text","prompt":"More detail"}]
                     }))
                 }),
-                false,
             );
         }
     });
@@ -272,6 +196,55 @@ fn modern_input_required_is_explicitly_unsupported() {
         "MCP tool requires additional user input; input_required is not supported"
     );
     loaded.close();
+    server.join().unwrap();
+}
+
+#[test]
+fn modern_corrective_retry_succeeds() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let response = match index {
+                0 => {
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"error":{"code":-32022,"data":{"supported":["2026-07-28"]}}})
+                }
+                1 => {
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}})
+                }
+                _ => {
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[]}})
+                }
+            };
+            respond(&mut stream, 200, response);
+        }
+    });
+    let loaded = load_mcp_tools(config(url)).unwrap();
+    assert!(loaded.tools.is_empty());
+    loaded.close();
+    server.join().unwrap();
+}
+
+#[test]
+fn modern_only_rejects_server_without_modern_support() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_request(&mut stream);
+        respond(
+            &mut stream,
+            200,
+            json!({"jsonrpc":"2.0","id":request.1["id"],"error":{"code":-32022,"data":{"supported":["2025-11-25"]}}}),
+        );
+    });
+    let error = load_mcp_tools(config(url)).err().unwrap();
+    assert!(
+        error.contains("does not support the modern protocol"),
+        "unexpected error: {error}"
+    );
     server.join().unwrap();
 }
 
@@ -335,7 +308,6 @@ fn close_joins_cancelled_request_workers_within_transport_deadline() {
                     &mut stream,
                     200,
                     json!({"jsonrpc":"2.0","id":request.1["id"],"result":result}),
-                    false,
                 );
             } else {
                 thread::sleep(Duration::from_millis(500));

@@ -18,14 +18,16 @@ export type McpConfig = {
 
 export type LoadedMcpTools = {
     tools: Tool[];
-    protocolEra: "modern" | "legacy";
     protocolVersion: string;
     close(): Promise<void>;
 };
 
 export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Promise<LoadedMcpTools> {
     const validated = validateConfig(config);
-    const client = new Client({ name: "tiny-agent", version: "0.1.0" }, { versionNegotiation: { mode: "auto" } });
+    const client = new Client(
+        { name: "tiny-agent", version: "0.1.0" },
+        { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
     let closed = false;
     const close = async () => {
         if (closed) return;
@@ -90,8 +92,10 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
         }
         const protocolEra = client.getProtocolEra();
         const protocolVersion = client.getNegotiatedProtocolVersion();
-        if (!protocolEra || !protocolVersion) throw Error("MCP server did not negotiate a protocol version");
-        return { tools, protocolEra, protocolVersion, close };
+        if (protocolEra !== "modern" || !protocolVersion) {
+            throw Error("MCP server did not negotiate the modern protocol");
+        }
+        return { tools, protocolVersion, close };
     } catch (error) {
         await close();
         throw error;

@@ -11,7 +11,6 @@ class McpFixture:
     def __init__(
         self,
         *,
-        era: str = "modern",
         sse: bool = False,
         token: str | None = None,
         tools: list[dict] | None = None,
@@ -20,7 +19,6 @@ class McpFixture:
         rpc_errors: dict[str, dict] | None = None,
         pages: list[list[dict]] | None = None,
     ):
-        self.era = era
         self.sse = sse
         self.token = token
         self.http_error = http_error
@@ -29,7 +27,6 @@ class McpFixture:
         self.pages = pages
         self.method_counts: dict[str, int] = {}
         self.calls: list[dict] = []
-        self.deleted_sessions: list[str] = []
         self.tools = tools or [
             {"name": "echo", "description": "Return the supplied message.", "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}},
             {"name": "structured", "inputSchema": {"type": "object"}},
@@ -60,8 +57,7 @@ class McpFixture:
                     error = errors[index]
                     if error is not None:
                         self._rpc_error(request, error.get("code", -32603), error.get("message", "canary"), error.get("data")); return
-                if fixture.era == "modern": self._handle_modern(request)
-                else: self._handle_legacy(request)
+                self._handle_modern(request)
 
             def _handle_modern(self, request):
                 method = request.get("method")
@@ -96,34 +92,7 @@ class McpFixture:
                 elif method == "tools/call": result = {"resultType": "complete", **self._tool_result(params)}
                 else:
                     self._rpc_error(request, -32601, "method not found"); return
-                self._rpc_result(request, result, session=False)
-
-            def _handle_legacy(self, request):
-                method = request.get("method")
-                params = request.get("params", {})
-                if method != "server/discover" and (
-                    self.headers.get("Mcp-Method") or self.headers.get("Mcp-Name") or
-                    isinstance(params, dict) and "_meta" in params
-                ):
-                    self._rpc_error(request, -32602, "modern metadata on legacy request"); return
-                if method == "server/discover":
-                    self._rpc_error(request, -32601, "method not found"); return
-                if method == "initialize":
-                    if request.get("params", {}).get("protocolVersion") != "2025-11-25" or self.headers.get("Mcp-Session-Id"):
-                        self._rpc_error(request, -32602, "invalid initialize"); return
-                    result = {"protocolVersion": "2025-11-25", "capabilities": {"tools": {}}, "serverInfo": {"name": "fixture", "version": "1"}}
-                    self._rpc_result(request, result, session=True); return
-                if method == "notifications/initialized":
-                    if self.headers.get("Mcp-Session-Id") != "fixture-session":
-                        self._rpc_error(request, -32000, "missing session"); return
-                    self.send_response(202); self.send_header("Content-Length", "0"); self.end_headers(); return
-                if self.headers.get("Mcp-Session-Id") != "fixture-session":
-                    self._rpc_error(request, -32000, "missing session"); return
-                if method == "tools/list": result = {"tools": fixture.tools}
-                elif method == "tools/call": result = self._tool_result(request["params"])
-                else:
-                    self._rpc_error(request, -32601, "method not found"); return
-                self._rpc_result(request, result, session=True)
+                self._rpc_result(request, result)
 
             def _tool_result(self, params):
                 name = params["name"]
@@ -136,24 +105,23 @@ class McpFixture:
                     time.sleep(args.get("delay", 1)); return {"content": [{"type": "text", "text": "done"}]}
                 raise AssertionError(f"unknown tool {name}")
 
-            def _rpc_result(self, request, result, *, session):
+            def _rpc_result(self, request, result):
                 response = {"jsonrpc": "2.0", "id": request["id"], "result": result}
-                self._send_json(response, session=session)
+                self._send_json(response)
 
             def _rpc_error(self, request, code, message, data=None):
                 error = {"code": code, "message": message}
                 if data is not None: error["data"] = data
                 response = {"jsonrpc": "2.0", "id": request.get("id"), "error": error}
-                self._send_json(response, session=False)
+                self._send_json(response)
 
-            def _send_json(self, response, *, session):
+            def _send_json(self, response):
                 raw = json.dumps(response, separators=(",", ":")).encode()
                 self.send_response(200)
                 if fixture.sse:
                     raw = b"event: message\ndata: " + raw + b"\n\n"
                     self.send_header("Content-Type", "text/event-stream")
                 else: self.send_header("Content-Type", "application/json")
-                if session: self.send_header("Mcp-Session-Id", "fixture-session")
                 self.send_header("Content-Length", str(len(raw))); self.end_headers()
                 try: self.wfile.write(raw)
                 except BrokenPipeError: pass
@@ -162,11 +130,6 @@ class McpFixture:
                 self.send_response(status); self.send_header("Content-Length", str(len(body))); self.end_headers()
                 try: self.wfile.write(body)
                 except BrokenPipeError: pass
-
-            def do_DELETE(self):
-                session_id = self.headers.get("Mcp-Session-Id")
-                if session_id: fixture.deleted_sessions.append(session_id)
-                self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
 
             def log_message(self, *_): pass
 

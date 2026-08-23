@@ -86,7 +86,6 @@ export type RunEvent =
           type: "mcp.connected";
           timestamp: string;
           server: string;
-          protocolEra: "modern" | "legacy";
           protocolVersion: string;
           toolCount: number;
           durationMs: number;

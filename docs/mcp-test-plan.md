@@ -72,30 +72,31 @@ Use the official SDK's in-process server handler when possible.
 
 Verify:
 
-- `versionNegotiation: { mode: "auto" }` selects the 2026 era.
+- `{ versionNegotiation: { mode: { pin: "2026-07-28" } } }` selects the 2026 era; there is no other mode in production.
 - `tools/list` succeeds.
 - One JSON response tool call succeeds.
 - One request-scoped SSE tool call succeeds.
 - `structuredContent` is available after the tool was listed, including output-schema validation performed by the SDK.
-- The adapter reports the negotiated era through diagnostics without exposing URL or credentials.
+- The adapter reports the negotiated version through diagnostics without exposing URL or credentials.
+- A fixture that responds to `server/discover` with the spec-mandated `-32022` corrective continuation, offering our exact pinned version, is retried once and then succeeds.
 
-### 5. Strict legacy-only fixture
+### 5. Legacy-only fixture is a loud rejection, not a fallback path
 
-Use a fixture that rejects modern discovery/request semantics and requires the 2025 initialize handshake.
+Use a fixture that only speaks the 2025 initialize handshake and never offers the modern `2026-07-28` revision at `server/discover`.
 
-Verify `auto` fallback, then list and call one tool. A dual-era or permissive fixture is insufficient evidence.
+Verify `load_mcp_tools`/`loadMcpTools` fails with a clear "does not support the modern protocol" error, makes no `initialize` or `notifications/initialized` call, and leaves no session state. There is no dual-era or permissive fixture to support, because production has no fallback code path to exercise.
 
-### 6. No-fallback outcomes
+### 6. No-retry outcomes
 
-Against the pinned SDK release, assert no legacy fallback for:
+Assert a single `server/discover` attempt (no retry, no fallback) for:
 
 - `401`
 - `403`
 - `5xx`
 - transport failure or HTTP timeout
-- recognized modern protocol errors
+- any protocol error other than the exact `-32022` corrective continuation for our pinned version
 
-Characterize `429` and generic unrecognized `4xx` behavior against the pinned SDK; do not override or reimplement its era classifier. Pin modern mode for a server if its operational errors could otherwise be ambiguous.
+Characterize `429` and generic unrecognized `4xx` behavior against the pinned SDK; do not reimplement its era classifier.
 
 ### 7. Result normalization
 
@@ -209,8 +210,8 @@ Classify live failures as client incompatibility, third-party behavior drift, or
 MCP adapter implementation is complete when:
 
 1. Trusted alias and provider-safe name tests pass.
-2. Modern JSON/SSE and strict legacy fixtures pass.
-3. The pinned SDK no-fallback contract passes.
+2. Modern JSON/SSE fixtures and the legacy-only loud-rejection fixture pass.
+3. The pinned SDK no-retry contract passes.
 4. Normalization, bounds, cancellation, and cleanup pass.
 5. Agent and CLI assembly/session/event contracts pass.
 6. Adapter secret-surface checks pass.

@@ -1071,8 +1071,7 @@ func runCLI(args []string) error {
 			return fmt.Errorf("Unknown plugin: %s. Available plugins: bash, read, write, edit", plugin)
 		}
 	}
-	home, _ := os.UserHomeDir()
-	configs, err := loadMCPConfigs(mcpAliases, currentEnvironment(), home)
+	configs, err := loadMCPConfigs(mcpAliases, currentEnvironment())
 	if err != nil {
 		return err
 	}

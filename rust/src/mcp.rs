@@ -10,14 +10,6 @@ use base64::Engine;
 use serde_json::{Value, json};
 
 const MODERN_VERSION: &str = "2026-07-28";
-const LEGACY_OFFER: &str = "2025-11-25";
-const LEGACY_VERSIONS: &[&str] = &[
-    "2025-11-25",
-    "2025-06-18",
-    "2025-03-26",
-    "2024-11-05",
-    "2024-10-07",
-];
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 50 * 1024;
 const MAX_SCHEMA_BYTES: usize = 50 * 1024;
@@ -25,12 +17,6 @@ const MAX_DESCRIPTION_BYTES: usize = 8 * 1024;
 const MAX_SCHEMA_DEPTH: usize = 20;
 const MAX_TOOLS: usize = 64;
 const STARTUP_TIMEOUT_MS: u64 = 10_000;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum McpProtocolEra {
-    Modern,
-    Legacy,
-}
 
 #[derive(Clone)]
 struct McpHeaderDeclaration {
@@ -55,22 +41,17 @@ impl McpTool {
             return Err("MCP tool arguments must be a JSON object".into());
         }
         let headers = build_mcp_param_headers(&self.header_declarations, &arguments);
-        let result = self.client.request_with_headers(
-            "tools/call",
-            json!({"name":self.remote_name,"arguments":arguments}),
-            self.client.call_timeout_ms,
-            Some(cancel),
-            headers,
-        )?;
-        if *self
+        let result = self
             .client
-            .era
-            .lock()
-            .map_err(|_| "MCP protocol era lock failed")?
-            == McpProtocolEra::Modern
-        {
-            validate_modern_call_result(&result)?;
-        }
+            .request_mode_raw(
+                "tools/call",
+                json!({"name":self.remote_name,"arguments":arguments}),
+                self.client.call_timeout_ms,
+                Some(cancel),
+                headers,
+            )
+            .map_err(RequestError::message)?;
+        validate_modern_call_result(&result)?;
         if result.get("resultType").and_then(Value::as_str) == Some("input_required") {
             return Err(
                 "MCP tool requires additional user input; input_required is not supported".into(),
@@ -91,7 +72,6 @@ impl McpTool {
 pub struct LoadedMcp {
     pub alias: String,
     pub protocol_version: String,
-    pub protocol_era: McpProtocolEra,
     pub tools: Vec<McpTool>,
     client: Arc<McpClient>,
 }
@@ -108,12 +88,6 @@ pub struct McpConfig {
     pub token: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
     pub call_timeout_ms: u64,
-}
-
-#[derive(Clone, Copy)]
-enum RequestMode {
-    Modern,
-    Legacy,
 }
 
 #[derive(Debug)]
@@ -143,9 +117,6 @@ struct McpClient {
     agent: ureq::Agent,
     url: String,
     token: Option<String>,
-    session_id: Mutex<Option<String>>,
-    protocol_version: Mutex<String>,
-    era: Mutex<McpProtocolEra>,
     next_id: AtomicU64,
     call_timeout_ms: u64,
     closed: AtomicBool,
@@ -165,72 +136,25 @@ impl McpClient {
         timeout_ms: u64,
         cancel: Option<&Arc<AtomicBool>>,
     ) -> Result<Value, String> {
-        self.request_with_headers(method, params, timeout_ms, cancel, Vec::new())
-    }
-
-    fn request_with_headers(
-        &self,
-        method: &str,
-        params: Value,
-        timeout_ms: u64,
-        cancel: Option<&Arc<AtomicBool>>,
-        headers: Vec<(String, String)>,
-    ) -> Result<Value, String> {
-        let mode = match *self
-            .era
-            .lock()
-            .map_err(|_| "MCP protocol era lock failed")?
-        {
-            McpProtocolEra::Modern => RequestMode::Modern,
-            McpProtocolEra::Legacy => RequestMode::Legacy,
-        };
-        self.request_mode_raw_with_headers(method, params, timeout_ms, cancel, mode, headers)
+        self.request_mode_raw(method, params, timeout_ms, cancel, Vec::new())
             .map_err(RequestError::message)
     }
 
     fn request_mode_raw(
         &self,
         method: &str,
-        params: Value,
-        timeout_ms: u64,
-        cancel: Option<&Arc<AtomicBool>>,
-        mode: RequestMode,
-    ) -> Result<Value, RequestError> {
-        self.request_mode_raw_with_headers(method, params, timeout_ms, cancel, mode, Vec::new())
-    }
-
-    fn request_mode_raw_with_headers(
-        &self,
-        method: &str,
         mut params: Value,
         timeout_ms: u64,
         cancel: Option<&Arc<AtomicBool>>,
-        mode: RequestMode,
         headers: Vec<(String, String)>,
     ) -> Result<Value, RequestError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(RequestError::Message("MCP connection is closed".into()));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        if matches!(mode, RequestMode::Modern) {
-            add_modern_metadata(&mut params).map_err(RequestError::Message)?;
-        }
+        add_modern_metadata(&mut params).map_err(RequestError::Message)?;
         let body = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
-        self.post(body, timeout_ms, cancel, Some(id), mode, headers)
-    }
-
-    fn notify(&self, method: &str, timeout_ms: u64) -> Result<(), String> {
-        let body = json!({"jsonrpc":"2.0","method":method}).to_string();
-        self.post(
-            body,
-            timeout_ms,
-            None,
-            None,
-            RequestMode::Legacy,
-            Vec::new(),
-        )
-        .map(|_| ())
-        .map_err(RequestError::message)
+        self.post(body, timeout_ms, cancel, Some(id), headers)
     }
 
     fn post(
@@ -239,7 +163,6 @@ impl McpClient {
         timeout_ms: u64,
         cancel: Option<&Arc<AtomicBool>>,
         expected_id: Option<u64>,
-        mode: RequestMode,
         headers: Vec<(String, String)>,
     ) -> Result<Value, RequestError> {
         self.reap_workers();
@@ -248,16 +171,6 @@ impl McpClient {
         let agent = self.agent.clone();
         let url = self.url.clone();
         let token = self.token.clone();
-        let session = self
-            .session_id
-            .lock()
-            .map_err(|_| RequestError::Message("MCP session lock failed".into()))?
-            .clone();
-        let version = self
-            .protocol_version
-            .lock()
-            .map_err(|_| RequestError::Message("MCP protocol version lock failed".into()))?
-            .clone();
         let method = serde_json::from_str::<Value>(&body)
             .ok()
             .and_then(|value| {
@@ -274,30 +187,20 @@ impl McpClient {
             let mut request = agent
                 .post(&url)
                 .header("Content-Type", "application/json")
-                .header("Accept", "application/json, text/event-stream");
-            if matches!(mode, RequestMode::Modern) {
-                request = request
-                    .header("MCP-Protocol-Version", MODERN_VERSION)
-                    .header("Mcp-Method", &method);
-                for (name, value) in headers {
-                    request = request.header(name, value);
-                }
-                if method == "tools/call"
-                    && let Ok(value) = serde_json::from_str::<Value>(&body)
-                    && let Some(name) = value.pointer("/params/name").and_then(Value::as_str)
-                {
-                    request = request.header("Mcp-Name", encode_mcp_name(name));
-                }
-            } else if !version.is_empty() {
-                request = request.header("MCP-Protocol-Version", version);
+                .header("Accept", "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", MODERN_VERSION)
+                .header("Mcp-Method", &method);
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            if method == "tools/call"
+                && let Ok(value) = serde_json::from_str::<Value>(&body)
+                && let Some(name) = value.pointer("/params/name").and_then(Value::as_str)
+            {
+                request = request.header("Mcp-Name", encode_mcp_name(name));
             }
             if let Some(token) = token {
                 request = request.header("Authorization", format!("Bearer {token}"));
-            }
-            if matches!(mode, RequestMode::Legacy)
-                && let Some(session) = session
-            {
-                request = request.header("Mcp-Session-Id", session);
             }
             let response = request
                 .config()
@@ -325,15 +228,8 @@ impl McpClient {
                 return Err(RequestError::Message("MCP request timed out".into()));
             }
             match rx.recv_timeout(remaining.min(Duration::from_millis(20))) {
-                Ok(Ok((value, response_session))) => {
+                Ok(Ok(value)) => {
                     self.reap_workers();
-                    if matches!(mode, RequestMode::Legacy)
-                        && let Some(value) = response_session
-                    {
-                        *self.session_id.lock().map_err(|_| {
-                            RequestError::Message("MCP session lock failed".into())
-                        })? = Some(value);
-                    }
                     if expected_id.is_none() || value.is_null() {
                         return Ok(Value::Null);
                     }
@@ -372,23 +268,7 @@ impl McpClient {
     }
 
     fn close(&self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            let session = self.session_id.lock().ok().and_then(|value| value.clone());
-            if let Some(session) = session {
-                let mut request = self
-                    .agent
-                    .delete(&self.url)
-                    .header("Mcp-Session-Id", session);
-                if let Some(token) = &self.token {
-                    request = request.header("Authorization", format!("Bearer {token}"));
-                }
-                let _ = request
-                    .config()
-                    .timeout_global(Some(Duration::from_secs(1)))
-                    .build()
-                    .call();
-            }
-        }
+        self.closed.store(true, Ordering::SeqCst);
         if let Ok(mut workers) = self.workers.lock() {
             for handle in workers.drain(..) {
                 let _ = handle.join();
@@ -415,13 +295,8 @@ fn add_modern_metadata(params: &mut Value) -> Result<(), String> {
 fn read_response(
     mut response: ureq::http::Response<ureq::Body>,
     expected_id: Option<u64>,
-) -> Result<(Value, Option<String>), RequestError> {
+) -> Result<Value, RequestError> {
     let status = response.status().as_u16();
-    let session = response
-        .headers()
-        .get("Mcp-Session-Id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
     let content_type = response
         .headers()
         .get("Content-Type")
@@ -456,17 +331,16 @@ fn read_response(
         ));
     }
     if text.trim().is_empty() {
-        return Ok((Value::Null, session));
+        return Ok(Value::Null);
     }
-    let payload = if content_type.starts_with("text/event-stream") {
-        parse_sse(&text, expected_id).map_err(RequestError::Message)?
+    if content_type.starts_with("text/event-stream") {
+        parse_sse(&text, expected_id).map_err(RequestError::Message)
     } else {
         let payload: Value = serde_json::from_str(&text)
             .map_err(|_| RequestError::Message("Invalid MCP JSON response".into()))?;
         validate_response_id(&payload, expected_id).map_err(RequestError::Message)?;
-        payload
-    };
-    Ok((payload, session))
+        Ok(payload)
+    }
 }
 
 fn parse_sse(text: &str, expected_id: Option<u64>) -> Result<Value, String> {
@@ -500,11 +374,10 @@ pub fn load_mcp_configs(aliases: &[String]) -> Result<Vec<McpConfig>, String> {
     if aliases.is_empty() {
         return Ok(Vec::new());
     }
-    let path = std::env::var("TINY_MCP_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".tiny-agent/mcp.json")
-        });
+    let path = PathBuf::from(
+        std::env::var("TINY_MCP_CONFIG")
+            .map_err(|_| "TINY_MCP_CONFIG must be set to use --mcp".to_string())?,
+    );
     let text = std::fs::read_to_string(path).map_err(|_| {
         "Failed to load MCP catalog: file is missing, unreadable, or invalid JSON".to_string()
     })?;
@@ -651,9 +524,6 @@ pub fn load_mcp_tools(config: McpConfig) -> Result<LoadedMcp, String> {
         agent: ureq::Agent::new_with_config(agent_config),
         url: config.url.clone(),
         token: config.token.clone(),
-        session_id: Mutex::new(None),
-        protocol_version: Mutex::new(MODERN_VERSION.into()),
-        era: Mutex::new(McpProtocolEra::Modern),
         next_id: AtomicU64::new(1),
         call_timeout_ms: config.call_timeout_ms,
         closed: AtomicBool::new(false),
@@ -665,38 +535,31 @@ pub fn load_mcp_tools(config: McpConfig) -> Result<LoadedMcp, String> {
         json!({}),
         remaining_ms(deadline)?,
         None,
-        RequestMode::Modern,
+        Vec::new(),
     );
-    let (era, protocol_version) = match classify_discover(discover) {
-        DiscoverDecision::Modern => (McpProtocolEra::Modern, MODERN_VERSION.to_string()),
+    match classify_discover(discover) {
+        DiscoverDecision::Modern => {}
         DiscoverDecision::RetryModern => {
             let retry = client.request_mode_raw(
                 "server/discover",
                 json!({}),
                 remaining_ms(deadline)?,
                 None,
-                RequestMode::Modern,
+                Vec::new(),
             );
             match classify_discover(retry) {
-                DiscoverDecision::Modern => (McpProtocolEra::Modern, MODERN_VERSION.to_string()),
-                DiscoverDecision::Legacy => negotiate_legacy(&client, deadline)?,
+                DiscoverDecision::Modern => {}
                 DiscoverDecision::RetryModern => {
                     return Err("MCP modern discovery retry was rejected".into());
                 }
                 DiscoverDecision::Hard(error) => return Err(error),
             }
         }
-        DiscoverDecision::Legacy => negotiate_legacy(&client, deadline)?,
         DiscoverDecision::Hard(error) => return Err(error),
     };
-    *client
-        .era
-        .lock()
-        .map_err(|_| "MCP protocol era lock failed")? = era;
+    let protocol_version = MODERN_VERSION.to_string();
     let listed = client.request("tools/list", json!({}), remaining_ms(deadline)?, None)?;
-    if era == McpProtocolEra::Modern {
-        validate_modern_list_result(&listed)?;
-    }
+    validate_modern_list_result(&listed)?;
     let remotes = listed
         .get("tools")
         .and_then(Value::as_array)
@@ -732,13 +595,8 @@ pub fn load_mcp_tools(config: McpConfig) -> Result<LoadedMcp, String> {
             .cloned()
             .ok_or_else(|| format!("MCP tool inputSchema must be an object: {name}"))?;
         validate_schema(&schema, name)?;
-        let header_declarations = if era == McpProtocolEra::Modern {
-            let Some(declarations) = scan_mcp_header_declarations(&schema) else {
-                continue;
-            };
-            declarations
-        } else {
-            Vec::new()
+        let Some(header_declarations) = scan_mcp_header_declarations(&schema) else {
+            continue;
         };
         let description = match remote.get("description") {
             None => format!("MCP tool {name} from {}.", config.alias),
@@ -777,77 +635,37 @@ pub fn load_mcp_tools(config: McpConfig) -> Result<LoadedMcp, String> {
     Ok(LoadedMcp {
         alias: config.alias,
         protocol_version,
-        protocol_era: era,
         tools,
         client,
     })
-}
-
-fn negotiate_legacy(
-    client: &Arc<McpClient>,
-    deadline: Instant,
-) -> Result<(McpProtocolEra, String), String> {
-    *client
-        .era
-        .lock()
-        .map_err(|_| "MCP protocol era lock failed")? = McpProtocolEra::Legacy;
-    *client
-        .protocol_version
-        .lock()
-        .map_err(|_| "MCP protocol version lock failed")? = String::new();
-    let initialized = client
-        .request_mode_raw(
-            "initialize",
-            json!({"protocolVersion":LEGACY_OFFER,"capabilities":{},"clientInfo":{"name":"tiny-agent","version":"0.1.0"}}),
-            remaining_ms(deadline)?,
-            None,
-            RequestMode::Legacy,
-        )
-        .map_err(RequestError::message)?;
-    let version = initialized
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .ok_or("MCP server did not negotiate a protocol version")?
-        .to_string();
-    if !LEGACY_VERSIONS.contains(&version.as_str()) {
-        return Err(format!(
-            "MCP server negotiated unsupported protocol version: {version}"
-        ));
-    }
-    *client
-        .protocol_version
-        .lock()
-        .map_err(|_| "MCP protocol version lock failed")? = version.clone();
-    client.notify("notifications/initialized", remaining_ms(deadline)?)?;
-    Ok((McpProtocolEra::Legacy, version))
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum DiscoverDecision {
     Modern,
     RetryModern,
-    Legacy,
     Hard(String),
 }
 
 fn classify_discover(result: Result<Value, RequestError>) -> DiscoverDecision {
+    const UNSUPPORTED: &str = "MCP server does not support the modern protocol version";
     match result {
         Ok(result) => {
             let Some(object) = result.as_object() else {
-                return DiscoverDecision::Legacy;
+                return DiscoverDecision::Hard(UNSUPPORTED.into());
             };
             if object.get("resultType").and_then(Value::as_str) != Some("complete")
                 || !object.get("capabilities").is_some_and(Value::is_object)
             {
-                return DiscoverDecision::Legacy;
+                return DiscoverDecision::Hard(UNSUPPORTED.into());
             }
             let Some(versions) = string_array(object.get("supportedVersions")) else {
-                return DiscoverDecision::Legacy;
+                return DiscoverDecision::Hard(UNSUPPORTED.into());
             };
             if versions.contains(&MODERN_VERSION) {
                 DiscoverDecision::Modern
             } else {
-                DiscoverDecision::Legacy
+                DiscoverDecision::Hard(UNSUPPORTED.into())
             }
         }
         Err(RequestError::Rpc(error)) => classify_discover_rpc_error(&error),
@@ -855,11 +673,10 @@ fn classify_discover(result: Result<Value, RequestError>) -> DiscoverDecision {
             if matches!(status, 401 | 403) || status >= 500 {
                 return DiscoverDecision::Hard(format!("MCP HTTP {status}"));
             }
-            if (400..500).contains(&status) {
-                if let Some(error) = payload.as_ref().and_then(|value| value.get("error")) {
-                    return classify_discover_rpc_error(error);
-                }
-                return DiscoverDecision::Legacy;
+            if (400..500).contains(&status)
+                && let Some(error) = payload.as_ref().and_then(|value| value.get("error"))
+            {
+                return classify_discover_rpc_error(error);
             }
             DiscoverDecision::Hard(format!("MCP HTTP {status}"))
         }
@@ -869,20 +686,20 @@ fn classify_discover(result: Result<Value, RequestError>) -> DiscoverDecision {
 
 fn classify_discover_rpc_error(error: &Value) -> DiscoverDecision {
     if error.get("code").and_then(Value::as_i64) != Some(-32022) {
-        return DiscoverDecision::Legacy;
-    }
-    let Some(supported) = string_array(error.pointer("/data/supported")) else {
-        return DiscoverDecision::Legacy;
-    };
-    if supported.contains(&MODERN_VERSION) {
-        return DiscoverDecision::RetryModern;
-    }
-    if supported.iter().any(|version| modern_version(version)) {
         return DiscoverDecision::Hard(
-            "MCP server supports an incompatible modern protocol version".into(),
+            "MCP server does not support the modern protocol version".into(),
         );
     }
-    DiscoverDecision::Legacy
+    let Some(supported) = string_array(error.pointer("/data/supported")) else {
+        return DiscoverDecision::Hard(
+            "MCP server does not support the modern protocol version".into(),
+        );
+    };
+    if supported.contains(&MODERN_VERSION) {
+        DiscoverDecision::RetryModern
+    } else {
+        DiscoverDecision::Hard("MCP server does not support the modern protocol version".into())
+    }
 }
 
 fn string_array(value: Option<&Value>) -> Option<Vec<&str>> {
@@ -891,10 +708,6 @@ fn string_array(value: Option<&Value>) -> Option<Vec<&str>> {
         return None;
     }
     values.iter().map(Value::as_str).collect()
-}
-
-fn modern_version(version: &str) -> bool {
-    version >= MODERN_VERSION
 }
 
 fn validate_modern_list_result(result: &Value) -> Result<(), String> {
@@ -1221,7 +1034,8 @@ mod tests {
     }
 
     #[test]
-    fn discover_classifier_matches_auto_negotiation_fallbacks() {
+    fn discover_classifier_is_modern_only_with_a_corrective_retry() {
+        const UNSUPPORTED: &str = "MCP server does not support the modern protocol version";
         let complete = |versions: Value| {
             Ok(json!({
                 "resultType":"complete",
@@ -1236,15 +1050,15 @@ mod tests {
         );
         assert_eq!(
             classify_discover(complete(json!(["2025-11-25"]))),
-            DiscoverDecision::Legacy
+            DiscoverDecision::Hard(UNSUPPORTED.into())
         );
         assert_eq!(
             classify_discover(Ok(json!({"supportedVersions":[MODERN_VERSION]}))),
-            DiscoverDecision::Legacy
+            DiscoverDecision::Hard(UNSUPPORTED.into())
         );
         assert_eq!(
             classify_discover(Err(RequestError::Rpc(json!({"code":-32601})))),
-            DiscoverDecision::Legacy
+            DiscoverDecision::Hard(UNSUPPORTED.into())
         );
         assert_eq!(
             classify_discover(Err(RequestError::Rpc(json!({
@@ -1258,23 +1072,21 @@ mod tests {
                 "code":-32022,
                 "data":{"supported":["2027-01-01"]}
             })))),
-            DiscoverDecision::Hard(
-                "MCP server supports an incompatible modern protocol version".into()
-            )
+            DiscoverDecision::Hard(UNSUPPORTED.into())
         );
         assert_eq!(
             classify_discover(Err(RequestError::Rpc(json!({
                 "code":-32022,
                 "data":{"supported":[MODERN_VERSION, 1]}
             })))),
-            DiscoverDecision::Legacy
+            DiscoverDecision::Hard(UNSUPPORTED.into())
         );
         assert_eq!(
             classify_discover(Err(RequestError::Http(
                 400,
                 Some(json!({"error":{"code":-32601}}))
             ))),
-            DiscoverDecision::Legacy
+            DiscoverDecision::Hard(UNSUPPORTED.into())
         );
         assert_eq!(
             classify_discover(Err(RequestError::Http(401, None))),

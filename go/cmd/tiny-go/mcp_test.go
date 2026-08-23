@@ -53,7 +53,7 @@ func TestLoadMCPConfigsStrictCatalogAndToken(t *testing.T) {
 	if err := os.WriteFile(path, []byte(catalog), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	configs, err := loadMCPConfigs([]string{"fixture", "public"}, map[string]string{"TINY_MCP_CONFIG": path, "FIXTURE_TOKEN": "secret"}, dir)
+	configs, err := loadMCPConfigs([]string{"fixture", "public"}, map[string]string{"TINY_MCP_CONFIG": path, "FIXTURE_TOKEN": "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,10 +70,20 @@ func TestLoadMCPConfigsStrictCatalogAndToken(t *testing.T) {
 		if err := os.WriteFile(path, []byte(test.body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		_, err := loadMCPConfigs([]string{"fixture"}, map[string]string{"TINY_MCP_CONFIG": path}, dir)
+		_, err := loadMCPConfigs([]string{"fixture"}, map[string]string{"TINY_MCP_CONFIG": path})
 		if err == nil || !strings.Contains(err.Error(), test.match) {
 			t.Fatalf("body=%s err=%v", test.body, err)
 		}
+	}
+}
+
+func TestLoadMCPConfigsRequiresExplicitCatalogPath(t *testing.T) {
+	if _, err := loadMCPConfigs([]string{"fixture"}, map[string]string{}); err == nil ||
+		!strings.Contains(err.Error(), "TINY_MCP_CONFIG must be set to use --mcp") {
+		t.Fatalf("error: %v", err)
+	}
+	if configs, err := loadMCPConfigs(nil, map[string]string{}); err != nil || configs != nil {
+		t.Fatalf("no aliases should short-circuit without requiring TINY_MCP_CONFIG: configs=%v err=%v", configs, err)
 	}
 }
 
@@ -120,53 +130,32 @@ func TestModernStatelessMCPNegotiation(t *testing.T) {
 	}
 	defer loaded.Close()
 	result, err := loaded.tools[0].Execute(context.Background(), map[string]any{})
-	if err != nil || result != "modern" || loaded.protocolEra != "modern" || loaded.protocolVersion != modernMCPVersion {
-		t.Fatalf("result=%q era=%s version=%s err=%v", result, loaded.protocolEra, loaded.protocolVersion, err)
+	if err != nil || result != "modern" || loaded.protocolVersion != modernMCPVersion {
+		t.Fatalf("result=%q version=%s err=%v", result, loaded.protocolVersion, err)
 	}
 	if strings.Join(calls, ",") != "server/discover,tools/list,tools/call" {
 		t.Fatalf("calls: %v", calls)
 	}
 }
 
-func TestStrictLegacyMCPFallback(t *testing.T) {
-	calls := []string{}
+func TestModernCorrectiveRetry(t *testing.T) {
+	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
 		var request struct {
-			ID     int            `json:"id"`
-			Method string         `json:"method"`
-			Params map[string]any `json:"params"`
+			ID     int    `json:"id"`
+			Method string `json:"method"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Error(err)
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		calls++
+		if calls == 1 {
+			writeRPCError(w, request.ID, -32022, map[string]any{"supported": []string{modernMCPVersion}})
 			return
 		}
-		calls = append(calls, request.Method)
-		switch request.Method {
-		case "server/discover":
-			writeRPCError(w, request.ID, -32022, map[string]any{"supported": []string{legacyMCPVersion}})
-		case "initialize":
-			if request.ID != 1 || request.Params["protocolVersion"] != legacyMCPVersion || request.Params["_meta"] != nil || r.Header.Get("Mcp-Protocol-Version") != "" || r.Header.Get("Mcp-Method") != "" {
-				t.Errorf("legacy initialize: params=%#v headers=%#v", request.Params, r.Header)
-			}
-			w.Header().Set("Mcp-Session-Id", "legacy-session")
-			writeRPC(w, request.ID, map[string]any{"protocolVersion": legacyMCPVersion})
-		case "notifications/initialized":
-			if r.Header.Get("Mcp-Session-Id") != "legacy-session" || r.Header.Get("Mcp-Protocol-Version") != legacyMCPVersion {
-				t.Errorf("legacy notification headers: %#v", r.Header)
-			}
-			w.WriteHeader(http.StatusAccepted)
-		case "tools/list":
-			if r.Header.Get("Mcp-Session-Id") != "legacy-session" || r.Header.Get("Mcp-Protocol-Version") != legacyMCPVersion {
-				t.Errorf("legacy list headers: %#v", r.Header)
-			}
-			writeRPC(w, request.ID, map[string]any{"tools": []any{map[string]any{"name": "echo", "inputSchema": map[string]any{"type": "object"}}}})
-		default:
-			t.Errorf("unexpected legacy method: %s", request.Method)
+		if request.Method == "server/discover" {
+			writeRPC(w, request.ID, map[string]any{"supportedVersions": []string{modernMCPVersion}, "capabilities": map[string]any{}})
+			return
 		}
+		writeRPC(w, request.ID, map[string]any{"tools": []any{}})
 	}))
 	defer server.Close()
 	loaded, err := loadMCPTools(context.Background(), MCPConfig{Alias: "fixture", URL: server.URL}, server.Client())
@@ -174,8 +163,23 @@ func TestStrictLegacyMCPFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer loaded.Close()
-	if loaded.protocolEra != "legacy" || loaded.protocolVersion != legacyMCPVersion || strings.Join(calls, ",") != "server/discover,initialize,notifications/initialized,tools/list" {
-		t.Fatalf("era=%s version=%s calls=%v", loaded.protocolEra, loaded.protocolVersion, calls)
+	if calls != 3 {
+		t.Fatalf("calls: %d", calls)
+	}
+}
+
+func TestModernOnlyRejectsServerWithoutModernSupport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ID int `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		writeRPCError(w, request.ID, -32022, map[string]any{"supported": []string{"2025-11-25"}})
+	}))
+	defer server.Close()
+	if _, err := loadMCPTools(context.Background(), MCPConfig{Alias: "fixture", URL: server.URL}, server.Client()); err == nil ||
+		!strings.Contains(err.Error(), "does not support the modern protocol") {
+		t.Fatalf("expected a loud modern-only rejection, got: %v", err)
 	}
 }
 
@@ -300,11 +304,7 @@ func TestMCPValidationTimeoutAndUnsupportedContent(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&request)
 		switch request.Method {
 		case "server/discover":
-			writeRPCError(w, request.ID, -32601, nil)
-		case "initialize":
-			writeRPC(w, request.ID, map[string]any{"protocolVersion": legacyMCPVersion})
-		case "notifications/initialized":
-			w.WriteHeader(http.StatusAccepted)
+			writeRPC(w, request.ID, map[string]any{"supportedVersions": []string{modernMCPVersion}, "capabilities": map[string]any{"tools": map[string]any{}}})
 		case "tools/list":
 			writeRPC(w, request.ID, map[string]any{"tools": []any{map[string]any{"name": "image", "inputSchema": map[string]any{"type": "object"}}, map[string]any{"name": "slow", "inputSchema": map[string]any{"type": "object"}}}})
 		case "tools/call":

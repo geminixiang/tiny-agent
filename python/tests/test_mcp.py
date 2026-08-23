@@ -30,7 +30,6 @@ class McpTest(unittest.TestCase):
                 try:
                     loaded = load_mcp_tools(McpConfig("fixture", fixture.url, {"Authorization": "Bearer secret"}))
                     self.addCleanup(loaded.close)
-                    self.assertEqual(loaded.protocol_era, "modern")
                     self.assertEqual(loaded.protocol_version, "2026-07-28")
                     self.assertEqual(display_tool_name(loaded.tools[0]["function"]["name"]), "mcp:fixture/echo")
                     self.assertEqual(loaded.tools[0]["execute"]({"message": "hello"}), "hello")
@@ -39,27 +38,12 @@ class McpTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: image"): loaded.tools[3]["execute"]({})
                     self.assertTrue(all(call["authorization"] == "Bearer secret" for call in fixture.calls))
                     loaded.close(); loaded.close()
-                    self.assertEqual(fixture.deleted_sessions, [])
                     with self.assertRaisesRegex(RuntimeError, "connection is closed"): loaded.tools[0]["execute"]({"message": "x"})
                 finally: fixture.close()
 
-    def test_strict_legacy_fallback_and_session_cleanup(self):
-        fixture = McpFixture(era="legacy")
-        try:
-            loaded = load_mcp_tools(McpConfig("fixture", fixture.url))
-            self.assertEqual(loaded.protocol_era, "legacy")
-            self.assertEqual(loaded.protocol_version, "2025-11-25")
-            self.assertEqual(loaded.tools[0]["execute"]({"message": "legacy"}), "legacy")
-            self.assertEqual([call["request"]["method"] for call in fixture.calls[:4]], [
-                "server/discover", "initialize", "notifications/initialized", "tools/list",
-            ])
-            loaded.close()
-            self.assertEqual(fixture.deleted_sessions, ["fixture-session"])
-        finally: fixture.close()
-
-    def test_http_errors_are_sanitized_and_do_not_fallback_when_unsafe(self):
+    def test_http_errors_are_sanitized_and_never_fall_back(self):
         canary = "SECRET-CANARY-DO-NOT-LEAK"
-        for status in (401, 503):
+        for status in (401, 404, 503):
             with self.subTest(status=status):
                 fixture = McpFixture(http_error=status, error_body=canary)
                 try:
@@ -69,15 +53,6 @@ class McpTest(unittest.TestCase):
                     self.assertNotIn(canary, str(raised.exception))
                     self.assertEqual([call["request"]["method"] for call in fixture.calls], ["server/discover"])
                 finally: fixture.close()
-
-    def test_non_auth_client_http_failure_falls_back_to_legacy(self):
-        fixture = McpFixture(http_error=404, error_body="SECRET-CANARY")
-        try:
-            with self.assertRaises(RuntimeError) as raised:
-                load_mcp_tools(McpConfig("fixture", fixture.url))
-            self.assertNotIn("SECRET-CANARY", str(raised.exception))
-            self.assertEqual([call["request"]["method"] for call in fixture.calls], ["server/discover", "initialize"])
-        finally: fixture.close()
 
     def test_json_rpc_errors_are_sanitized_for_json_and_sse(self):
         canary = "SECRET-RPC-CANARY"
@@ -94,7 +69,7 @@ class McpTest(unittest.TestCase):
                         self.assertNotIn(canary, str(raised.exception))
                     finally: fixture.close()
 
-    def test_negotiation_error_classifier_and_corrective_retry(self):
+    def test_negotiation_corrective_retry_and_loud_rejection(self):
         mutual = {"code": -32022, "message": "retry", "data": {"supported": ["2026-07-28"]}}
         fixture = McpFixture(rpc_errors={"server/discover": [mutual, None]})
         try:
@@ -103,22 +78,18 @@ class McpTest(unittest.TestCase):
         finally: fixture.close()
 
         cases = [
-            ({"code": -32022, "data": {"supported": ["2027-01-01"]}}, False),
-            ({"code": -32022, "data": {"supported": ["2025-11-25"]}}, True),
-            ({"code": -32022, "data": {"supported": []}}, True),
-            ({"code": -32603, "data": {"supported": ["2027-01-01"]}}, True),
+            {"code": -32022, "data": {"supported": ["2027-01-01"]}},
+            {"code": -32022, "data": {"supported": ["2025-11-25"]}},
+            {"code": -32022, "data": {"supported": []}},
+            {"code": -32603, "data": {"supported": ["2026-07-28"]}},
         ]
-        for error, fallback in cases:
+        for error in cases:
             with self.subTest(error=error):
-                fixture = McpFixture(era="legacy", rpc_errors={"server/discover": error})
+                fixture = McpFixture(rpc_errors={"server/discover": error})
                 try:
-                    if fallback:
-                        loaded = load_mcp_tools(McpConfig("fixture", fixture.url)); loaded.close()
-                        self.assertIn("initialize", fixture.method_counts)
-                    else:
-                        with self.assertRaisesRegex(RuntimeError, "mutually compatible modern"):
-                            load_mcp_tools(McpConfig("fixture", fixture.url))
-                        self.assertNotIn("initialize", fixture.method_counts)
+                    with self.assertRaisesRegex(RuntimeError, "does not support the modern protocol"):
+                        load_mcp_tools(McpConfig("fixture", fixture.url))
+                    self.assertEqual(fixture.method_counts["server/discover"], 1)
                 finally: fixture.close()
 
     def test_mcp_header_encoding_mirroring_and_invalid_declaration_exclusion(self):

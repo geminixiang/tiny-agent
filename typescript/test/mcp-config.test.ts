@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,31 +17,27 @@ const fixture = {
     },
 };
 
-test("loads the default trusted MCP catalog and resolves its token environment", async () => {
-    const home = await mkdtemp(join(tmpdir(), "tiny-agent-mcp-config-"));
-    await mkdir(join(home, ".tiny-agent"));
-    await writeFile(join(home, ".tiny-agent/mcp.json"), JSON.stringify(fixture));
-    assert.deepEqual(await loadMcpConfigs(["sentry", "public"], { SENTRY_JOB_TOKEN: "secret" }, home), [
-        {
-            alias: "sentry",
-            url: "https://mcp.example.com/sentry",
-            headers: { Authorization: "Bearer secret" },
-            allowedTools: ["search", "get_issue"],
-            callTimeoutMs: 12_000,
-        },
-        { alias: "public", url: "https://mcp.example.com/public" },
-    ]);
-});
-
-test("uses TINY_MCP_CONFIG override and injected environment", async () => {
+test("loads the trusted MCP catalog from an explicit TINY_MCP_CONFIG path and resolves its token environment", async () => {
     const root = await mkdtemp(join(tmpdir(), "tiny-agent-mcp-config-"));
     const path = join(root, "trusted.json");
     await writeFile(path, JSON.stringify(fixture));
-    const configs = await loadMcpConfigs(["sentry"], {
-        TINY_MCP_CONFIG: path,
-        SENTRY_JOB_TOKEN: "injected",
-    });
-    assert.equal(configs[0].headers?.Authorization, "Bearer injected");
+    assert.deepEqual(
+        await loadMcpConfigs(["sentry", "public"], { TINY_MCP_CONFIG: path, SENTRY_JOB_TOKEN: "secret" }),
+        [
+            {
+                alias: "sentry",
+                url: "https://mcp.example.com/sentry",
+                headers: { Authorization: "Bearer secret" },
+                allowedTools: ["search", "get_issue"],
+                callTimeoutMs: 12_000,
+            },
+            { alias: "public", url: "https://mcp.example.com/public" },
+        ],
+    );
+});
+
+test("requires TINY_MCP_CONFIG to be set when aliases are requested", async () => {
+    await assert.rejects(() => loadMcpConfigs(["sentry"], {}), /TINY_MCP_CONFIG must be set to use --mcp/);
 });
 
 test("rejects invalid catalogs, aliases, and missing tokens without leaking secrets", async () => {

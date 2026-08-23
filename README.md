@@ -82,11 +82,7 @@ TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 
 ### MCP
 
-四個CLI都能從trusted catalog載入MCP tools。預設位置：
-
-```text
-~/.tiny-agent/mcp.json
-```
+四個CLI都能從trusted catalog載入MCP tools。使用`--mcp`時必須明確設定`TINY_MCP_CONFIG`指向catalog路徑，沒有預設位置也沒有home目錄fallback；未設定時會直接報錯。
 
 ```json
 {
@@ -104,6 +100,7 @@ TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts
 執行任一版本：
 
 ```bash
+export TINY_MCP_CONFIG=/trusted/path/mcp.json
 export TINY_MCP_TOKEN_SENTRY=...
 tiny-ts --mcp sentry --plugin read "調查 issue"
 tiny-go --mcp sentry --plugin read "調查 issue"
@@ -119,9 +116,9 @@ tools: read, mcp:sentry/search_issues, mcp:sentry/get_issue
 mcp: sentry
 ```
 
-Catalog只保存token的環境變數名稱；runtime不會驗證credential是否短效。`TINY_MCP_CONFIG=/trusted/path/mcp.json`可指定其他trusted catalog；不會讀取repository config，也不接受CLI傳入URL、header或token。正式多租戶部署應由trusted gateway注入短效、tenant/job-scoped credential；這是部署建議，不是tiny-agent runtime保證。
+Catalog只保存token的環境變數名稱；runtime不會驗證credential是否短效。`TINY_MCP_CONFIG`是唯一的catalog來源，不會讀取repository config，也不接受CLI傳入URL、header或token。正式多租戶部署應由trusted gateway注入短效、tenant/job-scoped credential；這是部署建議，不是tiny-agent runtime保證。
 
-目前支援modern Streamable HTTP、`tools/list`與`tools/call`。多租戶部署應連到trusted gateway；MCP不是sandbox或authorization boundary。
+只支援modern MCP protocol（`2026-07-28`）、`tools/list`與`tools/call`；不協商、不降級到任何舊版protocol，連線到只講舊版protocol的server會直接失敗並回報清楚錯誤。多租戶部署應連到trusted gateway；MCP不是sandbox或authorization boundary。
 
 單次執行：
 

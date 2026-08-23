@@ -1,5 +1,4 @@
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { McpConfig } from "./mcp.js";
 
@@ -18,13 +17,10 @@ export type McpServerCatalog = {
     >;
 };
 
-export async function loadMcpConfigs(
-    aliases: string[],
-    env: NodeJS.ProcessEnv = process.env,
-    home = homedir(),
-): Promise<McpConfig[]> {
+export async function loadMcpConfigs(aliases: string[], env: NodeJS.ProcessEnv = process.env): Promise<McpConfig[]> {
     if (!aliases.length) return [];
-    const path = env.TINY_MCP_CONFIG ? resolve(env.TINY_MCP_CONFIG) : resolve(home, ".tiny-agent/mcp.json");
+    if (!env.TINY_MCP_CONFIG) throw Error("TINY_MCP_CONFIG must be set to use --mcp");
+    const path = resolve(env.TINY_MCP_CONFIG);
     let value: unknown;
     try {
         value = JSON.parse(await readFile(path, "utf8"));
