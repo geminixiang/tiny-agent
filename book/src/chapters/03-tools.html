@@ -54,14 +54,13 @@
 </p>
 
 <h2 id="validation">JSON Schema 不等於 Runtime Validation</h2>
-<p>Schema 是給模型的介面說明，不是安全檢查。模型或 provider仍可能回傳：</p>
+<p>Schema 是給模型的介面說明，不是安全檢查。模型或 provider 仍可能回傳：</p>
 <pre data-lang="json"><code>{"command": 42}
 null
 []</code></pre>
 <p>
-    Dispatch seam先要求 arguments為non-null JSON object；每個built-in
-    tool再驗證自己真正執行的欄位。失敗必須throw，由Agent轉成error result。不要回傳一般字串<code>Error: ...</code
-    >來表示失敗，否則monitoring只能猜文字。
+    Dispatch seam 先要求 arguments 為 non-null JSON object；每個 built-in tool 再驗證自己真正執行的欄位。失敗必須
+    throw，由 Agent 轉成 error result。不要回傳一般字串 <code>Error: ...</code> 來表示失敗，否則 monitoring 只能猜文字。
 </p>
 
 <h2 id="plugin">Plugin 是具名 Tool Bundle</h2>
@@ -70,15 +69,15 @@ null
     tools: readonly Tool[];
 };</code></pre>
 <p>
-    這不是dynamic package system。<code>--plugin read,edit</code>只是從trusted built-in
-    catalog選擇本次提供的capabilities。未指定時啟用四個built-ins；指定後變成allowlist。
+    這不是 dynamic package system。<code>--plugin read,edit</code> 只是從 trusted built-in catalog 選擇本次提供的
+    capabilities。未指定時啟用四個 built-ins；指定後變成 allowlist。
 </p>
 <pre data-lang="sh"><code>tiny-ts --plugin read "分析 README"
 tiny-ts --plugin read,edit "閱讀並修改 README"
 </code></pre>
 <p>
-    Repository不能自行安裝plugin，模型也不能要求下載任意module。企業工具應由trusted host組裝，並透過closure持有tenant
-    scope與credential：
+    Repository 不能自行安裝 plugin，模型也不能要求下載任意 module。企業工具應由 trusted host 組裝，並透過 closure 持有
+    tenant scope 與 credential：
 </p>
 <pre data-lang="ts"><code>function createSentryPlugin(client, trustedScope): Plugin {
     return {
@@ -91,44 +90,43 @@ tiny-ts --plugin read,edit "閱讀並修改 README"
 <pre><code>MCP tools/list → tiny-agent Tool[]
 Tool.execute()  → MCP tools/call</code></pre>
 <p>
-    MCP不會建立第二個agent loop，也不是authorization或sandbox。Tiny-agent只接受trusted named
-    catalog；URL、token、tenant與authorization不能來自model
-    arguments。遠端名稱內部會編碼避免碰撞，TUI才顯示成人類可讀的<code>mcp:sentry/get_issue</code>。
+    MCP 不會建立第二個 agent loop，也不是 authorization 或 sandbox。Tiny-agent 只接受 trusted named
+    catalog；URL、token、tenant 與 authorization 不能來自 model arguments。遠端名稱內部會編碼避免碰撞，TUI
+    才顯示成人類可讀的 <code>mcp:sentry/get_issue</code>。
 </p>
 <p>
-    目前TypeScript、Go、Python會把MCP能力適配進generic Tool seam；Rust仍使用獨立<code>McpTool</code>
-    dispatch。這是已知cross-language difference，不應在教材中假裝完全一致。
+    目前 TypeScript、Go、Python 會把 MCP 能力適配進 generic Tool seam；Rust 仍使用獨立 <code>McpTool</code>
+    dispatch。這是已知 cross-language difference，不應在教材中假裝完全一致。
 </p>
 
 <h2 id="replay">Replay Policy 是 Effect Semantics</h2>
-<p>只有exact built-in <code>read</code>宣告safe replay：</p>
+<p>只有 exact built-in <code>read</code> 宣告 safe replay：</p>
 <pre><code>replay = safe
 replayKey = builtin:read:v1</code></pre>
 <p>
-    同名custom
-    <code>read</code
-    >仍是never。<code>bash/write/edit/MCP</code>預設never，因為crash後無法證明effect沒有發生。Replay不是由模型選擇，也不能只靠tool
-    name判斷。
+    同名 custom
+    <code>read</code> 仍是 never。<code>bash/write/edit/MCP</code> 預設 never，因為 crash 後無法證明 effect
+    沒有發生。Replay 不是由模型選擇，也不能只靠 tool name 判斷。
 </p>
 
 <h2 id="hands-on">親手驗證</h2>
-<p>先跑injected Tool與filesystem containment的離線測試，不需要OpenRouter key：</p>
+<p>先跑 injected Tool 與 filesystem containment 的離線測試，不需要 OpenRouter key：</p>
 <pre data-lang="sh"><code>npm --prefix typescript test -- \
   --test-name-pattern="injected tool|filesystem tools contain canonical paths"
 
 go -C go test ./cmd/tiny-go \
   -run 'TestFilesystemToolsContainCanonicalPaths' -count=1</code></pre>
 <p>
-    在test中追蹤四個步驟：model-facing schema、provider產生的call、runtime argument validation、tool
-    result回到transcript。Symlink案例只證明靜態path containment；它不能取代面對惡意並行filesystem mutation的OS
-    sandbox。完整安全邊界見第08章。
+    在 test 中追蹤四個步驟：model-facing schema、provider 產生的 call、runtime argument validation、tool result 回到
+    transcript。Symlink 案例只證明靜態 path containment；它不能取代面對惡意並行 filesystem mutation 的 OS
+    sandbox。完整安全邊界見第 08 章。
 </p>
 
-<p class="bridge">Tool決定能力邊界，但要讓Agent一次只看到需要的能力與規則——這是下一章Context的工作。</p>
+<p class="bridge">Tool 決定能力邊界，但要讓 Agent 一次只看到需要的能力與規則——這是下一章 Context 的工作。</p>
 
 <aside class="note">
     <strong>閱讀原始碼</strong
     ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/tools.ts"
-        >Tool、Plugin與四個built-ins</a
+        >Tool、Plugin 與四個 built-ins</a
     >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/mcp.ts">MCP Tool adapter</a>。
 </aside>

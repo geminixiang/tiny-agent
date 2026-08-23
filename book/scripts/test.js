@@ -189,8 +189,8 @@ test("chapter 06 names all three deep-interface seams and all four recovery outc
     const summary = html.match(/<p class="three-interfaces-summary">([\s\S]*?)<\/p>/);
     assert.ok(summary, "06章缺少 three-interfaces-summary");
     assert.match(summary[1], /第三次/);
-    assert.match(summary[1], /Tool的execute/);
-    assert.match(summary[1], /SessionStore的commit\/load/);
+    assert.match(summary[1], /Tool 的 execute/);
+    assert.match(summary[1], /SessionStore 的 commit\/load/);
     assert.match(summary[1], /reducer\/planner/);
     const outcomes = html.match(/<p class="four-outcomes">([\s\S]*?)<\/p>/);
     assert.ok(outcomes, "06章缺少 four-outcomes");
@@ -229,7 +229,7 @@ test("chapter 07 places a transition between the abort-race and compaction secti
 test("chapter 08 backreferences the chapter 1 responsibility table inside the security section", () => {
     const html = pages.get("/08-test-observe-secure/");
     const securitySection = html.slice(html.indexOf('<h2 id="security"'), html.indexOf('<h2 id="multi-tenant"'));
-    assert.match(securitySection, /第1章的責任表/);
+    assert.match(securitySection, /第 1\s+章的責任表/);
 });
 
 test("diagrams are controlled semantic HTML: no mermaid/svg/canvas/inline-style, every figure has a unique id and a matching figcaption", () => {
@@ -282,7 +282,7 @@ test("figures sit in the documented reading order relative to their anchoring pr
         "06章圖5應在 h2#configuration 完整定義段落之後",
     );
     assert.ok(
-        ch06.indexOf('id="fig-06-planner"') > ch06.indexOf("任何不一致都回傳blocked"),
+        ch06.indexOf('id="fig-06-planner"') > ch06.indexOf("任何不一致都回傳 blocked"),
         "06章圖5應在 configuration/environment/replayKey 定義段落結尾之後",
     );
     assert.ok(ch06.indexOf('id="fig-06-planner"') < ch06.indexOf('id="synthetic"'), "06章圖5應在 h2#synthetic 之前");
@@ -300,7 +300,7 @@ test("figures sit in the documented reading order relative to their anchoring pr
         "08章圖7應在責任表回指句之後",
     );
     assert.ok(
-        ch08.indexOf('id="fig-08-responsibility"') < ch08.indexOf("Agent implementation與"),
+        ch08.indexOf('id="fig-08-responsibility"') < ch08.indexOf("Agent implementation 與"),
         "08章圖7應在既有安全邊界清單之前",
     );
     assert.ok(ch08.indexOf('id="fig-08-map"') > ch08.lastIndexOf("<h2 "), "08章圖1b應在最後一個 h2 之後");
@@ -362,9 +362,9 @@ test("figure 3 is collapsed by default via native <details>, not JavaScript", ()
 
 test("figure 6 and figure 7 captions disambiguate track alignment and responsibility-vs-process boundaries", () => {
     const ch07 = pages.get("/07-cancel-compact/");
-    assert.match(ch07, /找不到user邊界就放棄本次compact/, "圖6 caption 應說明兩軌對齊的防護機制");
+    assert.match(ch07, /找不到\s+user 邊界就放棄本次 compact/, "圖6 caption 應說明兩軌對齊的防護機制");
     const ch08 = pages.get("/08-test-observe-secure/");
-    assert.match(ch08, /不是process邊界/, "圖7 caption 應明確排除「兩個process」的誤讀");
+    assert.match(ch08, /不是 process 邊界/, "圖7 caption 應明確排除「兩個 process」的誤讀");
 });
 
 test("diagram CSS components degrade on narrow viewports and print via stylesheet rules, not inline style", async () => {
@@ -423,7 +423,7 @@ test("home acknowledges Pi without claiming a fork", () => {
     const home = pages.get("/");
     assert.match(home, /感謝 Pi 帶來的啟發/);
     assert.match(home, /href="https:\/\/github\.com\/earendil-works\/pi"/);
-    assert.match(home, /不是Pi的fork或移植/);
+    assert.match(home, /Tiny-agent 不是 Pi 的 fork 或移植/);
     assert.match(home, /本書內容對照 repository 目前狀態/);
 });
 

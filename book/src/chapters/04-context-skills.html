@@ -5,18 +5,18 @@
 
 <h2 id="layers">Context 的四個層級</h2>
 <ol>
-    <li><strong>System prompt</strong>：Agent身分、工作目錄、基本workflow。</li>
-    <li><strong>Project instructions</strong>：目前cwd的<code>AGENTS.md</code>全文。</li>
+    <li><strong>System prompt</strong>：Agent 身分、工作目錄、基本 workflow。</li>
+    <li><strong>Project instructions</strong>：目前 cwd 的 <code>AGENTS.md</code> 全文。</li>
     <li><strong>Skill metadata</strong>：name、description、absolute location。</li>
-    <li><strong>Conversation</strong>：user、assistant、tool results，以及必要的compact summary。</li>
+    <li><strong>Conversation</strong>：user、assistant、tool results，以及必要的 compact summary。</li>
 </ol>
 <p>
-    Tool definitions由provider
-    request的<code>tools</code>欄位傳送，不是假裝成system文字。這讓模型只能選本次真正存在的能力。
+    Tool definitions 由 provider request 的 <code>tools</code> 欄位傳送，不是假裝成 system
+    文字。這讓模型只能選本次真正存在的能力。
 </p>
 
 <h2 id="agents-md">AGENTS.md 是專案規則</h2>
-<p>Tiny-agent啟動時只讀目前工作目錄的<code>./AGENTS.md</code>。它會進入明確的project context區塊：</p>
+<p>Tiny-agent 啟動時只讀目前工作目錄的 <code>./AGENTS.md</code>。它會進入明確的 project context 區塊：</p>
 <pre data-lang="xml"><code>&lt;project_context&gt;
 Project-specific instructions and guidelines:
 &lt;project_instructions path="/workspace/AGENTS.md"&gt;
@@ -24,26 +24,26 @@ Project-specific instructions and guidelines:
 &lt;/project_instructions&gt;
 &lt;/project_context&gt;</code></pre>
 <p>
-    這些規則適合放coding style、測試命令、架構決策與禁止事項。不應放credential，也不應把volatile runtime state寫在裡面。
+    這些規則適合放 coding style、測試命令、架構決策與禁止事項。不應放 credential，也不應把 volatile runtime state
+    寫在裡面。
 </p>
 
 <h2 id="skills">Skills 使用 Progressive Loading</h2>
-<p>Tiny-agent遞迴掃描：</p>
+<p>Tiny-agent 遞迴掃描：</p>
 <pre><code>.tiny-agent/skills/**/SKILL.md</code></pre>
-<p>啟動時只解析frontmatter：</p>
+<p>啟動時只解析 frontmatter：</p>
 <pre data-lang="yaml"><code>---
 name: i-have-adhd
 description: Shape responses so an ADHD reader can act on them.
 ---</code></pre>
 <p>
-    System
-    prompt只得到metadata與location；完整正文不會預先佔用context。模型自動判斷任務命中後，才使用本次提供的<code>read</code>能力讀取全文。若本次用<code
-        >--plugin edit</code
-    >禁用了read，模型自動載入時必須說明缺少能力，不能假裝skill已載入。
+    System prompt 只得到 metadata 與 location；完整正文不會預先佔用 context。模型自動判斷任務命中後，才使用本次提供的
+    <code>read</code> 能力讀取全文。若本次用 <code>--plugin edit</code> 禁用了
+    read，模型自動載入時必須說明缺少能力，不能假裝 skill 已載入。
 </p>
 <p>
-    明確的<code>/skill:name</code>是另一條路徑：CLI會直接讀取已發現的skill檔案，再把正文與user
-    request一起交給Agent，因此不需要啟用<code>read</code> tool。這是trusted host操作，不是模型取得了額外檔案權限。
+    明確的 <code>/skill:name</code> 是另一條路徑：CLI 會直接讀取已發現的 skill 檔案，再把正文與 user request 一起交給
+    Agent，因此不需要啟用 <code>read</code> tool。這是 trusted host 操作，不是模型取得了額外檔案權限。
 </p>
 
 <h2 id="why-progressive">為什麼不一次全部載入</h2>
@@ -51,17 +51,17 @@ description: Shape responses so an ADHD reader can act on them.
     <section>
         <h3>全部預先載入</h3>
         <ul>
-            <li>每輪都支付token成本</li>
-            <li>無關instructions干擾model</li>
-            <li>skills越多，system prompt越不穩定</li>
+            <li>每輪都支付 token 成本</li>
+            <li>無關 instructions 干擾 model</li>
+            <li>skills 越多，system prompt 越不穩定</li>
         </ul>
     </section>
     <section>
         <h3>Progressive loading</h3>
         <ul>
-            <li>metadata足以做初步routing</li>
-            <li>只有命中的skill進入transcript</li>
-            <li>完整讀取可被Session稽核</li>
+            <li>metadata 足以做初步 routing</li>
+            <li>只有命中的 skill 進入 transcript</li>
+            <li>完整讀取可被 Session 稽核</li>
         </ul>
     </section>
 </div>
@@ -73,35 +73,35 @@ description: Shape responses so an ADHD reader can act on them.
 /skill:i-have-adhd 幫我把工作拆成可執行步驟
 </code></pre>
 <p>
-    明確的<code>/skill:name</code>會由CLI讀取skill正文，並把它與本次user
-    request一起送給Agent。Repo內example是自包含的<code>i-have-adhd</code>，不需要外部服務。
+    明確的 <code>/skill:name</code> 會由 CLI 讀取 skill 正文，並把它與本次 user request 一起送給 Agent。Repo 內 example
+    是自包含的 <code>i-have-adhd</code>，不需要外部服務。
 </p>
 
 <h2 id="context-growth">Context 會持續成長</h2>
 <p>
-    每次model、tool call與tool result都會讓下一輪input變長。Provider prompt cache可以降低重複prefix成本，卻不減少context
-    window佔用。你需要同時觀察：
+    每次 model、tool call 與 tool result 都會讓下一輪 input 變長。Provider prompt cache 可以降低重複 prefix
+    成本，卻不減少 context window 佔用。你需要同時觀察：
 </p>
 <ul>
-    <li>每次physical request的input、cacheRead與cache hit rate。</li>
-    <li>active context是否包含巨大tool result。</li>
-    <li>是否已到需要<code>/compact</code>的時機。</li>
-    <li>summary是否仍保留決策、修改檔案、錯誤與下一步。</li>
+    <li>每次 physical request 的 input、cacheRead 與 cache hit rate。</li>
+    <li>active context 是否包含巨大 tool result。</li>
+    <li>是否已到需要 <code>/compact</code> 的時機。</li>
+    <li>summary 是否仍保留決策、修改檔案、錯誤與下一步。</li>
 </ul>
 <p>
-    Context
-    engineering不是單獨的prompt技巧，而是Tool結果截短、Skill漸進載入、Session投影與Compaction共同形成的系統行為。
+    Context engineering 不是單獨的 prompt 技巧，而是 Tool 結果截短、Skill 漸進載入、Session 投影與 Compaction
+    共同形成的系統行為。
 </p>
 
 <p class="bridge">
-    第1章的責任表把「持續與恢復」交給了Session，但還沒解釋Session怎麼做到。你剛才看到的context持續成長，正是逼我們現在開始解釋Session的原因——下一章先從crash後仍可重建的durable
-    facts講起。
+    第 1 章的責任表把「持續與恢復」交給了 Session，但還沒解釋 Session 怎麼做到。你剛才看到的 context
+    持續成長，正是逼我們現在開始解釋 Session 的原因——下一章先從 crash 後仍可重建的 durable facts 講起。
 </p>
 
 <aside class="note">
     <strong>閱讀原始碼</strong
     ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L162"
-        >Skill discovery與metadata parser：<code>findSkillFiles</code></a
+        >Skill discovery 與 metadata parser：<code>findSkillFiles</code></a
     >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/.tiny-agent/skills/i-have-adhd/SKILL.md"
         >Example skill</a
     >。

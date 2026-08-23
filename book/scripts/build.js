@@ -17,7 +17,7 @@ function chapterGroups(current) {
     return chapters
         .map((chapter, index) => {
             const heading = chapter.part === part ? "" : `<li class="nav-part">${escape((part = chapter.part))}</li>`;
-            return `${heading}<li data-search-item><a href="/${chapter.slug}/"${chapter.slug === current ? ' aria-current="page"' : ""}><span class="chapter-number">${String(index + 1).padStart(2, "0")}</span><span>${escape(chapter.title)}</span></a></li>`;
+            return `${heading}<li data-search-item><a href="/${chapter.slug}/"${chapter.slug === current ? ' aria-current="page"' : ""}><span class="chapter-number">${String(index + 1).padStart(2, "0")}</span> <span>${escape(chapter.title)}</span></a></li>`;
         })
         .join("");
 }
@@ -44,7 +44,7 @@ function layout({ title, description, path, current = "", body, assets, type = "
 <a class="skip-link" href="#main">跳到主要內容</a>
 <header class="topbar">
 <button class="icon-button menu-button" type="button" data-menu-toggle aria-label="開啟章節目錄" aria-expanded="false">☰</button>
-<a class="brand" href="/"><span>tiny-agent</span><small>從第一性原理打造可靠 Agent</small></a>
+<a class="brand" href="/"><span>tiny-agent</span> <small>從第一性原理打造可靠 Agent</small></a>
 <span class="topbar-spacer"></span>
 <a class="icon-button" href="${repo}" aria-label="GitHub repository">↗</a>
 <button class="icon-button theme-button" type="button" data-theme-toggle aria-label="切換主題">☾</button>
@@ -66,8 +66,8 @@ function articlePage(chapter, index, content, assets) {
     const previous = chapters[index - 1];
     const next = chapters[index + 1];
     const navigation = `<nav class="chapter-footer" aria-label="章節前後導覽">
-${previous ? `<a href="/${previous.slug}/"><small>上一章</small>${escape(previous.title)}</a>` : `<a href="/"><small>回到目錄</small>全書學習路徑</a>`}
-${next ? `<a href="/${next.slug}/"><small>下一章</small>${escape(next.title)}</a>` : `<a href="/"><small>完成第一版</small>回到目錄</a>`}
+${previous ? `<a href="/${previous.slug}/"><small>上一章</small> ${escape(previous.title)}</a>` : `<a href="/"><small>回到目錄</small> 全書學習路徑</a>`}
+${next ? `<a href="/${next.slug}/"><small>下一章</small> ${escape(next.title)}</a>` : `<a href="/"><small>完成第一版</small> 回到目錄</a>`}
 </nav>`;
     return layout({
         title: chapter.title,
@@ -75,7 +75,7 @@ ${next ? `<a href="/${next.slug}/"><small>下一章</small>${escape(next.title)}
         path: `/${chapter.slug}/`,
         current: chapter.slug,
         assets,
-        body: `<article class="article"><p class="eyebrow">${escape(chapter.part)} · 第 ${index + 1} 章</p><h1>${escape(chapter.title)}</h1><p class="deck">${escape(chapter.description)}</p><div class="meta"><span>約 ${chapter.minutes} 分鐘</span><span>${index + 1} / ${chapters.length}</span></div>${content}</article>${navigation}`,
+        body: `<article class="article"><p class="eyebrow">${escape(chapter.part)} · 第 ${index + 1} 章</p><h1>${escape(chapter.title)}</h1><p class="deck">${escape(chapter.description)}</p><div class="meta"><span>約 ${chapter.minutes} 分鐘</span> <span>${index + 1} / ${chapters.length}</span></div>${content}</article>${navigation}`,
     });
 }
 
@@ -84,7 +84,7 @@ function homePage(assets) {
     const cards = chapters
         .map(
             (chapter, index) =>
-                `<a class="path-card" href="/${chapter.slug}/"><span class="index">${String(index + 1).padStart(2, "0")}</span><span><h2>${escape(chapter.title)}</h2><p>${escape(chapter.description)}</p></span><time>${chapter.minutes} 分鐘</time></a>`,
+                `<a class="path-card" href="/${chapter.slug}/"><span class="index">${String(index + 1).padStart(2, "0")}</span> <span><h2>${escape(chapter.title)}</h2><p>${escape(chapter.description)}</p></span> <time>${chapter.minutes} 分鐘</time></a>`,
         )
         .join("");
     return layout({
@@ -94,7 +94,7 @@ function homePage(assets) {
         path: "/",
         type: "home",
         assets,
-        body: `<article class="article home-intro"><p class="eyebrow">繁體中文（臺灣）· 開源工程教材</p><h1>從第一性原理，打造能穩定執行的 AI Agent</h1><p class="deck">這不是功能清單，也不是 prompt 技巧合集。我們從不可再刪的 model → tool → result 閉環開始，逐步推導 context、durable intent、crash recovery 與 production 邊界。</p><div class="meta"><span>${chapters.length} 章</span><span>約 ${total} 分鐘</span><span>TypeScript / Go / Python / Rust</span></div><a href="/${chapters[0].slug}/">開始第一章 →</a><figure class="step-flow" id="fig-home-map" aria-labelledby="fig-home-map-caption"><ol><li><span class="step-label">第一部｜最小閉環</span><p>無壓力：迴圈本身</p></li><li class="step-arrow" aria-hidden="true">→</li><li><span class="step-label">第二部｜能力邊界</span><p>能力壓力：迴圈能做什麼</p></li><li class="step-arrow" aria-hidden="true">→</li><li><span class="step-label">第三部｜可靠執行</span><p>接下來登場</p></li></ol><figcaption id="fig-home-map-caption">圖1：全書地圖（開場版）。後面還有第四部，讀到08章會看到完整版本。</figcaption></figure><section class="path" aria-labelledby="path-title"><h2 id="path-title">學習路徑</h2>${cards}</section><aside class="acknowledgement"><h2>感謝 Pi 帶來的啟發</h2><p>這本書與tiny-agent的許多設計思考受到<a href="https://github.com/earendil-works/pi">Pi</a>啟發，尤其是精簡的agent loop、Tool模型、skills漸進載入、compaction，以及讓coding agent保持可理解與可操作的工程取向。感謝Pi及其貢獻者公開實作與文件。</p><p>Tiny-agent不是Pi的fork或移植；它是獨立的四語言教學實作，並針對transactional Session、crash recovery與跨語言conformance發展自己的contract。</p></aside><p class="version-note">本書內容對照 repository 目前狀態；四語言能力差異等細節請以 repo 原始碼為準。</p><section class="planned"><h2 id="planned-title">接下來會寫</h2><p>以下是已規劃的 polyglot 與企業實戰篇；先顯示路線，不建立空白頁面。</p><ul>${planned.map((item) => `<li>${escape(item)}</li>`).join("")}</ul></section></article>`,
+        body: `<article class="article home-intro"><p class="eyebrow">繁體中文（臺灣）· 開源工程教材</p><h1>從第一性原理，打造能穩定執行的 AI Agent</h1><p class="deck">這不是功能清單，也不是 prompt 技巧合集。我們從不可再刪的 model → tool → result 閉環開始，逐步推導 context、durable intent、crash recovery 與 production 邊界。</p><div class="meta"><span>${chapters.length} 章</span> <span>約 ${total} 分鐘</span> <span>TypeScript / Go / Python / Rust</span></div><a href="/${chapters[0].slug}/">開始第一章 →</a><figure class="step-flow" id="fig-home-map" aria-labelledby="fig-home-map-caption"><ol><li><span class="step-label">第一部｜最小閉環</span><p>無壓力：迴圈本身</p></li><li class="step-arrow" aria-hidden="true">→</li><li><span class="step-label">第二部｜能力邊界</span><p>能力壓力：迴圈能做什麼</p></li><li class="step-arrow" aria-hidden="true">→</li><li><span class="step-label">第三部｜可靠執行</span><p>接下來登場</p></li></ol><figcaption id="fig-home-map-caption">圖 1：全書地圖（開場版）。後面還有第四部，讀到 08 章會看到完整版本。</figcaption></figure><section class="path" aria-labelledby="path-title"><h2 id="path-title">學習路徑</h2>${cards}</section><aside class="acknowledgement"><h2>感謝 Pi 帶來的啟發</h2><p>這本書與 tiny-agent 的許多設計思考受到 <a href="https://github.com/earendil-works/pi">Pi</a> 啟發，尤其是精簡的 agent loop、Tool 模型、skills 漸進載入、compaction，以及讓 coding agent 保持可理解與可操作的工程取向。感謝 Pi 及其貢獻者公開實作與文件。</p><p>Tiny-agent 不是 Pi 的 fork 或移植；它是獨立的四語言教學實作，並針對 transactional Session、crash recovery 與跨語言 conformance 發展自己的 contract。</p></aside><p class="version-note">本書內容對照 repository 目前狀態；四語言能力差異等細節請以 repo 原始碼為準。</p><section class="planned"><h2 id="planned-title">接下來會寫</h2><p>以下是已規劃的 polyglot 與企業實戰篇；先顯示路線，不建立空白頁面。</p><ul>${planned.map((item) => `<li>${escape(item)}</li>`).join("")}</ul></section></article>`,
     });
 }
 

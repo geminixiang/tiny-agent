@@ -4,9 +4,9 @@
 
 ## 致謝
 
-這本書與tiny-agent的許多設計思考受到[Pi](https://github.com/earendil-works/pi)啟發，尤其是精簡的agent loop、Tool模型、skills漸進載入、compaction，以及讓coding agent保持可理解與可操作的工程取向。感謝Pi及其貢獻者公開實作與文件。
+這本書與 tiny-agent 的許多設計思考受到 [Pi](https://github.com/earendil-works/pi) 啟發，尤其是精簡的 agent loop、Tool 模型、skills 漸進載入、compaction，以及讓 coding agent 保持可理解與可操作的工程取向。感謝 Pi 及其貢獻者公開實作與文件。
 
-Tiny-agent不是Pi的fork或移植；它是獨立的四語言教學實作，並針對transactional Session、crash recovery與跨語言conformance發展自己的contract。
+Tiny-agent 不是 Pi 的 fork 或移植；它是獨立的四語言教學實作，並針對 transactional Session、crash recovery 與跨語言 conformance 發展自己的 contract。
 
 ## 本機開發
 

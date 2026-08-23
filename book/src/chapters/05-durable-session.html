@@ -1,20 +1,18 @@
 <p class="lead">
-    設想這個情境：Agent剛送出 <code>bash rm old.log &amp;&amp; deploy.sh</code>，process在tool執行中被<code
-        >kill -9</code
-    >。重開後，<code>deploy.sh</code>到底跑了沒有？（這只是用來說明問題的情境，不需要你實際執行。）
+    設想這個情境：Agent 剛送出 <code>bash rm old.log &amp;&amp; deploy.sh</code>，process 在 tool 執行中被
+    <code>kill -9</code>。重開後，<code>deploy.sh</code> 到底跑了沒有？（這只是用來說明問題的情境，不需要你實際執行。）
 </p>
 
-<p><strong>核心規則：intent必須早於effect。</strong></p>
+<p><strong>核心規則：intent 必須早於 effect。</strong></p>
 
 <p>
-    如果假設model
-    request永遠成功、tool不會失敗、process也不會突然停止，那麼幾十行就能寫出一個Agent。真正困難的是失敗之後的狀態：process
-    crash之後，系統仍必須判斷工作是否已接受、model是否呼叫過，以及tool
-    effect是否可能已經發生。本章要建立一種durable格式，讓上面這個問題有明確答案，而不是猜測。
+    如果假設 model request 永遠成功、tool 不會失敗、process 也不會突然停止，那麼幾十行就能寫出一個
+    Agent。真正困難的是失敗之後的狀態：process crash 之後，系統仍必須判斷工作是否已接受、model 是否呼叫過，以及 tool
+    effect 是否可能已經發生。本章要建立一種 durable 格式，讓上面這個問題有明確答案，而不是猜測。
 </p>
 
 <details class="reading-branch">
-    <summary>延伸閱讀：02章與05章其實是同一次request的兩個切面（選讀）</summary>
+    <summary>延伸閱讀：02 章與 05 章其實是同一次 request 的兩個切面（選讀）</summary>
     <figure class="step-flow" id="fig-05-bridge" aria-labelledby="fig-05-bridge-caption">
         <ol>
             <li>
@@ -43,23 +41,23 @@
             </li>
         </ol>
         <figcaption id="fig-05-bridge-caption">
-            圖3：一次 provider request 如何同時是 ch02 的正規化對象，也是 ch05 的 durable record。
+            圖 3：一次 provider request 如何同時是 ch02 的正規化對象，也是 ch05 的 durable record。
         </figcaption>
     </figure>
 </details>
 
 <h2 id="promise">Durability 的精確定義</h2>
 <p>
-    Tiny-agent承諾<strong>process-crash durability</strong>：一筆已接受的LF-terminated
-    transaction已交給OS；重開時會丟棄最後LF之後的torn tail，並從完整prefix恢復。
+    Tiny-agent 承諾 <strong>process-crash durability</strong>：一筆已接受的 LF-terminated transaction 已交給
+    OS；重開時會丟棄最後 LF 之後的 torn tail，並從完整 prefix 恢復。
 </p>
 <p>
-    它不承諾<strong>power-loss durability</strong>。沒有每筆file sync與directory sync，就不能保證斷電或storage
-    controller failure後仍存在。教材刻意保留這個區別，不用含糊的「永不遺失資料」。
+    它不承諾 <strong>power-loss durability</strong>。沒有每筆 file sync 與 directory sync，就不能保證斷電或 storage
+    controller failure 後仍存在。教材刻意保留這個區別，不用含糊的「永不遺失資料」。
 </p>
 
 <h2 id="framing">一個檔案，兩種行</h2>
-<p>第一行是唯一header：</p>
+<p>第一行是唯一 header：</p>
 <pre data-lang="json"><code>{
   "kind": "header",
   "version": 2,
@@ -70,7 +68,7 @@
   "model": "deepseek/deepseek-v4-flash-0731",
   "environmentIdentity": "/workspace"
 }</code></pre>
-<p>之後每一行是一個完整transaction：一個fact，或一個non-empty facts array。Array中的facts對reducer原子可見。</p>
+<p>之後每一行是一個完整 transaction：一個 fact，或一個 non-empty facts array。Array 中的 facts 對 reducer 原子可見。</p>
 <pre data-lang="json"><code>[
   {"kind":"entry","seq":1,"id":"...","entry":{"type":"message","message":{"role":"user","content":"修正bug"}}},
   {"kind":"record","seq":2,"id":"...","record":{"type":"runStarted","operationId":"...","operationKind":"run","inputEntryId":"..."}}
@@ -78,7 +76,8 @@
 
 <h2 id="intent-effect">Intent 必須早於 Effect</h2>
 <p>
-    舊式session常在tool完成後才寫 result。若process在外部effect成功、result落盤前crash，重開後完全看不出tool是否執行過。
+    舊式 session 常在 tool 完成後才寫 result。若 process 在外部 effect 成功、result 落盤前 crash，重開後完全看不出 tool
+    是否執行過。
 </p>
 <pre><code>錯誤：execute effect → persist result
 正確：persist toolStarted → execute effect → persist result</code></pre>
@@ -88,35 +87,35 @@
         <li>
             <span class="step-label">寫入 toolStarted</span>
             <p>intent，含 replayKey</p>
-            <p class="crash-note">⚠ 此刻crash → recovery已知「打算做這件事」</p>
+            <p class="crash-note">⚠ 此刻 crash → recovery 已知「打算做這件事」</p>
         </li>
         <li class="step-arrow" aria-hidden="true">→</li>
         <li>
             <span class="step-label">執行 effect</span>
             <p>檔案系統／bash</p>
             <p class="crash-note">
-                ⚠ 此刻crash → recovery依replay policy判斷：safe read可重播；write/edit/bash/MCP一律標interrupted
+                ⚠ 此刻 crash → recovery 依 replay policy 判斷：safe read 可重播；write/edit/bash/MCP 一律標 interrupted
             </p>
         </li>
         <li class="step-arrow" aria-hidden="true">→</li>
         <li>
             <span class="step-label">寫入 tool result entry</span>
-            <p class="crash-note">⚠ 此刻crash → 已完成，recovery什麼都不用做</p>
+            <p class="crash-note">⚠ 此刻 crash → 已完成，recovery 什麼都不用做</p>
         </li>
     </ol>
     <figcaption id="fig-05-intent-effect-caption">
-        圖4：intent先於effect的時間軸。usage只在tool本身會回報用量時才會有（例如部分MCP tool）；多數built-in
-        tool的一般tool result不會連帶一筆usage。
+        圖 4：intent 先於 effect 的時間軸。usage 只在 tool 本身會回報用量時才會有（例如部分 MCP tool）；多數 built-in
+        tool 的一般 tool result 不會連帶一筆 usage。
     </figcaption>
 </figure>
 
 <p>
-    <code>toolStarted</code>會保存有效arguments、tool identity、replay policy、environment identity與預留的result entry
-    ID。Crash後看到 intent卻沒有result，就能明確得到：
+    <code>toolStarted</code> 會保存有效 arguments、tool identity、replay policy、environment identity 與預留的 result
+    entry ID。Crash 後看到 intent 卻沒有 result，就能明確得到：
 </p>
-<blockquote>這個effect可能已經發生，結果未知。</blockquote>
+<blockquote>這個 effect 可能已經發生，結果未知。</blockquote>
 <p>
-    系統不猜測。Safe read可以在identity完全一致時重播；write、edit、bash與MCP則寫入interrupted synthetic
+    系統不猜測。Safe read 可以在 identity 完全一致時重播；write、edit、bash 與 MCP 則寫入 interrupted synthetic
     result，不重播。
 </p>
 
@@ -133,7 +132,7 @@
         <tr>
             <td><code>entry</code></td>
             <td>user/assistant/tool message、compaction checkpoint</td>
-            <td>依active context投影</td>
+            <td>依 active context 投影</td>
         </tr>
         <tr>
             <td><code>record</code></td>
@@ -142,22 +141,25 @@
         </tr>
         <tr>
             <td><code>usage</code></td>
-            <td>physical model attempt或nested tool用量</td>
+            <td>physical model attempt 或 nested tool 用量</td>
             <td>不會</td>
         </tr>
     </tbody>
 </table>
 <p>
-    Usage獨立成ledger，避免從「最後一則assistant message」猜整個session成本。每筆usage綁定到exact attempt或toolStarted。
+    Usage 獨立成 ledger，避免從「最後一則 assistant message」猜整個 session 成本。每筆 usage 綁定到 exact attempt 或
+    toolStarted。
 </p>
 
 <h2 id="transaction-invariants">Transaction Invariants</h2>
 <ul>
-    <li><code>seq</code>從1開始，每個fact嚴格+1，包含array內部。</li>
-    <li>ID是唯一UUIDv7；reference必須指向已存在且正確ownership的fact。</li>
-    <li>完整transaction先驗證，成功後才更新memory state。</li>
-    <li>最後LF後的 bytes是torn tail；完整但非法的一行則是corruption，不能跳過。</li>
-    <li>Session使用single-writer contract；runtime只防同process重複writer，跨process互斥由job runner保證。</li>
+    <li><code>seq</code> 從 1 開始，每個 fact 嚴格+1，包含 array 內部。</li>
+    <li>ID 是唯一 UUIDv7；reference 必須指向已存在且正確 ownership 的 fact。</li>
+    <li>完整 transaction 先驗證，成功後才更新 memory state。</li>
+    <li>最後 LF 後的 bytes 是 torn tail；完整但非法的一行則是 corruption，不能跳過。</li>
+    <li>
+        Session 使用 single-writer contract；runtime 只防同 process 重複 writer，跨 process 互斥由 job runner 保證。
+    </li>
 </ul>
 
 <h2 id="store">深而小的 Storage Interface</h2>
@@ -167,12 +169,14 @@
     close(): Promise&lt;void&gt;;
 }</code></pre>
 <p>
-    <code>commit</code>隱藏seq、IDs、timestamp、serialization與FIFO queue；<code>load</code>隱藏framing、torn-tail
-    repair與pure reduction。刪除這個module會讓複雜度重新散回agent loop，因此它是真正通過deletion test的deep module。
+    <code>commit</code> 隱藏 seq、IDs、timestamp、serialization 與 FIFO queue；<code>load</code> 隱藏 framing、torn-tail
+    repair 與 pure reduction。刪除這個 module 會讓複雜度重新散回 agent loop，因此它是真正通過 deletion test 的 deep
+    module。
 </p>
 
 <p class="deep-interface-callback">
-    稍後你會再看到這個形狀：<code>commit</code>/<code>load</code>隱藏了seq、ID、framing，這是全書第二次看到「小而深的介面」。
+    稍後你會再看到這個形狀：<code>commit</code>/<code>load</code> 隱藏了
+    seq、ID、framing，這是全書第二次看到「小而深的介面」。
 </p>
 
 <h2 id="hands-on">親手驗證</h2>
@@ -189,20 +193,21 @@ node -e 'const b=require("fs").readFileSync(process.argv[1]); const i=b.lastInde
 <pre data-lang="sh"><code>cd typescript
 node --import tsx --test --test-name-pattern="repairs a torn tail" test/session.test.ts</code></pre>
 <p>
-    <code>--test-name-pattern</code>必須放在檔案路徑之前，Node.js的test runner才會實際過濾；放在<code>npm test --</code
-    >之後會被接到glob尾端而完全不生效，因此這裡直接呼叫<code>node --test</code>並指定單一檔案，只跑這一個測試。
+    <code>--test-name-pattern</code> 必須放在檔案路徑之前，Node.js 的 test runner 才會實際過濾；放在
+    <code>npm test --</code> 之後會被接到 glob 尾端而完全不生效，因此這裡直接呼叫
+    <code>node --test</code> 並指定單一檔案，只跑這一個測試。
 </p>
 <p>
     最後開啟 <code>schemas/session/fixtures/torn-tail.jsonl</code> 與其 expected state，對照手作版本和 canonical
     contract 的差別。
 </p>
 
-<p class="bridge">重建出的SessionState本身不能決定下一步該做什麼——這是下一章Planner的責任。</p>
+<p class="bridge">重建出的 SessionState 本身不能決定下一步該做什麼——這是下一章 Planner 的責任。</p>
 
 <aside class="note">
     <strong>閱讀原始碼</strong
     ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session.ts">SessionStore</a>、<a
         href="https://github.com/geminixiang/tiny-agent/blob/main/docs/session-design.md"
-        >完整Session contract</a
-    >、<a href="https://github.com/geminixiang/tiny-agent/tree/main/schemas/session">跨語言fixtures</a>。
+        >完整 Session contract</a
+    >、<a href="https://github.com/geminixiang/tiny-agent/tree/main/schemas/session">跨語言 fixtures</a>。
 </aside>

@@ -84,7 +84,7 @@
     cacheRead: number;
     cacheWrite: number;
 };</code></pre>
-<p>OpenRouter 的 prompt tokens可能已包含cache tokens，因此 tiny-agent正規化為：</p>
+<p>OpenRouter 的 prompt tokens 可能已包含 cache tokens，因此 tiny-agent 正規化為：</p>
 <pre><code>input = prompt_tokens - cacheRead - cacheWrite
 cacheHitRate = cacheRead / (input + cacheRead + cacheWrite)</code></pre>
 <p>
@@ -94,9 +94,8 @@ cacheHitRate = cacheRead / (input + cacheRead + cacheWrite)</code></pre>
 
 <h2 id="hands-on">親手驗證</h2>
 <p>
-    用既有的offline regression test重播真實provider wire
-    shape；它會加入<code>reasoning</code>、<code>refusal</code>與額外tool-call欄位，然後確認Session只留下canonical
-    message：
+    用既有的 offline regression test 重播真實 provider wire shape；它會加入 <code>reasoning</code>、<code>refusal</code>
+    與額外 tool-call 欄位，然後確認 Session 只留下 canonical message：
 </p>
 <pre data-lang="sh"><code>npm --prefix typescript test -- \
   --test-name-pattern="normalizes provider-only"
@@ -104,13 +103,13 @@ cacheHitRate = cacheRead / (input + cacheRead + cacheWrite)</code></pre>
 npm --prefix typescript test -- \
   --test-name-pattern="rejects malformed provider assistant"</code></pre>
 <p>
-    第一組應成功完成且可重新開啟Session；第二組應保存一次usage與failed
-    outcome，而不是讓<code>INVALID_FACT</code>洩漏到CLI。接著閱讀test中的mock response，逐欄標出哪些屬於provider
-    wire、哪些能進入canonical transcript。
+    第一組應成功完成且可重新開啟 Session；第二組應保存一次 usage 與 failed outcome，而不是讓
+    <code>INVALID_FACT</code> 洩漏到 CLI。接著閱讀 test 中的 mock response，逐欄標出哪些屬於 provider wire、哪些能進入
+    canonical transcript。
 </p>
 
 <p class="bridge">
-    合法transcript保證了資料「長什麼樣」，但沒保證「誰能把它變成真正的檔案讀寫或指令執行」——這是下一章的問題。
+    合法 transcript 保證了資料「長什麼樣」，但沒保證「誰能把它變成真正的檔案讀寫或指令執行」——這是下一章的問題。
 </p>
 
 <aside class="note">

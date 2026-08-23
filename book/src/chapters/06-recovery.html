@@ -1,19 +1,22 @@
 <p class="lead">
-    重開檔案不應該直接執行effect。第一步是用pure reducer回答「durable facts表示什麼狀態」；第二步才由pure
-    planner回答「在目前configuration下，允許做什麼」。
+    重開檔案不應該直接執行 effect。第一步是用 pure reducer 回答「durable facts 表示什麼狀態」；第二步才由 pure planner
+    回答「在目前 configuration 下，允許做什麼」。
 </p>
 
-<h2 id="two-functions">兩個Pure Functions</h2>
+<h2 id="two-functions">兩個 Pure Functions</h2>
 <pre><code>reduceSession(bytes) → SessionState
 planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
 <p>
-    Reducer不認識目前tools、model或environment，也不執行I/O。Planner不寫Session、不分配ID、不呼叫model/tool，只描述下一項effect或blocked
-    reason。這樣的分離讓每個crash prefix都能用deterministic fixtures驗證。
+    Reducer 不認識目前 tools、model 或 environment，也不執行 I/O。Planner 不寫 Session、不分配 ID、不呼叫
+    model/tool，只描述下一項 effect 或 blocked reason。這樣的分離讓每個 crash prefix 都能用 deterministic fixtures
+    驗證。
 </p>
 
 <p class="three-interfaces-summary">
-    這是本書第三次看到同一招：把複雜度收進一個小而深的介面。Tool的execute、SessionStore的commit/load，都靠這招把I/O細節藏起來，呼叫方不需要知道內部怎麼做——但它們自己就會真的去讀檔、寫檔、呼叫bash，是會碰I/O的殼。reducer/planner把這招再往前推一步：不只是藏細節，還把「決定要做什麼」和「真的去做」拆成兩個函數——一個不碰I/O的純函數（reducer、planner本身），配一個真的會碰I/O的殼（SessionStore、Agent
-    loop）。
+    這是本書第三次看到同一招：把複雜度收進一個小而深的介面。Tool 的 execute、SessionStore 的 commit/load，都靠這招把 I/O
+    細節藏起來，呼叫方不需要知道內部怎麼做——但它們自己就會真的去讀檔、寫檔、呼叫 bash，是會碰 I/O 的殼。reducer/planner
+    把這招再往前推一步：不只是藏細節，還把「決定要做什麼」和「真的去做」拆成兩個函數——一個不碰 I/O
+    的純函數（reducer、planner 本身），配一個真的會碰 I/O 的殼（SessionStore、Agent loop）。
 </p>
 
 <h2 id="state">Reducer 重建什麼</h2>
@@ -27,41 +30,45 @@ planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
         | { kind: "compaction"; step?: StepState; resultEntryId: string };
 };</code></pre>
 <p>
-    <code>transcript</code
-    >保留完整model-visible歷史；<code>activeContext</code>反映最新compaction投影；<code>operation</code>說明目前是否有未完成run/compaction。
+    <code>transcript</code> 保留完整 model-visible 歷史；<code>activeContext</code> 反映最新 compaction 投影；<code
+        >operation</code
+    >
+    說明目前是否有未完成 run/compaction。
 </p>
 
 <h2 id="retry-replay">Retry 與 Replay 完全不同</h2>
 <div class="compare">
     <section>
         <h3>Retry Model Attempt</h3>
-        <p>重送相同context給無外部副作用的provider request。</p>
+        <p>重送相同 context 給無外部副作用的 provider request。</p>
         <ul>
-            <li>只處理crash-unknown attempt</li>
-            <li>configuration digest必須一致</li>
-            <li>最多attempt 2</li>
+            <li>只處理 crash-unknown attempt</li>
+            <li>configuration digest 必須一致</li>
+            <li>最多 attempt 2</li>
         </ul>
     </section>
     <section>
         <h3>Replay Tool Effect</h3>
-        <p>再次執行可能觸碰外部世界的tool。</p>
+        <p>再次執行可能觸碰外部世界的 tool。</p>
         <ul>
-            <li>預設never</li>
-            <li>只有exact built-in read是safe</li>
-            <li>replayKey與environment必須一致</li>
+            <li>預設 never</li>
+            <li>只有 exact built-in read 是 safe</li>
+            <li>replayKey 與 environment 必須一致</li>
         </ul>
     </section>
 </div>
 <p>
-    Live 429、5xx或timeout會寫<code>stepFailed</code>，不會自動retry。這份設計只允許process crash造成的unknown
-    attempt多一次機會，避免無界重複計費。
+    Live 429、5xx 或 timeout 會寫 <code>stepFailed</code>，不會自動 retry。這份設計只允許 process crash 造成的 unknown
+    attempt 多一次機會，避免無界重複計費。
 </p>
 <p class="four-outcomes">
-    其實有四種可能結局，不是兩種：<strong>retry</strong>（同一個model
-    attempt再送一次）、<strong>replay</strong>（同一個safe tool
-    effect再執行一次）、<strong>blocked</strong>（configuration或replay宣告不符，需要人為介入，不寫終局）、<strong>failed</strong>（<code>stepFailed</code>是live
-    request已經記錄的失敗，runtime選擇不自動retry）。混淆retry與replay是最常見的誤解；混淆blocked與failed是第二常見——blocked代表「recovery在目前configuration/environment下無法安全自動繼續，必須停下來交給人」，failed代表「這次live
-    request已經寫入<code>stepFailed</code>，runtime選擇不自動retry，避免無界重複計費」；timeout之類的錯誤本來就無法證明server端到底有沒有處理完，failed因此不等於「已經確定這次沒成功」。
+    其實有四種可能結局，不是兩種：<strong>retry</strong>（同一個 model attempt
+    再送一次）、<strong>replay</strong>（同一個 safe tool effect 再執行一次）、<strong>blocked</strong>（configuration
+    或 replay 宣告不符，需要人為介入，不寫終局）、<strong>failed</strong>（<code>stepFailed</code> 是 live request
+    已經記錄的失敗，runtime 選擇不自動 retry）。混淆 retry 與 replay 是最常見的誤解；混淆 blocked 與 failed
+    是第二常見——blocked 代表「recovery 在目前 configuration/environment 下無法安全自動繼續，必須停下來交給人」，failed
+    代表「這次 live request 已經寫入 <code>stepFailed</code>，runtime 選擇不自動 retry，避免無界重複計費」；timeout
+    之類的錯誤本來就無法證明 server 端到底有沒有處理完，failed 因此不等於「已經確定這次沒成功」。
 </p>
 
 <h2 id="planner-table">核心 Recovery 決策</h2>
@@ -69,53 +76,56 @@ planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
     <thead>
         <tr>
             <th>Durable prefix</th>
-            <th>Planner結果</th>
+            <th>Planner 結果</th>
         </tr>
     </thead>
     <tbody>
         <tr>
-            <td>run已接受，沒有attempt</td>
+            <td>run 已接受，沒有 attempt</td>
             <td>start assistant attempt 1</td>
         </tr>
         <tr>
-            <td>attempt 1 open，沒有settled response</td>
-            <td>config相同則attempt 2，否則blocked</td>
+            <td>attempt 1 open，沒有 settled response</td>
+            <td>config 相同則 attempt 2，否則 blocked</td>
         </tr>
         <tr>
-            <td>attempt 2仍open</td>
+            <td>attempt 2 仍 open</td>
             <td><code>attempts_exhausted</code></td>
         </tr>
         <tr>
-            <td>length response含tool calls</td>
-            <td>補truncated synthetic results，不執行</td>
+            <td>length response 含 tool calls</td>
+            <td>補 truncated synthetic results，不執行</td>
         </tr>
         <tr>
-            <td>safe read已started、無result</td>
-            <td>identity相同才replay</td>
+            <td>safe read 已 started、無 result</td>
+            <td>identity 相同才 replay</td>
         </tr>
         <tr>
-            <td>never tool已started、無result</td>
-            <td>補interrupted，不replay</td>
+            <td>never tool 已 started、無 result</td>
+            <td>補 interrupted，不 replay</td>
         </tr>
         <tr>
-            <td>terminal assistant已有、缺finish</td>
-            <td>只補operationFinished</td>
+            <td>terminal assistant 已有、缺 finish</td>
+            <td>只補 operationFinished</td>
         </tr>
     </tbody>
 </table>
 
 <h2 id="configuration">Configuration Identity 防止錯誤恢復</h2>
 <p>
-    Attempt會保存model、system prompt digest、ordered tool definitions、adapter identity、routing identity與 output
-    options digest。Planner會比較目前configuration。
+    Attempt 會保存 model、system prompt digest、ordered tool definitions、adapter identity、routing identity 與 output
+    options digest。Planner 會比較目前 configuration。
 </p>
-<p>Tool intent另外綁定：</p>
+<p>Tool intent 另外綁定：</p>
 <ul>
-    <li><code>environmentIdentity</code>：預設是cwd canonical realpath，也可由trusted host覆寫。</li>
-    <li><code>replayKey</code>：識別exact implementation與effect semantics。</li>
-    <li><code>definitionDigest</code>：識別model-facing schema。</li>
+    <li><code>environmentIdentity</code>：預設是 cwd canonical realpath，也可由 trusted host 覆寫。</li>
+    <li><code>replayKey</code>：識別 exact implementation 與 effect semantics。</li>
+    <li><code>definitionDigest</code>：識別 model-facing schema。</li>
 </ul>
-<p>任何不一致都回傳blocked，不執行effect，也不寫 failed terminal。恢復原本configuration或明確abort，才是合法下一步。</p>
+<p>
+    任何不一致都回傳 blocked，不執行 effect，也不寫 failed terminal。恢復原本 configuration 或明確
+    abort，才是合法下一步。
+</p>
 
 <figure class="decision-tree" id="fig-06-planner" aria-labelledby="fig-06-planner-caption">
     <ol>
@@ -128,89 +138,91 @@ planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
         <li>
             <span class="gate">無 abortRequested、且無 stepAttempt？</span>
             <ol>
-                <li><span class="outcome">開始 Attempt 1（本次plan決定，之後繼續執行）</span></li>
+                <li><span class="outcome">開始 Attempt 1（本次 plan 決定，之後繼續執行）</span></li>
             </ol>
         </li>
         <li>
-            <span class="gate">無 abortRequested、且有 stepAttempt？</span
-            >——不論這個attempt是還在進行還是已經<code>stepFailed</code>，都先過這一關
+            <span class="gate">無 abortRequested、且有 stepAttempt？</span>——不論這個 attempt 是還在進行還是已經
+            <code>stepFailed</code>，都先過這一關
             <ol>
                 <li>
                     configurationDigest 不符 →
                     <span class="outcome blocked">Blocked：configuration_changed（不寫終局，需人為介入）</span>
                 </li>
                 <li>
-                    digest相符，但 environmentIdentity 不符 →
+                    digest 相符，但 environmentIdentity 不符 →
                     <span class="outcome blocked">Blocked：environment_changed（不寫終局，需人為介入）</span>
                 </li>
                 <li>
-                    digest與environment皆相符，且尚未settled
+                    digest 與 environment 皆相符，且尚未 settled
                     <ol>
                         <li>
                             attempt = 1 →
-                            <span class="outcome">Retry：再送一次 attempt 2（本次plan決定，之後繼續執行）</span>
+                            <span class="outcome">Retry：再送一次 attempt 2（本次 plan 決定，之後繼續執行）</span>
                         </li>
                         <li>
-                            attempt = 2 仍未settled →
+                            attempt = 2 仍未 settled →
                             <span class="outcome blocked">Blocked：attempts_exhausted（不寫終局，需人為介入）</span>
                         </li>
                     </ol>
                 </li>
                 <li>
-                    digest與environment皆相符，且已 <code>stepFailed</code> →
+                    digest 與 environment 皆相符，且已 <code>stepFailed</code> →
                     <span class="outcome terminal">Failed 終局（不可重試）</span
-                    >——注意：只有先通過上面兩關（digest、environment都相符），才會走到這裡；<code>stepFailed</code>本身不保證一定走向這個結局。
+                    >——注意：只有先通過上面兩關（digest、environment 都相符），才會走到這裡；<code>stepFailed</code>
+                    本身不保證一定走向這個結局。
                 </li>
             </ol>
         </li>
         <li>
-            <span class="gate">assistant已結算、某個 tool call 無 result？</span>——逐一檢查每個pending
-            tool，同樣先查environment再查declaration/digest
+            <span class="gate">assistant 已結算、某個 tool call 無 result？</span>——逐一檢查每個 pending tool，同樣先查
+            environment 再查 declaration/digest
             <ol>
                 <li>
-                    tool的 environmentIdentity 不符 →
+                    tool 的 environmentIdentity 不符 →
                     <span class="outcome blocked">Blocked：environment_changed（不寫終局，需人為介入）</span>
                 </li>
                 <li>
-                    tool declaration缺失或 definitionDigest 不符 →
+                    tool declaration 缺失或 definitionDigest 不符 →
                     <span class="outcome blocked">Blocked：configuration_changed（不寫終局，需人為介入）</span>
                 </li>
                 <li>
                     replay = safe，且 replayKey/digest 全部相符 →
-                    <span class="outcome">Replay：重播這個tool effect（本次plan決定，之後繼續執行）</span>
+                    <span class="outcome">Replay：重播這個 tool effect（本次 plan 決定，之後繼續執行）</span>
                 </li>
                 <li>
-                    tool本身記錄safe，但目前declaration非safe或replayKey不符 →
+                    tool 本身記錄 safe，但目前 declaration 非 safe 或 replayKey 不符 →
                     <span class="outcome blocked">Blocked：replay_declaration_changed（不寫終局，需人為介入）</span>
                 </li>
                 <li>
                     replay = never →
-                    <span class="outcome">補 Synthetic Interrupted，不重播（本次plan決定，之後繼續執行）</span>
+                    <span class="outcome">補 Synthetic Interrupted，不重播（本次 plan 決定，之後繼續執行）</span>
                 </li>
             </ol>
         </li>
     </ol>
     <figcaption id="fig-06-planner-caption">
-        圖5：Recovery Planner的完整決策樹。configuration／environment／replay
-        declaration三道閘門永遠先於「這個attempt要不要retry」或「這個attempt算不算failed」被檢查——四種blocked
-        reason（configuration_changed／environment_changed／replay_declaration_changed／attempts_exhausted）在圖中各自獨立可見，不能合併成一種。只有Aborted與Failed是真正的終局；blocked不寫終局、需要人為介入；開始attempt、retry、replay與補synthetic都只是這次plan的決定，之後還會繼續執行。
+        圖 5：Recovery Planner 的完整決策樹。configuration／environment／replay declaration 三道閘門永遠先於「這個
+        attempt 要不要 retry」或「這個 attempt 算不算 failed」被檢查——四種 blocked
+        reason（configuration_changed／environment_changed／replay_declaration_changed／attempts_exhausted）在圖中各自獨立可見，不能合併成一種。只有
+        Aborted 與 Failed 是真正的終局；blocked 不寫終局、需要人為介入；開始 attempt、retry、replay 與補 synthetic
+        都只是這次 plan 的決定，之後還會繼續執行。
     </figcaption>
 </figure>
 
 <h2 id="synthetic">Synthetic Results 維護 Transcript</h2>
-<p>Recovery不是只改變internal state；它必須補出provider可接受的tool result：</p>
+<p>Recovery 不是只改變 internal state；它必須補出 provider 可接受的 tool result：</p>
 <pre><code>invalidArguments → tool未執行
 unknownTool      → tool未執行
 truncated        → arguments可能不完整，未執行
 aborted          → abort時尚未開始
 interrupted      → intent已寫，effect狀態未知，不重播</code></pre>
-<p>這些內容是跨語言contract，不能localize或隨意改寫，因為它們同時進入model transcript與shared fixtures。</p>
+<p>這些內容是跨語言 contract，不能 localize 或隨意改寫，因為它們同時進入 model transcript 與 shared fixtures。</p>
 
 <h2 id="fixtures">把所有 Durable Prefix 當測試對象</h2>
 <p>
-    Repo中的shared corpus包含reducer與planner fixtures。每個語言都必須從相同JSONL
-    bytes得到等價state，從真實prefix與current configuration得到相同plan。它不是測試helper，而是四語言parity的永久merge
-    gate。
+    Repo 中的 shared corpus 包含 reducer 與 planner fixtures。每個語言都必須從相同 JSONL bytes 得到等價 state，從真實
+    prefix 與 current configuration 得到相同 plan。它不是測試 helper，而是四語言 parity 的永久 merge gate。
 </p>
 <pre data-lang="sh"><code>make test
 # TypeScript / Go / Python / Rust 都會跑各自的 reducer、planner 與 production tests</code></pre>
@@ -226,9 +238,8 @@ node --import tsx --test --test-name-pattern="replay-safe-tool|interrupted-never
 cat ../schemas/session/planner-fixtures/replay-safe-tool.expected.json
 cat ../schemas/session/planner-fixtures/interrupted-never-tool.expected.json</code></pre>
 <p>
-    <code>--test-name-pattern</code>必須放在檔案路徑之前才會實際過濾；放在<code>npm test --</code
-    >之後會被接到glob尾端而完全不生效，因此這裡直接呼叫<code>node --test</code
-    >並指定單一檔案，只跑這兩個fixture對應的測試。
+    <code>--test-name-pattern</code> 必須放在檔案路徑之前才會實際過濾；放在 <code>npm test --</code> 之後會被接到 glob
+    尾端而完全不生效，因此這裡直接呼叫 <code>node --test</code> 並指定單一檔案，只跑這兩個 fixture 對應的測試。
 </p>
 <p>
     比較兩份 plan：safe read 必須包含相同的 <code>replayKey</code> 與 environment identity；never tool 只能 materialize
@@ -237,7 +248,7 @@ cat ../schemas/session/planner-fixtures/interrupted-never-tool.expected.json</co
 </p>
 
 <p class="bridge">
-    以上都是process crash後被動發現的狀態。如果使用者按下Esc是主動要求中斷，情況又不一樣——下一章處理這條路徑。
+    以上都是 process crash 後被動發現的狀態。如果使用者按下 Esc 是主動要求中斷，情況又不一樣——下一章處理這條路徑。
 </p>
 
 <aside class="note">

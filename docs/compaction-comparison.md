@@ -4,7 +4,7 @@
 
 ## 先看結論
 
-`tiny-agent`的`/compact`是**client-side、由目前設定的模型產生摘要**：它透過OpenRouter Chat Completions發出另一個LLM request，不是本機演算法壓縮，也沒有使用OpenRouter/OpenAI/Anthropic的provider-side compaction API。它先從reducer materialized active context選擇切點：保留至少最近6則message，再向前移到user boundary，避免拆散完整turn。成功後，active context變成`system + 摘要 + retained message tail`。Canonical transactional JSONL則另外記錄durable source message-entry prefix的partition、digest、materialized retained tail及operation facts，保留先前audit trail。[tiny-agent實作](../typescript/src/index.ts)
+`tiny-agent` 的 `/compact` 是**client-side、由目前設定的模型產生摘要**：它透過 OpenRouter Chat Completions 發出另一個 LLM request，不是本機演算法壓縮，也沒有使用 OpenRouter/OpenAI/Anthropic 的 provider-side compaction API。它先從 reducer materialized active context 選擇切點：保留至少最近 6 則 message，再向前移到 user boundary，避免拆散完整 turn。成功後，active context 變成 `system + 摘要 + retained message tail`。Canonical transactional JSONL 則另外記錄 durable source message-entry prefix 的 partition、digest、materialized retained tail 及 operation facts，保留先前 audit trail。[tiny-agent 實作](../typescript/src/index.ts)
 
 | 實作                                | 壓縮機制                                                                                                            | 觸發門檻                                                                                     | 保留近期內容                                                                                                | 持久化與 resume                                                                                                                                       |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -17,12 +17,12 @@
 
 ## tiny-agent 現況
 
-`Agent.compact()` 的 production 流程如下（TypeScript reference位於 [`typescript/src/index.ts`](../typescript/src/index.ts)，其他語言遵循相同observable contract）：
+`Agent.compact()` 的 production 流程如下（TypeScript reference 位於 [`typescript/src/index.ts`](../typescript/src/index.ts)，其他語言遵循相同 observable contract）：
 
-1. 從reducer materialized current active context開始，先取至少最近6則message，再將切點向前移到user boundary，避免拆散完整turn。
-2. 先持久化`compactionStarted`與實體`stepAttempt`，再透過OpenRouter `/api/v1/chat/completions`呼叫目前設定的模型產生摘要；request不帶tools。
-3. 成功後以一個durable compaction checkpoint保存summary、durable source message-entry prefix的partition/digest與materialized retained tail；usage寫入獨立ledger，最後寫入`operationFinished(completed)`。重複compact時，prior summary會參與摘要輸入，但本身不是source message entry。
-4. Active context重建為：
+1. 從 reducer materialized current active context 開始，先取至少最近 6 則 message，再將切點向前移到 user boundary，避免拆散完整 turn。
+2. 先持久化 `compactionStarted` 與實體 `stepAttempt`，再透過 OpenRouter `/api/v1/chat/completions` 呼叫目前設定的模型產生摘要；request 不帶 tools。
+3. 成功後以一個 durable compaction checkpoint 保存 summary、durable source message-entry prefix 的 partition/digest 與 materialized retained tail；usage 寫入獨立 ledger，最後寫入 `operationFinished(completed)`。重複 compact 時，prior summary 會參與摘要輸入，但本身不是 source message entry。
+4. Active context 重建為：
 
     ```text
     system
@@ -30,14 +30,14 @@
     + retained message tail
     ```
 
-5. 原始JSONL facts不刪除。Resume由durable facts重建checkpoint；中斷、open attempt或已寫checkpoint但缺terminal outcome等crash prefix依recovery plan補齊，且重複resume保持idempotent。
+5. 原始 JSONL facts 不刪除。Resume 由 durable facts 重建 checkpoint；中斷、open attempt 或已寫 checkpoint 但缺 terminal outcome 等 crash prefix 依 recovery plan 補齊，且重複 resume 保持 idempotent。
 
 因此它同時包含兩種技術，但角色不同：
 
-- **本機partition**：決定哪些active-context messages送去摘要、哪些完整turn原樣保留。
-- **模型摘要**：真正把較舊內容濃縮；會花input/output tokens，也可能遺漏資訊。
+- **本機 partition**：決定哪些 active-context messages 送去摘要、哪些完整 turn 原樣保留。
+- **模型摘要**：真正把較舊內容濃縮；會花 input/output tokens，也可能遺漏資訊。
 
-目前沒有auto-compaction；若使用者不下`/compact`，context會持續成長直到provider/model拒絕請求。
+目前沒有 auto-compaction；若使用者不下 `/compact`，context 會持續成長直到 provider/model 拒絕請求。
 
 ## 各家作法與證據
 
@@ -131,4 +131,4 @@ Gemini CLI 的第一方 source 顯示混合策略：
 | Model-generated summarization | Client 組 prompt，呼叫一般模型產生可讀摘要                                        | tiny-agent、pi、Claude Code（官方描述）、Codex local、Gemini CLI                       |
 | Provider-side compaction API  | Provider 產生 opaque compact item，保留模型狀態/推理，client 不解析為自然語言摘要 | OpenAI Responses server-side / standalone compaction；Codex remote；Agents SDK wrapper |
 
-這三者可以混用。Gemini CLI 先 truncation 再 summarization；Codex 可按 provider capability 選 local summary 或 Responses compaction。`tiny-agent` 現在使用對齊user boundary的recent-message retention、model summary與durable compaction checkpoint。
+這三者可以混用。Gemini CLI 先 truncation 再 summarization；Codex 可按 provider capability 選 local summary 或 Responses compaction。`tiny-agent` 現在使用對齊 user boundary 的 recent-message retention、model summary 與 durable compaction checkpoint。

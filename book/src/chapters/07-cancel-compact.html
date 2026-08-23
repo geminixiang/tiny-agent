@@ -1,6 +1,6 @@
 <p class="lead">
-    Cancellation不是「把Promise遺失掉」。可靠Agent必須先留下durable abort
-    intent，再通知目前phase，並在退出前補齊合法transcript與operation outcome。
+    Cancellation 不是「把 Promise 遺失掉」。可靠 Agent 必須先留下 durable abort intent，再通知目前
+    phase，並在退出前補齊合法 transcript 與 operation outcome。
 </p>
 
 <h2 id="abort-order">Abort 的正確順序</h2>
@@ -10,11 +10,11 @@
 → persist operationFinished(aborted)
 → release resources</code></pre>
 <p>
-    順序不能反過來。若先signal 後crash，Session可能完全不知道使用者曾要求abort；恢復程式可能錯誤地retry model或replay
-    safe tool。
+    順序不能反過來。若先 signal 後 crash，Session 可能完全不知道使用者曾要求 abort；恢復程式可能錯誤地 retry model 或
+    replay safe tool。
 </p>
 
-<h2 id="phase-routing">Cancellation 依Phase分流</h2>
+<h2 id="phase-routing">Cancellation 依 Phase 分流</h2>
 <table>
     <thead>
         <tr>
@@ -26,47 +26,47 @@
     <tbody>
         <tr>
             <td>model</td>
-            <td>取消HTTP request或停止前景等待</td>
-            <td>open attempt寫<code>stepFailed(aborted)</code></td>
+            <td>取消 HTTP request 或停止前景等待</td>
+            <td>open attempt 寫 <code>stepFailed(aborted)</code></td>
         </tr>
         <tr>
             <td>tool</td>
-            <td>signal tool；bash盡力終止process tree</td>
-            <td>started call寫interrupted；未started寫aborted</td>
+            <td>signal tool；bash 盡力終止 process tree</td>
+            <td>started call 寫 interrupted；未 started 寫 aborted</td>
         </tr>
         <tr>
             <td>compaction</td>
-            <td>取消summary request</td>
-            <td>關閉attempt，再結束compaction operation</td>
+            <td>取消 summary request</td>
+            <td>關閉 attempt，再結束 compaction operation</td>
         </tr>
     </tbody>
 </table>
 <p>
-    三條路徑互斥，不是依序執行。<code>Esc</code>只abort目前operation；<code>Ctrl+C</code>在必要時abort後，還會關閉MCP
-    clients、Session writer並恢復terminal。
+    三條路徑互斥，不是依序執行。<code>Esc</code> 只 abort 目前 operation；<code>Ctrl+C</code> 在必要時 abort
+    後，還會關閉 MCP clients、Session writer 並恢復 terminal。
 </p>
 
 <h2 id="race">Abort Race 的核心規則</h2>
-<p>Abort可能與model response或tool completion同一時間發生。系統必須把競爭序列化成兩種合法歷史：</p>
+<p>Abort 可能與 model response 或 tool completion 同一時間發生。系統必須把競爭序列化成兩種合法歷史：</p>
 <ol>
-    <li>成功settlement先durable：abort看到operation已結束，不改寫結果。</li>
-    <li><code>abortRequested</code>先durable：晚到的成功response不能再把operation寫成completed。</li>
+    <li>成功 settlement 先 durable：abort 看到 operation 已結束，不改寫結果。</li>
+    <li><code>abortRequested</code> 先 durable：晚到的成功 response 不能再把 operation 寫成 completed。</li>
 </ol>
 <p>
-    這也是為什麼durable Session不只靠<code>AbortController.signal.aborted</code>：memory flag無法解釋crash後的先後順序。
+    這也是為什麼 durable Session 不只靠 <code>AbortController.signal.aborted</code>：memory flag 無法解釋 crash
+    後的先後順序。
 </p>
 
 <p class="transition">
-    你剛才看到的abort
-    race，其實是「系統要主動改變狀態，且必須先durable才能改」這類問題的一種——這裡改的是operation本身進行到哪一步。compaction是同一類問題的另一種：它自己也是一個獨立的durable
-    operation（跟run一樣有<code>compactionStarted</code>/<code>operationFinished</code>），但它要多處理一層——active
-    context該怎麼跟著變。
+    你剛才看到的 abort race，其實是「系統要主動改變狀態，且必須先 durable 才能改」這類問題的一種——這裡改的是 operation
+    本身進行到哪一步。compaction 是同一類問題的另一種：它自己也是一個獨立的 durable operation（跟 run 一樣有
+    <code>compactionStarted</code>/<code>operationFinished</code>），但它要多處理一層——active context 該怎麼跟著變。
 </p>
 
 <h2 id="compaction">Compaction 不是刪除歷史</h2>
 <p>
-    <code>/compact</code>呼叫目前model產生summary，然後重建active context。原始facts仍留在append-only
-    Session中，因此可以audit與 recovery。
+    <code>/compact</code> 呼叫目前 model 產生 summary，然後重建 active context。原始 facts 仍留在 append-only Session
+    中，因此可以 audit 與 recovery。
 </p>
 <pre><code>完整 durable facts
 → reducer materialized active context
@@ -98,7 +98,7 @@
                 <td>entry N → 原樣保留</td>
             </tr>
             <tr>
-                <th scope="row">Track2：Durable source partition（給稽核／recovery看）</th>
+                <th scope="row">Track2：Durable source partition（給稽核／recovery 看）</th>
                 <td>entry 1 → compactedEntryIds</td>
                 <td>entry 2 → compactedEntryIds</td>
                 <td>... → compactedEntryIds</td>
@@ -109,22 +109,23 @@
         </tbody>
     </table>
     <figcaption id="fig-07-compaction-caption">
-        圖6：兩軌共用同一個切點。即使連續進行第二次以上的compaction，這兩個切點仍然對齊——四語言實作都有一道「找不到user邊界就放棄本次compact」的防護，這道防護同時保證了合成的「上次摘要」訊息不會被算進這次的retained
-        tail。prior summary會參與Track1的摘要輸入，但不是Track2的source entry。
+        圖 6：兩軌共用同一個切點。即使連續進行第二次以上的 compaction，這兩個切點仍然對齊——四語言實作都有一道「找不到
+        user 邊界就放棄本次 compact」的防護，這道防護同時保證了合成的「上次摘要」訊息不會被算進這次的 retained
+        tail。prior summary 會參與 Track1 的摘要輸入，但不是 Track2 的 source entry。
     </figcaption>
 </figure>
 <h3>1. Active-context cut</h3>
 <p>
-    用於決定本次摘要輸入：保留至少最近6 則<strong>message</strong>，再把cut向前移動到user
-    boundary，避免拆散完整turn。Repeated compaction時，prior summary會參與新的摘要輸入。
+    用於決定本次摘要輸入：保留至少最近 6 則 <strong>message</strong>，再把 cut 向前移動到 user boundary，避免拆散完整
+    turn。Repeated compaction 時，prior summary 會參與新的摘要輸入。
 </p>
 <h3>2. Durable source partition</h3>
 <p>
-    用於稽核與 recovery：保存截至<code>inputThroughEntryId</code>的所有durable source message-entry
-    IDs，並分成<code>compactedEntryIds</code>與<code>retainedEntryIds</code>，再計算<code>sourceDigest</code>。
+    用於稽核與 recovery：保存截至 <code>inputThroughEntryId</code> 的所有 durable source message-entry IDs，並分成
+    <code>compactedEntryIds</code> 與 <code>retainedEntryIds</code>，再計算 <code>sourceDigest</code>。
 </p>
 <p>
-    Prior summary不是source message entry，所以不會放進source partition；但它仍會參與active-context
+    Prior summary 不是 source message entry，所以不會放進 source partition；但它仍會參與 active-context
     summarization。兩者解決不同問題。
 </p>
 
@@ -135,17 +136,17 @@
 → compaction entry
 → operationFinished(completed)</code></pre>
 <p>
-    Compaction entry保存materialized retained tail與 source
-    IDs。若crash發生在summary已經落盤、finish尚未落盤，recovery只補<code>operationFinished</code>，不會再次呼叫model。若open
-    attempt未知，則遵循相同attempt cap。
+    Compaction entry 保存 materialized retained tail 與 source IDs。若 crash 發生在 summary 已經落盤、finish
+    尚未落盤，recovery 只補 <code>operationFinished</code>，不會再次呼叫 model。若 open attempt 未知，則遵循相同 attempt
+    cap。
 </p>
 
 <h2 id="output-limits">Tool Output 也是 Context 控制</h2>
 <p>
-    TypeScript 與 Rust 會保留最後 2,000 行或 50KB（先達到者）；Go 與 Python 則以約 50KB 的 byte-oriented tail
-    為主，不承諾相同的行數語意。四種實作都有約 10MB 的 capture safety limit，但超限行為不同：有的回傳 capped-output
+    TypeScript 與 Rust 會保留最後 2,000 行或 50 KB（先達到者）；Go 與 Python 則以約 50 KB 的 byte-oriented tail
+    為主，不承諾相同的行數語意。四種實作都有約 10 MB 的 capture safety limit，但超限行為不同：有的回傳 capped-output
     診斷，有的將它視為 tool error。只有在實作確實捕獲完整輸出時，才會另存
-    <code>.tiny-agent/tool-output/</code>並回傳路徑。
+    <code>.tiny-agent/tool-output/</code> 並回傳路徑。
 </p>
 
 <h2 id="hands-on">親手驗證</h2>
@@ -172,8 +173,9 @@ grep -R 'abortRequested\|compactionStarted\|sourceDigest' \
     <strong>閱讀原始碼</strong
     ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L929"
         >durable <code>compact()</code></a
-    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/compaction-comparison.md">主流compaction比較</a
+    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/compaction-comparison.md"
+        >主流 compaction 比較</a
     >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/lang-behavior-matrix.md"
-        >四語言bash output行為完整矩陣</a
+        >四語言 bash output 行為完整矩陣</a
     >。
 </aside>

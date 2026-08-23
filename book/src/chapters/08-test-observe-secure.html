@@ -1,5 +1,7 @@
 <p class="lead">
-    這章證明迴圈值得信任——先用測試證明它平常做得對，再用observability證明它正在做得對，最後劃清安全邊界，證明「信任」本身有極限。你需要分開評估結果是否正確、過程為何失敗、成本花在哪裡，這三件事各自對應測試與observability；但無論這三件事看起來多漂亮，都不能取代第三步：它是否越過了授權邊界。
+    這章證明迴圈值得信任——先用測試證明它平常做得對，再用 observability
+    證明它正在做得對，最後劃清安全邊界，證明「信任」本身有極限。你需要分開評估結果是否正確、過程為何失敗、成本花在哪裡，這三件事各自對應測試與
+    observability；但無論這三件事看起來多漂亮，都不能取代第三步：它是否越過了授權邊界。
 </p>
 
 <h2 id="testing-pyramid">三層測試</h2>
@@ -24,26 +26,26 @@
         </tr>
         <tr>
             <td>Capability eval</td>
-            <td>Agent能否完成真實coding task</td>
+            <td>Agent 能否完成真實 coding task</td>
             <td>是</td>
         </tr>
     </tbody>
 </table>
-<p>一般CI必須免費且deterministic。公開MCP endpoints只適合optional compatibility smoke，不能成為release gate。</p>
+<p>一般 CI 必須免費且 deterministic。公開 MCP endpoints 只適合 optional compatibility smoke，不能成為 release gate。</p>
 
 <h2 id="eval">Outcome 是分數，Trace 是解釋</h2>
-<p>Repo內最小eval會複製fixture到temp workspace，執行四個CLI，再跑hidden verifier：</p>
+<p>Repo 內最小 eval 會複製 fixture 到 temp workspace，執行四個 CLI，再跑 hidden verifier：</p>
 <pre data-lang="sh"><code>make eval
 AGENT=tiny-rs TASK=fix-bug make eval</code></pre>
 <p>主要分數只有：</p>
 <pre><code>verifier exit 0 → PASS
 otherwise       → FAIL</code></pre>
-<p>Duration、tokens與tool count獨立報告，不能補償錯誤結果。Agent少用兩個tools卻修錯bug，不應取得較高分。</p>
+<p>Duration、tokens 與 tool count 獨立報告，不能補償錯誤結果。Agent 少用兩個 tools 卻修錯 bug，不應取得較高分。</p>
 
 <h2 id="observability">Structured Run Events</h2>
-<p>TypeScript提供one-shot machine mode：</p>
+<p>TypeScript 提供 one-shot machine mode：</p>
 <pre data-lang="sh"><code>tiny-ts --json "調查問題"</code></pre>
-<p>stdout只輸出JSONL：</p>
+<p>stdout 只輸出 JSONL：</p>
 <pre data-lang="json"><code>{"type":"run.started","sessionId":"...","model":"..."}
 {"type":"model.completed","durationMs":1589.31,"usage":{"input":157,"output":31,"cacheRead":1536,"cacheWrite":0,"cacheHitRate":90.72}}
 {"type":"tool.started","toolCallId":"call_1","tool":"read"}
@@ -56,16 +58,17 @@ otherwise       → FAIL</code></pre>
 </p>
 
 <h2 id="cache">觀察 Cache 崩潰</h2>
-<p>每個<code>model.completed</code>記錄當次request的cache hit rate，因此可以看到：</p>
+<p>每個 <code>model.completed</code> 記錄當次 request 的 cache hit rate，因此可以看到：</p>
 <pre><code>turn 1  91.2%
 turn 2  90.8%
 turn 3   0.0%  ← prompt prefix改變或cache失效
 turn 4  89.7%</code></pre>
-<p>Run result中的rate由整個run累計counters計算。兩種scope必須分開，才能最佳化成本而不誤判。</p>
+<p>Run result 中的 rate 由整個 run 累計 counters 計算。兩種 scope 必須分開，才能最佳化成本而不誤判。</p>
 
 <h2 id="security">安全邊界：誰信任誰</h2>
 <p class="responsibility-backref">
-    還記得第1章的責任表嗎？這裡把「介面與部署」那一欄攤開，順便把「產生副作用」與「持續與恢復」兩欄裡「不該負責什麼」的部分也交代清楚。
+    還記得第 1
+    章的責任表嗎？這裡把「介面與部署」那一欄攤開，順便把「產生副作用」與「持續與恢復」兩欄裡「不該負責什麼」的部分也交代清楚。
 </p>
 <figure id="fig-08-responsibility" aria-labelledby="fig-08-responsibility-caption">
     <table>
@@ -74,7 +77,7 @@ turn 4  89.7%</code></pre>
                 <th>責任</th>
                 <th>由誰負責</th>
                 <th>不該負責什麼</th>
-                <th>08章對應說明</th>
+                <th>08 章對應說明</th>
             </tr>
         </thead>
         <tbody>
@@ -82,61 +85,61 @@ turn 4  89.7%</code></pre>
                 <td>選擇下一步</td>
                 <td>Model</td>
                 <td>直接取得 host credential</td>
-                <td>Model output視為untrusted input，不是trusted code的一部分</td>
+                <td>Model output 視為 untrusted input，不是 trusted code 的一部分</td>
             </tr>
             <tr>
                 <td>控制迴圈</td>
                 <td>Agent runtime</td>
                 <td>理解每個領域的業務規則</td>
-                <td>Agent implementation本身是trusted code，但執行的是untrusted model決定的tool calls</td>
+                <td>Agent implementation 本身是 trusted code，但執行的是 untrusted model 決定的 tool calls</td>
             </tr>
             <tr>
                 <td>產生副作用</td>
                 <td>Tool adapter</td>
                 <td>自行改變授權範圍</td>
                 <td>
-                    MCP是Tool adapter，不是authorization或sandbox；<code>--plugin</code>是capability
-                    selector，不是tenant ACL
+                    MCP 是 Tool adapter，不是 authorization 或 sandbox；<code>--plugin</code> 是 capability
+                    selector，不是 tenant ACL
                 </td>
             </tr>
             <tr>
                 <td>持續與恢復</td>
                 <td>Session</td>
                 <td>猜測未記錄的 effect 是否成功</td>
-                <td>Session只保存durable facts；tenant scope是外層控制器的責任</td>
+                <td>Session 只保存 durable facts；tenant scope 是外層控制器的責任</td>
             </tr>
             <tr>
                 <td>介面與部署</td>
                 <td>CLI / trusted host</td>
                 <td>把 deployment security 假裝成 agent 功能</td>
-                <td>Tool registration是trusted deployment action；多租戶需要Execution Capsule（見下一節）</td>
+                <td>Tool registration 是 trusted deployment action；多租戶需要 Execution Capsule（見下一節）</td>
             </tr>
         </tbody>
     </table>
     <figcaption id="fig-08-responsibility-caption">
-        圖7：第1章責任表的展開版。這裡的分欄是責任邊界，不是process邊界——同一個CLI process同時扮演「介面」與「執行Agent
-        runtime」兩個角色，不代表實際部署會拆成兩個服務。
+        圖 7：第 1 章責任表的展開版。這裡的分欄是責任邊界，不是 process 邊界——同一個 CLI process
+        同時扮演「介面」與「執行 Agent runtime」兩個角色，不代表實際部署會拆成兩個服務。
     </figcaption>
 </figure>
 
 <ul>
-    <li>Agent implementation與 server operator是trusted code。</li>
-    <li>Model output、prompt、repository與 dependency scripts視為untrusted。</li>
-    <li>Tool registration是trusted deployment action；tool arguments是untrusted model input。</li>
-    <li>MCP是Tool adapter，不是authorization或sandbox。</li>
-    <li><code>--plugin</code>是capability selector，不是tenant ACL。</li>
+    <li>Agent implementation 與 server operator 是 trusted code。</li>
+    <li>Model output、prompt、repository 與 dependency scripts 視為 untrusted。</li>
+    <li>Tool registration 是 trusted deployment action；tool arguments 是 untrusted model input。</li>
+    <li>MCP 是 Tool adapter，不是 authorization 或 sandbox。</li>
+    <li><code>--plugin</code> 是 capability selector，不是 tenant ACL。</li>
 </ul>
 
 <h2 id="multi-tenant">多租戶需要 Execution Capsule</h2>
 <p>
-    若外部客戶能提供repository或prompt，Fence或path check都不是完整租戶邊界。每個job至少需要獨立container；hostile
-    native code、高敏感資料、GPU或nested container應升級microVM/VM。部署層還要負責：
+    若外部客戶能提供 repository 或 prompt，Fence 或 path check 都不是完整租戶邊界。每個 job 至少需要獨立
+    container；hostile native code、高敏感資料、GPU 或 nested container 應升級 microVM/VM。部署層還要負責：
 </p>
 <ol>
-    <li>CPU、RAM、PID、wall-clock與disk/inode limits。</li>
-    <li>Network egress、SSRF與metadata protection。</li>
-    <li>Tenant-scoped credentials、audit與retention。</li>
-    <li>TERM → grace → KILL與descendant cleanup。</li>
+    <li>CPU、RAM、PID、wall-clock 與 disk/inode limits。</li>
+    <li>Network egress、SSRF 與 metadata protection。</li>
+    <li>Tenant-scoped credentials、audit 與 retention。</li>
+    <li>TERM → grace → KILL 與 descendant cleanup。</li>
 </ol>
 <p>
     這些責任不放進 tiny-agent core。Tiny-agent 保持一般 CLI，由外層 trusted job controller 建立 execution capsule、綁定
@@ -146,9 +149,9 @@ turn 4  89.7%</code></pre>
 
 <h2 id="enterprise-tools">企業查詢 Tool 的原則</h2>
 <p>
-    不要提供萬用<code>internal_search(query)</code>或讓模型直接寫 SQL。使用少量typed operations，並讓trusted
-    context注入tenant、actor與 credential。每筆結果帶 source、observedAt、retrievedAt、partial與
-    conflicts，才能組成可審查的evidence packet。
+    不要提供萬用 <code>internal_search(query)</code> 或讓模型直接寫 SQL。使用少量 typed operations，並讓 trusted context
+    注入 tenant、actor 與 credential。每筆結果帶 source、observedAt、retrievedAt、partial 與 conflicts，才能組成可審查的
+    evidence packet。
 </p>
 
 <h2 id="hands-on">親手驗證</h2>
@@ -188,16 +191,16 @@ find eval/tasks -name 'verify.mjs' -o -name 'test.sh' | sort</code></pre>
             <p>觀測與信任壓力・你在這裡</p>
         </li>
     </ol>
-    <figcaption id="fig-08-map-caption">圖1：全書地圖（收束版）。</figcaption>
+    <figcaption id="fig-08-map-caption">圖 1：全書地圖（收束版）。</figcaption>
 </figure>
 
 <p class="closure">一個迴圈 + 一份誠實的帳本——現在你知道帳本怎麼記了。</p>
-<p>接下來要寫什麼，見<a href="/#planned-title">首頁的既有規劃</a>。</p>
+<p>接下來要寫什麼，見 <a href="/#planned-title">首頁的既有規劃</a>。</p>
 
 <aside class="note">
     <strong>繼續閱讀</strong
     ><a href="https://github.com/geminixiang/tiny-agent/blob/main/eval/run.ts">Eval runner</a>、<a
         href="https://github.com/geminixiang/tiny-agent/blob/main/docs/multi-tenant-threat-model.md"
         >多租戶威脅模型</a
-    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/mcp-test-plan.md">MCP測試計畫</a>。
+    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/mcp-test-plan.md">MCP 測試計畫</a>。
 </aside>
