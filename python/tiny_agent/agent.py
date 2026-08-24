@@ -77,13 +77,6 @@ for name, description, properties in [
     TOOL_DEFINITIONS.append({"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": list(properties)}}})
 
 
-def path_in_root(path: str) -> Path:
-    full = Path(path)
-    full = (full if full.is_absolute() else ROOT / full).resolve()
-    if full != ROOT and ROOT not in full.parents: raise ValueError("path must stay inside cwd")
-    return full
-
-
 async def _post_json(url: str, payload: dict, headers: dict[str, str], timeout: float, cancelled: asyncio.Event | None = None) -> dict:
     async def request() -> dict:
         parsed = urlsplit(url)
@@ -270,7 +263,7 @@ async def execute_tool(name: str, args: dict[str, str], cancelled: asyncio.Event
     if name == "bash": return await execute_bash(args["command"], cancelled)
 
     def execute_file_tool() -> str:
-        path = path_in_root(args["path"])
+        path = Path(args["path"]).resolve() if Path(args["path"]).is_absolute() else (ROOT / args["path"]).resolve()
         if name == "read": return path.read_text(encoding="utf-8")[:100_000]
         if name == "write":
             path.parent.mkdir(parents=True, exist_ok=True)
