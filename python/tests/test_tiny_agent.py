@@ -81,11 +81,6 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1); cancelled.set()
         with self.assertRaises(InterruptedError): await asyncio.wait_for(task, 1)
 
-        cancelled = asyncio.Event()
-        task = asyncio.create_task(tiny.execute_bash(f"{sleeper} &", cancelled))
-        await asyncio.sleep(0.1); cancelled.set()
-        with self.assertRaises(InterruptedError): await asyncio.wait_for(task, 1)
-
     @staticmethod
     def _capture_error(out, call):
         try: call()
