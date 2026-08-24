@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,7 +11,6 @@ import (
 	"math"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -479,8 +479,8 @@ func sessionParseMessage(v any, line, seq int) (sessionMessage, error) {
 
 func sessionClone(s *sessionInternal) *sessionInternal {
 	n := *s
-	n.Transcript = append([]sessionMessage{}, s.Transcript...)
-	n.ActiveContext = append([]sessionMessage{}, s.ActiveContext...)
+	n.Transcript = slices.Clone(s.Transcript)
+	n.ActiveContext = slices.Clone(s.ActiveContext)
 	n.IDs = maps.Clone(s.IDs)
 	n.Reserved = maps.Clone(s.Reserved)
 	n.Entries = maps.Clone(s.Entries)
@@ -493,7 +493,7 @@ func sessionClone(s *sessionInternal) *sessionInternal {
 	n.Attempts = map[string]*sessionAttempt{}
 	for k, v := range s.Attempts {
 		x := *v
-		x.Configuration.Tools = append([]sessionToolDeclaration{}, v.Configuration.Tools...)
+		x.Configuration.Tools = slices.Clone(v.Configuration.Tools)
 		n.Attempts[k] = &x
 	}
 	n.Steps = map[string][]*sessionAttempt{}
@@ -510,12 +510,12 @@ func sessionClone(s *sessionInternal) *sessionInternal {
 	n.ToolPairs = maps.Clone(s.ToolPairs)
 	if s.Operation.Step != nil {
 		x := *s.Operation.Step
-		x.ConfigurationSnapshot.Tools = append([]sessionToolDeclaration{}, s.Operation.Step.ConfigurationSnapshot.Tools...)
+		x.ConfigurationSnapshot.Tools = slices.Clone(s.Operation.Step.ConfigurationSnapshot.Tools)
 		n.Operation.Step = &x
 	}
-	n.Operation.ToolCalls = append([]sessionToolState{}, s.Operation.ToolCalls...)
-	n.Operation.compactedEntryIDs = append([]string{}, s.Operation.compactedEntryIDs...)
-	n.Operation.retainedEntryIDs = append([]string{}, s.Operation.retainedEntryIDs...)
+	n.Operation.ToolCalls = slices.Clone(s.Operation.ToolCalls)
+	n.Operation.compactedEntryIDs = slices.Clone(s.Operation.compactedEntryIDs)
+	n.Operation.retainedEntryIDs = slices.Clone(s.Operation.retainedEntryIDs)
 	return &n
 }
 
@@ -585,11 +585,7 @@ func sessionCanonical(v any) (string, error) {
 		}
 		return "[" + strings.Join(parts, ",") + "]", nil
 	case map[string]any:
-		keys := make([]string, 0, len(x))
-		for k := range x {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
+		keys := slices.Sorted(maps.Keys(x))
 		parts := make([]string, len(keys))
 		for i, k := range keys {
 			a, _ := sessionCanonical(k)
@@ -699,13 +695,7 @@ func sessionCanonicalValue(v any) (string, error) {
 
 func sessionSourceDigest(s *sessionInternal, inputID string) (string, error) {
 	source := []any{}
-	ids := make([]string, 0, len(s.Entries))
-	for id := range s.Entries {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool {
-		return sessionSeqOfEntry(s.Entries[ids[i]].Entry) < sessionSeqOfEntry(s.Entries[ids[j]].Entry)
-	})
+	ids := slices.SortedFunc(maps.Keys(s.Entries), sessionEntryOrder(s))
 	for _, id := range ids {
 		entry := s.Entries[id].Entry
 		if entry["type"] == "message" {
@@ -922,16 +912,10 @@ func sessionApplyEntry(s *sessionInternal, f map[string]any, line, seq int) erro
 	if !ok {
 		return corrupt("INVALID_FACT", line, seq)
 	}
-	ids := make([]string, 0, len(s.Entries))
-	for id := range s.Entries {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool {
-		return sessionSeqOfEntry(s.Entries[ids[i]].Entry) < sessionSeqOfEntry(s.Entries[ids[j]].Entry)
-	}) // insertion order recovered below from recorded synthetic seq
+	ids := slices.SortedFunc(maps.Keys(s.Entries), sessionEntryOrder(s)) // insertion order recovered below from recorded synthetic seq
 	// Maps do not preserve insertion order; derive expected retained entries from transcript order via explicit entry sequence metadata.
-	sort.SliceStable(ids, func(i, j int) bool {
-		return s.Entries[ids[i]].Entry["_seq"].(int) < s.Entries[ids[j]].Entry["_seq"].(int)
+	slices.SortStableFunc(ids, func(a, b string) int {
+		return cmp.Compare(s.Entries[a].Entry["_seq"].(int), s.Entries[b].Entry["_seq"].(int))
 	})
 	boundary, inputBoundary := -1, -1
 	for i, id := range ids {
@@ -991,6 +975,12 @@ func sessionApplyEntry(s *sessionInternal, f map[string]any, line, seq int) erro
 	s.Entries[factID] = sessionEntryInfo{Entry: entry, OperationID: key, StepID: a.StepID, AttemptID: a.AttemptID}
 	return nil
 }
+func sessionEntryOrder(s *sessionInternal) func(string, string) int {
+	return func(a, b string) int {
+		return cmp.Compare(sessionSeqOfEntry(s.Entries[a].Entry), sessionSeqOfEntry(s.Entries[b].Entry))
+	}
+}
+
 func sessionSeqOfEntry(m map[string]any) int {
 	if n, ok := m["_seq"].(int); ok {
 		return n
@@ -1054,15 +1044,9 @@ func sessionApplyRecord(s *sessionInternal, f map[string]any, line, seq int) err
 		if !compactedOK || len(compactedRaw) == 0 || !retainedOK {
 			return corrupt("INVALID_FACT", line, seq)
 		}
-		partition := append(append([]any{}, compactedRaw...), retainedRaw...)
+		partition := slices.Concat(compactedRaw, retainedRaw)
 		expected := []string{}
-		ids := make([]string, 0, len(s.Entries))
-		for id := range s.Entries {
-			ids = append(ids, id)
-		}
-		sort.Slice(ids, func(i, j int) bool {
-			return sessionSeqOfEntry(s.Entries[ids[i]].Entry) < sessionSeqOfEntry(s.Entries[ids[j]].Entry)
-		})
+		ids := slices.SortedFunc(maps.Keys(s.Entries), sessionEntryOrder(s))
 		for _, id := range ids {
 			if s.Entries[id].Entry["type"] == "message" {
 				expected = append(expected, id)
@@ -1617,18 +1601,8 @@ func reduceSession(data []byte) (sessionState, error) {
 		}
 		s = next
 	}
-	clean := func(messages []sessionMessage) []sessionMessage {
-		out := make([]sessionMessage, len(messages))
-		copy(out, messages)
-		return out
-	}
-	ids := make([]string, 0, len(s.Entries))
-	for id := range s.Entries {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool {
-		return sessionSeqOfEntry(s.Entries[ids[i]].Entry) < sessionSeqOfEntry(s.Entries[ids[j]].Entry)
-	})
+	clean := func(messages []sessionMessage) []sessionMessage { return slices.Clone(messages) }
+	ids := slices.SortedFunc(maps.Keys(s.Entries), sessionEntryOrder(s))
 	entryIDs := make([]string, 0, len(s.Transcript))
 	resultPairs := map[string]bool{}
 	messageFacts := make([]sessionMessageFact, 0, len(s.Transcript))

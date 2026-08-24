@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -180,8 +179,8 @@ func planRecovery(state sessionState, current currentConfiguration) recoveryPlan
 		if declaration == nil {
 			return recoveryPlan{"type": "appendSynthetic", "results": []any{syntheticResult(assistantID, index, callID, name, "unknownTool")}}
 		}
-		arguments := map[string]any{}
-		if err := json.Unmarshal([]byte(rawArguments), &arguments); err != nil || arguments == nil {
+		arguments, err := decodeToolArguments(rawArguments)
+		if err != nil {
 			return recoveryPlan{"type": "appendSynthetic", "results": []any{syntheticResult(assistantID, index, callID, name, "invalidArguments")}}
 		}
 		return recoveryPlan{"type": "startTool", "mode": "start", "assistantEntryId": assistantID, "toolIndex": index, "toolName": name, "arguments": arguments}

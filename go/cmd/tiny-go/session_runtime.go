@@ -407,18 +407,17 @@ func (a *Agent) recoverSession() error {
 	return a.projectSession()
 }
 
+func recoveryInteger(value any) int {
+	if number, ok := value.(int); ok {
+		return number
+	}
+	number, _ := value.(float64)
+	return int(number)
+}
+
 func (a *Agent) applyRecoveryPlan(plan recoveryPlan) error {
 	state := a.Session.State()
 	operation := state.Operation
-	number := func(value any) int {
-		switch value := value.(type) {
-		case int:
-			return value
-		case float64:
-			return int(value)
-		}
-		return 0
-	}
 	switch plan["type"] {
 	case "appendSynthetic":
 		results := plan["results"].([]any)
@@ -452,9 +451,9 @@ func (a *Agent) applyRecoveryPlan(plan recoveryPlan) error {
 		return a.Session.Commit([]map[string]any{{"kind": "record", "record": record}})
 	case "startStep":
 		if operation.Kind == "compaction" {
-			return a.recoverCompaction(plan, number(plan["attempt"]))
+			return a.recoverCompaction(plan, recoveryInteger(plan["attempt"]))
 		}
-		return a.recoverStep(plan, number(plan["attempt"]))
+		return a.recoverStep(plan, recoveryInteger(plan["attempt"]))
 	case "startTool":
 		return a.recoverTool(plan)
 	}
@@ -593,13 +592,7 @@ func (a *Agent) recoverTool(plan recoveryPlan) error {
 		assistant, _ = messageFromMap(raw)
 		break
 	}
-	index := 0
-	switch value := plan["toolIndex"].(type) {
-	case int:
-		index = value
-	case float64:
-		index = int(value)
-	}
+	index := recoveryInteger(plan["toolIndex"])
 	if index >= len(assistant.ToolCalls) {
 		return errors.New("recovery tool call missing")
 	}

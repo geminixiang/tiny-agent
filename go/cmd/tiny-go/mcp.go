@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -387,13 +386,10 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	if err != nil {
 		return fail(fmt.Errorf("MCP tools/list: %w", err))
 	}
-	if len(listed.Tools) > maxMCPTools {
-		return fail(fmt.Errorf("MCP server returned more than %d tools", maxMCPTools))
-	}
 	endpointDigest := digestMCPIdentity(map[string]any{"endpoint": endpoint, "auth": config.AuthHeader, "protocol": mcp.protocolVersion})
 	seenRemote := map[string]bool{}
 	seenMapped := map[string]bool{}
-	for _, remote := range listed.Tools {
+	for _, remote := range listed {
 		if seenRemote[remote.Name] {
 			return fail(fmt.Errorf("duplicate MCP tool name: %s", remote.Name))
 		}
@@ -448,8 +444,8 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	return mcp, nil
 }
 
-func listAllMCPTools(ctx context.Context, session *sdk.ClientSession) (*sdk.ListToolsResult, error) {
-	all := &sdk.ListToolsResult{}
+func listAllMCPTools(ctx context.Context, session *sdk.ClientSession) ([]*sdk.Tool, error) {
+	var all []*sdk.Tool
 	cursor := ""
 	seen := map[string]bool{}
 	for {
@@ -457,8 +453,8 @@ func listAllMCPTools(ctx context.Context, session *sdk.ClientSession) (*sdk.List
 		if err != nil {
 			return nil, err
 		}
-		all.Tools = append(all.Tools, listed.Tools...)
-		if len(all.Tools) > maxMCPTools {
+		all = append(all, listed.Tools...)
+		if len(all) > maxMCPTools {
 			return nil, fmt.Errorf("MCP server returned more than %d tools", maxMCPTools)
 		}
 		if listed.NextCursor == "" {
@@ -474,8 +470,7 @@ func listAllMCPTools(ctx context.Context, session *sdk.ClientSession) (*sdk.List
 
 func digestMCPIdentity(value any) string {
 	encoded, _ := json.Marshal(value)
-	sum := sha256.Sum256(encoded)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(encoded))
 }
 
 func (m *MCPClient) callTool(ctx context.Context, name string, args map[string]any) (string, error) {
@@ -567,6 +562,13 @@ func validateMCPToolSchema(schema map[string]any, toolName string) error {
 	}
 	return nil
 }
+func validateSchemaChild(value any, path string) error {
+	child, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s must be an object", path)
+	}
+	return validateSharedSchema(child, path, false)
+}
 
 func validateSharedSchema(schema map[string]any, path string, root bool) error {
 	allowed := []string{"type", "properties", "required", "additionalProperties", "items", "enum", "const", "oneOf", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "pattern", "minItems", "maxItems"}
@@ -589,11 +591,7 @@ func validateSharedSchema(schema map[string]any, path string, root bool) error {
 			return fmt.Errorf("%s/properties must be an object", path)
 		}
 		for name, child := range properties {
-			childSchema, valid := child.(map[string]any)
-			if !valid {
-				return fmt.Errorf("%s/properties/%s must be an object", path, name)
-			}
-			if err := validateSharedSchema(childSchema, path+"/properties/"+name, false); err != nil {
+			if err := validateSchemaChild(child, path+"/properties/"+name); err != nil {
 				return err
 			}
 		}
@@ -624,11 +622,7 @@ func validateSharedSchema(schema map[string]any, path string, root bool) error {
 		}
 	}
 	if raw, ok := schema["items"]; ok {
-		child, valid := raw.(map[string]any)
-		if !valid {
-			return fmt.Errorf("%s/items must be an object", path)
-		}
-		if err := validateSharedSchema(child, path+"/items", false); err != nil {
+		if err := validateSchemaChild(raw, path+"/items"); err != nil {
 			return err
 		}
 	}
@@ -638,11 +632,7 @@ func validateSharedSchema(schema map[string]any, path string, root bool) error {
 			return fmt.Errorf("%s/oneOf must be a nonempty array", path)
 		}
 		for index, option := range options {
-			child, valid := option.(map[string]any)
-			if !valid {
-				return fmt.Errorf("%s/oneOf/%d must be an object", path, index)
-			}
-			if err := validateSharedSchema(child, fmt.Sprintf("%s/oneOf/%d", path, index), false); err != nil {
+			if err := validateSchemaChild(option, fmt.Sprintf("%s/oneOf/%d", path, index)); err != nil {
 				return err
 			}
 		}
@@ -681,12 +671,7 @@ func validateSharedSchema(schema map[string]any, path string, root bool) error {
 }
 
 func encodeMCPHeaderValue(value string) string {
-	safe := value != "" && value == strings.TrimSpace(value) && !(strings.HasPrefix(value, "=?base64?") && strings.HasSuffix(value, "?="))
-	for _, char := range value {
-		if char != '\t' && (char < 32 || char > 126) {
-			safe = false
-		}
-	}
+	safe := value != "" && value == strings.TrimSpace(value) && !(strings.HasPrefix(value, "=?base64?") && strings.HasSuffix(value, "?=")) && strings.IndexFunc(value, func(char rune) bool { return char != '\t' && (char < 32 || char > 126) }) < 0
 	if safe {
 		return value
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -72,12 +73,7 @@ type ModelResponse struct {
 }
 
 func text(s string) *string { return &s }
-func model() string {
-	if v := os.Getenv("TINY_MODEL"); v != "" {
-		return v
-	}
-	return defaultModel
-}
+func model() string         { return cmp.Or(os.Getenv("TINY_MODEL"), defaultModel) }
 func formatTokens(n int) string {
 	if n < 1000 {
 		return fmt.Sprint(n)
@@ -160,9 +156,7 @@ func loadSkills(extra []string) ([]Skill, error) {
 			return nil, err
 		}
 		name, description := frontmatter(string(b), "name"), frontmatter(string(b), "description")
-		if name == "" {
-			name = filepath.Base(filepath.Dir(path))
-		}
+		name = cmp.Or(name, filepath.Base(filepath.Dir(path)))
 		skills = append(skills, Skill{name, description, path})
 	}
 	slices.SortFunc(skills, func(a, b Skill) int { return strings.Compare(a.Path, b.Path) })
@@ -170,17 +164,17 @@ func loadSkills(extra []string) ([]Skill, error) {
 }
 
 func frontmatter(s, key string) string {
-	if !strings.HasPrefix(s, "---\n") {
+	body, ok := strings.CutPrefix(s, "---\n")
+	if !ok {
 		return ""
 	}
-	end := strings.Index(s[4:], "\n---")
-	if end < 0 {
+	body, _, ok = strings.Cut(body, "\n---")
+	if !ok {
 		return ""
 	}
-	prefix := key + ":"
-	for _, line := range strings.Split(s[4:4+end], "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, prefix)), `"'`)
+	for line := range strings.SplitSeq(body, "\n") {
+		if value, ok := strings.CutPrefix(line, key+":"); ok {
+			return strings.Trim(strings.TrimSpace(value), `"'`)
 		}
 	}
 	return ""
@@ -817,8 +811,8 @@ func (t *terminal) redraw(prompt string, line []rune, cursor, oldRow int) int {
 	}
 	fmt.Fprintf(t.out, "\r\x1b[J%s%s", prompt, string(line))
 	promptRunes := []rune(prompt)
-	endRow, endColumn := displayPosition(append(append([]rune{}, promptRunes...), line...), width)
-	targetRow, targetColumn := displayPosition(append(append([]rune{}, promptRunes...), line[:cursor]...), width)
+	endRow, endColumn := displayPosition(slices.Concat(promptRunes, line), width)
+	targetRow, targetColumn := displayPosition(slices.Concat(promptRunes, line[:cursor]), width)
 	if endColumn == 0 {
 		fmt.Fprint(t.out, " ")
 	}
