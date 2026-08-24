@@ -6,6 +6,7 @@ import json
 import os
 import re
 import signal
+import ssl
 import time
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -76,15 +77,24 @@ for name, description, properties in [
     TOOL_DEFINITIONS.append({"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": list(properties)}}})
 
 
+def _tls_context() -> ssl.SSLContext:
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 async def _post_json(url: str, payload: dict, headers: dict[str, str], timeout: float, cancelled: asyncio.Event | None = None) -> dict:
     async def request() -> dict:
         parsed = urlsplit(url)
-        ssl = parsed.scheme == "https"
-        port = parsed.port or (443 if ssl else 80)
+        use_tls = parsed.scheme == "https"
+        port = parsed.port or (443 if use_tls else 80)
         deadline = time.monotonic() + timeout
         writer: asyncio.StreamWriter | None = None
         try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(parsed.hostname, port, ssl=ssl), remaining(deadline))
+            context = _tls_context() if use_tls else None
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(parsed.hostname, port, ssl=context), remaining(deadline))
             body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
             path = parsed.path or "/"
             if parsed.query: path += f"?{parsed.query}"
@@ -141,6 +151,27 @@ def provider_stop_reason(finish: object, answer: dict) -> str:
     if finish in ("content_filter", "network_error"): raise RuntimeError(f"Provider finish_reason: {finish}")
     if finish not in (None, "stop"): raise RuntimeError(f"Unknown provider finish_reason: {finish}")
     return "toolUse" if answer.get("tool_calls") else "stop"
+
+
+def entry_fact(fact_id: str, entry: dict) -> dict:
+    return {"kind": "entry", "id": fact_id, "entry": entry}
+
+
+def record_fact(record: dict, fact_id: str | None = None) -> dict:
+    fact = {"kind": "record", "record": record}
+    if fact_id: fact["id"] = fact_id
+    return fact
+
+
+def usage_fact(operation_id: str, attempt_id: str, usage: dict) -> dict:
+    return {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage}
+
+
+def step_failed_record(operation_id: str, step_id: str, attempt_id: str, code: str, message: str) -> dict:
+    return {
+        "type": "stepFailed", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id,
+        "error": {"code": code, "message": message},
+    }
 
 
 async def execute_bash(command: str, cancelled: asyncio.Event) -> str:
@@ -315,7 +346,7 @@ class Agent:
             }
             if active.get("toolCallId"): record["toolCallId"] = active["toolCallId"]
             active["abortRequested"] = self.session.request_abort(
-                active["operationId"], cancelled, {"kind": "record", "record": record},
+                active["operationId"], cancelled, record_fact(record),
             )
         elif cancelled:
             cancelled.set()
@@ -337,16 +368,13 @@ class Agent:
         return cancelled.is_set() or (operation.get("operationId") == operation_id and operation.get("abortRequested", False))
 
     def _fail_aborted_attempt(self, operation_id: str, step_id: str, attempt_id: str, cancelled: asyncio.Event, usage: dict | None = None, cache_rate: bool = True) -> None:
-        failure = {"kind": "record", "record": {
-            "type": "stepFailed", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id,
-            "error": {"code": "aborted", "message": "Operation aborted"},
-        }}
+        failure = record_fact(step_failed_record(operation_id, step_id, attempt_id, "aborted", "Operation aborted"))
         if usage is None:
             self.session.append(failure)
             return
         self.session.append_aborted_attempt(
             operation_id, cancelled, failure,
-            {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage},
+            usage_fact(operation_id, attempt_id, usage),
         )
         self.add_usage(usage, cache_rate)
 
@@ -400,10 +428,11 @@ class Agent:
                 raise RuntimeError(f"Session recovery blocked: {action['reason']}")
             if action["type"] == "closeAttempt":
                 step = state["operation"]["step"]
-                self.session.append({"kind": "record", "record": {
+                record = {
                     "type": "stepFailed", "operationId": operation_id, "stepId": step["stepId"],
                     "attemptId": step["attemptId"], "error": action["error"],
-                }})
+                }
+                self.session.append(record_fact(record))
                 continue
             if action["type"] == "appendSynthetic":
                 self._append_synthetic_results(action["results"])
@@ -425,7 +454,7 @@ class Agent:
                 record = {"type": "operationFinished", "operationId": operation_id, "operationKind": state["operation"]["kind"], "outcome": action["outcome"]}
                 for key in ("completion", "finalEntryId", "error"):
                     if key in action: record[key] = action[key]
-                self.session.append({"kind": "record", "record": record})
+                self.session.append(record_fact(record))
                 self._restore_projection()
                 continue
             raise RuntimeError(f"Unknown recovery action: {action['type']}")
@@ -445,7 +474,7 @@ class Agent:
             else:
                 entry.update(assistantEntryId=item["assistantEntryId"], toolIndex=item["toolIndex"])
                 fact_id = uuid7()
-            facts.append({"kind": "entry", "id": fact_id, "entry": entry})
+            facts.append(entry_fact(fact_id, entry))
         self.session.append(*facts)
 
     async def _execute_recovered_tool(self, operation_id: str, action: dict) -> None:
@@ -456,13 +485,14 @@ class Agent:
             call = next(message for message in reversed(state["activeContext"]) if message["role"] == "assistant")["tool_calls"][action["toolIndex"]]
             started_id, result_id = uuid7(), uuid7()
             replay, replay_key = self._replay_declaration(tool)
-            self.session.append({"kind": "record", "id": started_id, "record": {
+            record = {
                 "type": "toolStarted", "operationId": operation_id, "stepId": step_id,
                 "assistantEntryId": action["assistantEntryId"], "toolIndex": action["toolIndex"],
                 "toolCallId": call["id"], "toolName": action["toolName"], "arguments": action["arguments"],
                 "replay": replay, "replayKey": replay_key,
                 "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id,
-            }})
+            }
+            self.session.append(record_fact(record, started_id))
         else:
             started_id = action["toolStartedId"]
             pending = next(item for item in state["operation"]["toolCalls"] if item["toolStartedId"] == started_id)
@@ -477,11 +507,11 @@ class Agent:
             aborted = self._is_aborted(operation_id, cancelled)
             content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
             result = {"type": "synthetic", "reason": "interrupted"} if aborted else {"type": "error"}
-        entry = lambda value, meta: {"kind": "entry", "id": result_id, "entry": {
+        entry = lambda value, meta: entry_fact(result_id, {
             "type": "message", "stepId": step_id,
             "message": {"role": "tool", "content": value, "tool_call_id": call["id"]},
             "toolName": action["toolName"], "toolStartedId": started_id, "result": meta,
-        }}
+        })
         if not aborted and self.session.append_if_active(operation_id, cancelled, entry(content, result)) is None:
             aborted = True
         if aborted:
@@ -512,11 +542,12 @@ class Agent:
 
     def _attempt(self, operation_id: str, context_id: str, kind: str = "assistant", attempt: int = 1, step_id: str | None = None) -> tuple[str, str]:
         step_id, attempt_id = step_id or uuid7(), uuid7()
-        self.session.append({"kind": "record", "record": {
+        record = {
             "type": "stepAttempt", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id,
             "stepKind": kind, "attempt": attempt, "contextThroughEntryId": context_id,
             "configurationSnapshot": self.configuration, "configurationDigest": self.configuration_digest,
-        }})
+        }
+        self.session.append(record_fact(record))
         return step_id, attempt_id
 
     def _finish(self, operation_id: str, outcome: str, final_id: str | None = None, completion: str | None = None, error: Exception | None = None, operation_kind: str = "run") -> None:
@@ -524,14 +555,14 @@ class Agent:
         if final_id: record["finalEntryId"] = final_id
         if completion: record["completion"] = completion
         if error: record["error"] = {"code": "agent_error", "message": str(error)}
-        self.session.append({"kind": "record", "record": record})
+        self.session.append(record_fact(record))
 
     async def run_agent_loop(self, text: str) -> str:
         if not self.session: raise RuntimeError("Session is required")
         user = {"role": "user", "content": text}; user_id, operation_id = uuid7(), uuid7()
         self.session.append(
-            {"kind": "entry", "id": user_id, "entry": {"type": "message", "message": user}},
-            {"kind": "record", "record": {"type": "runStarted", "operationId": operation_id, "operationKind": "run", "inputEntryId": user_id}},
+            entry_fact(user_id, {"type": "message", "message": user}),
+            record_fact({"type": "runStarted", "operationId": operation_id, "operationKind": "run", "inputEntryId": user_id}),
         )
         self.messages.append(user); context_id = user_id
         return await self._run_operation(operation_id, context_id)
@@ -548,15 +579,17 @@ class Agent:
             try: answer, usage, stop_reason = await self.call_model(self.messages, model_tools, cancelled)
             except BaseException as error:
                 aborted = self._is_aborted(operation_id, cancelled); self.end()
-                self.session.append({"kind": "record", "record": {"type": "stepFailed", "operationId": operation_id, "stepId": step_id, "attemptId": attempt_id, "error": {"code": "aborted" if aborted else "model_error", "message": "Operation aborted" if aborted else str(error)}}})
+                code = "aborted" if aborted else "model_error"
+                message = "Operation aborted" if aborted else str(error)
+                self.session.append(record_fact(step_failed_record(operation_id, step_id, attempt_id, code, message)))
                 self._finish(operation_id, "aborted" if aborted else "failed", error=None if aborted else error)
                 if aborted: return "Operation aborted."
                 raise
             answer_id = uuid7()
             committed = self.session.append_if_active(
                 operation_id, cancelled,
-                {"kind": "entry", "id": answer_id, "entry": {"type": "message", "stepId": step_id, "attemptId": attempt_id, "stopReason": stop_reason, "message": answer}},
-                {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage},
+                entry_fact(answer_id, {"type": "message", "stepId": step_id, "attemptId": attempt_id, "stopReason": stop_reason, "message": answer}),
+                usage_fact(operation_id, attempt_id, usage),
             )
             self.end()
             if committed is None:
@@ -574,7 +607,8 @@ class Agent:
                 for index, call in enumerate(calls):
                     result = {"role": "tool", "content": "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.", "tool_call_id": call["id"]}
                     result_id = uuid7()
-                    self.session.append({"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "message": result, "toolName": call["function"]["name"], "result": {"type": "synthetic", "reason": "truncated"}}})
+                    entry = {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "message": result, "toolName": call["function"]["name"], "result": {"type": "synthetic", "reason": "truncated"}}
+                    self.session.append(entry_fact(result_id, entry))
                     self.messages.append(result); context_id = result_id
                 self._finish(operation_id, "completed", answer_id, "truncated")
                 return answer.get("content") or "Model response was truncated."
@@ -596,11 +630,13 @@ class Agent:
                     reason = "invalidArguments" if not isinstance(args, dict) else "unknownTool"
                     content = "Error: Tool arguments were invalid; the tool was not executed." if reason == "invalidArguments" else "Error: Unknown tool; the tool was not executed."
                     result = {"role": "tool", "content": content, "tool_call_id": call["id"]}; result_id = uuid7()
-                    self.session.append({"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "message": result, "toolName": name, "result": {"type": "synthetic", "reason": reason}}})
+                    entry = {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "message": result, "toolName": name, "result": {"type": "synthetic", "reason": reason}}
+                    self.session.append(entry_fact(result_id, entry))
                 else:
                     started_id, result_id = uuid7(), uuid7()
                     replay, replay_key = self._replay_declaration(tool)
-                    self.session.append({"kind": "record", "id": started_id, "record": {"type": "toolStarted", "operationId": operation_id, "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "toolCallId": call["id"], "toolName": name, "arguments": args, "replay": replay, "replayKey": replay_key, "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id}})
+                    record = {"type": "toolStarted", "operationId": operation_id, "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "toolCallId": call["id"], "toolName": name, "arguments": args, "replay": replay, "replayKey": replay_key, "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id}
+                    self.session.append(record_fact(record, started_id))
                     cancelled = self.begin(operation_id, "tool", call["id"]); aborted = False
                     try:
                         self.on_tool({"phase": "start", "name": name, "args": args})
@@ -611,12 +647,14 @@ class Agent:
                         result_type = "synthetic" if aborted else "error"
                     if not aborted:
                         success = {"role": "tool", "content": content, "tool_call_id": call["id"]}
-                        committed = self.session.append_if_active(operation_id, cancelled, {"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "message": success, "toolName": name, "toolStartedId": started_id, "result": {"type": result_type}}})
+                        entry = {"type": "message", "stepId": step_id, "message": success, "toolName": name, "toolStartedId": started_id, "result": {"type": result_type}}
+                        committed = self.session.append_if_active(operation_id, cancelled, entry_fact(result_id, entry))
                         aborted = committed is None
                     if aborted:
                         content = "Operation interrupted after execution status became unknown; the tool was not replayed."
                         result = {"role": "tool", "content": content, "tool_call_id": call["id"]}
-                        self.session.append({"kind": "entry", "id": result_id, "entry": {"type": "message", "stepId": step_id, "message": result, "toolName": name, "toolStartedId": started_id, "result": {"type": "synthetic", "reason": "interrupted"}}})
+                        entry = {"type": "message", "stepId": step_id, "message": result, "toolName": name, "toolStartedId": started_id, "result": {"type": "synthetic", "reason": "interrupted"}}
+                        self.session.append(entry_fact(result_id, entry))
                     else:
                         result = success
                     self.end(); self.on_tool({"phase": "end", "name": name, "args": args, "result": content})
@@ -624,7 +662,8 @@ class Agent:
                 if not aborted: continue
                 for pending_index, pending in enumerate(calls[index + 1:], index + 1):
                     skipped = {"role": "tool", "content": "Operation aborted before execution.", "tool_call_id": pending["id"]}; skipped_id = uuid7()
-                    self.session.append({"kind": "entry", "id": skipped_id, "entry": {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": pending_index, "message": skipped, "toolName": pending["function"]["name"], "result": {"type": "synthetic", "reason": "aborted"}}})
+                    entry = {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": pending_index, "message": skipped, "toolName": pending["function"]["name"], "result": {"type": "synthetic", "reason": "aborted"}}
+                    self.session.append(entry_fact(skipped_id, entry))
                     self.messages.append(skipped); context_id = skipped_id
                 self._finish(operation_id, "aborted"); return "Operation aborted."
 
@@ -645,13 +684,14 @@ class Agent:
         if not compacted: return "Nothing to compact."
 
         operation_id, result_id = uuid7(), uuid7()
-        self.session.append({"kind": "record", "record": {
+        record = {
             "type": "compactionStarted", "operationId": operation_id, "operationKind": "compaction",
             "inputThroughEntryId": input_through_id, "resultEntryId": result_id,
             "compactedEntryIds": [item["id"] for item in compacted],
             "retainedEntryIds": [item["id"] for item in retained],
             "sourceDigest": source_digest(self._full_state(), input_through_id),
-        }})
+        }
+        self.session.append(record_fact(record))
         result = await self._continue_compaction(operation_id, {
             "attempt": 1, "contextThroughEntryId": input_through_id,
         })
@@ -678,10 +718,9 @@ class Agent:
             if stop_reason != "stop" or not text.strip(): raise RuntimeError("Model returned an invalid compaction summary")
         except BaseException as error:
             aborted = self._is_aborted(operation_id, cancelled); self.end()
-            self.session.append({"kind": "record", "record": {
-                "type": "stepFailed", "operationId": operation_id, "stepId": step_id,
-                "attemptId": attempt_id, "error": {"code": "aborted" if aborted else "model_error", "message": "Operation aborted" if aborted else str(error)},
-            }})
+            code = "aborted" if aborted else "model_error"
+            message = "Operation aborted" if aborted else str(error)
+            self.session.append(record_fact(step_failed_record(operation_id, step_id, attempt_id, code, message)))
             self._finish(operation_id, "aborted" if aborted else "failed", error=None if aborted else error, operation_kind="compaction")
             if aborted: return "Compaction aborted."
             raise
@@ -690,12 +729,12 @@ class Agent:
         result_id = operation["resultEntryId"]
         committed = self.session.append_if_active(
             operation_id, cancelled,
-            {"kind": "entry", "id": result_id, "entry": {
+            entry_fact(result_id, {
                 "type": "compaction", "operationId": operation_id, "summary": text,
                 "compactedThroughEntryId": self._compaction_record(operation_id)["compactedEntryIds"][-1],
                 "retainedTail": retained,
-            }},
-            {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage},
+            }),
+            usage_fact(operation_id, attempt_id, usage),
         )
         self.end()
         if committed is None:
