@@ -70,6 +70,43 @@
     <figcaption id="fig-01-loop-caption">圖 2：不可再刪的閉環——上面程式碼的形狀。</figcaption>
 </figure>
 
+<figure class="data-anim" id="fig-01-data" aria-labelledby="fig-01-data-caption">
+    <ol class="anim-track">
+        <li class="anim-node s1">
+            <span class="anim-title">user 輸入</span>
+            <span class="anim-data">messages = [<span class="chip keep">user</span>]</span>
+        </li>
+        <li class="anim-arrow a1" aria-hidden="true">→</li>
+        <li class="anim-node s2">
+            <span class="anim-title">model(messages)</span>
+            <span class="anim-data">每次都讀整個陣列，沒有別的記憶</span>
+        </li>
+        <li class="anim-arrow a2" aria-hidden="true">→</li>
+        <li class="anim-node s3">
+            <span class="anim-title">assistant 回覆</span>
+            <span class="anim-data">tool_calls: [read README.md]<br>messages = [<span class="chip">user</span><span class="chip keep">assistant</span>]</span>
+        </li>
+        <li class="anim-arrow a3" aria-hidden="true">→</li>
+        <li class="anim-node s4">
+            <span class="anim-title">執行 read</span>
+            <span class="anim-data">result = "…檔案內容…"</span>
+        </li>
+        <li class="anim-arrow a4" aria-hidden="true">→</li>
+        <li class="anim-node s5">
+            <span class="anim-title">result 寫回 messages</span>
+            <span class="anim-data">messages = [<span class="chip">user</span><span class="chip">assistant</span><span class="chip keep">tool</span>]</span>
+        </li>
+        <li class="anim-arrow a5" aria-hidden="true">→</li>
+        <li class="anim-node s6">
+            <span class="anim-title">再次 model(messages)</span>
+            <span class="anim-data">這次看得到 tool result，回 final answer</span>
+        </li>
+    </ol>
+    <figcaption id="fig-01-data-caption">
+        動圖 1：同一個迴圈，換成資料視角——<code>messages</code> 陣列在一輪中怎麼長大。圖 2 畫的是控制流程，這裡畫的是每一步手上的資料。
+    </figcaption>
+</figure>
+
 <p>
     這段程式不理解「修 bug」或「查營收」。它只負責機械性的控制：呼叫模型、執行能力、保存結果、決定是否繼續。領域能力在
     tools；決策能力在 model；連續性在 messages。
@@ -128,7 +165,7 @@
 
 <aside class="note">
     <strong>閱讀原始碼</strong
-    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L706"
+    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L719"
         >TypeScript <code>Agent.runAgentLoop()</code></a
     >
     是這個閉環的 reference implementation。

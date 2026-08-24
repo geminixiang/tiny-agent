@@ -69,6 +69,20 @@ addEventListener("scroll", updateProgress, { passive: true });
 addEventListener("resize", updateProgress);
 updateProgress();
 
+document.querySelectorAll("figure.data-anim").forEach((figure) => {
+    const button = document.createElement("button");
+    button.className = "anim-toggle";
+    button.type = "button";
+    button.textContent = "⏸ 暫停動畫";
+    button.setAttribute("aria-pressed", "false");
+    button.addEventListener("click", () => {
+        const paused = figure.classList.toggle("paused");
+        button.textContent = paused ? "▶ 播放動畫" : "⏸ 暫停動畫";
+        button.setAttribute("aria-pressed", String(paused));
+    });
+    figure.append(button);
+});
+
 document.querySelectorAll("pre").forEach((pre) => {
     const button = document.createElement("button");
     button.className = "copy-button";

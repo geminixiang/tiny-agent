@@ -78,6 +78,38 @@
 → summary + retained message tail
 → 後續 model requests</code></pre>
 
+<figure class="data-anim" id="fig-07-compact-flow" aria-labelledby="fig-07-compact-flow-caption">
+    <ol class="anim-track">
+        <li class="anim-node s1">
+            <span class="anim-title">active context（壓縮前）</span>
+            <span class="anim-data"><span class="chip drop">e1</span><span class="chip drop">e2</span><span class="chip drop">…</span><span class="chip drop">eN-6</span><span class="chip keep">eN-5</span><span class="chip keep">…</span><span class="chip keep">eN</span></span>
+        </li>
+        <li class="anim-arrow a1" aria-hidden="true">→</li>
+        <li class="anim-node s2">
+            <span class="anim-title">找切點</span>
+            <span class="anim-data">保留最近 6 則 message，再往前推到 user boundary；找不到就放棄本次 compact</span>
+        </li>
+        <li class="anim-arrow a2" aria-hidden="true">→</li>
+        <li class="anim-node s3">
+            <span class="anim-title">model 產生 summary</span>
+            <span class="anim-data">切點之前的 entries（+ prior summary）→ 一則摘要文字</span>
+        </li>
+        <li class="anim-arrow a3" aria-hidden="true">→</li>
+        <li class="anim-node s4">
+            <span class="anim-title">寫入 compaction entry</span>
+            <span class="anim-data">summary + <span class="chip">compactedEntryIds</span><span class="chip">retainedEntryIds</span><span class="chip">sourceDigest</span>（原始 facts 仍在 append-only log）</span>
+        </li>
+        <li class="anim-arrow a4" aria-hidden="true">→</li>
+        <li class="anim-node s5">
+            <span class="anim-title">active context（壓縮後）</span>
+            <span class="anim-data"><span class="chip keep">summary</span><span class="chip keep">eN-5</span><span class="chip keep">…</span><span class="chip keep">eN</span> → 下一次 model request 只看這些</span>
+        </li>
+    </ol>
+    <figcaption id="fig-07-compact-flow-caption">
+        動圖 4：一次 <code>/compact</code> 的資料流。淡出的 chips 只是離開 active context，不是被刪除——它們永遠留在 durable log 中供稽核與 recovery。
+    </figcaption>
+</figure>
+
 <h2 id="two-boundaries">兩個容易混淆的邊界</h2>
 <figure id="fig-07-compaction" aria-labelledby="fig-07-compaction-caption">
     <table>
@@ -159,8 +191,10 @@
     以下練習完全使用 repository 的 deterministic tests，不需要 OpenRouter key。先觀察 cancellation 與 compaction 的
     production regression tests，再閱讀固定的 durable facts：
 </p>
-<pre data-lang="sh"><code>npm --prefix typescript test -- \
-  --test-name-pattern="abort|compaction"
+<pre data-lang="sh"><code>cd typescript
+node --import tsx --test \
+  --test-name-pattern="abort|compaction" tests/index.test.ts
+cd ..
 
 grep -R 'abortRequested\|compactionStarted\|sourceDigest' \
   schemas/session/fixtures schemas/session/planner-fixtures | head -40</code></pre>
@@ -176,7 +210,7 @@ grep -R 'abortRequested\|compactionStarted\|sourceDigest' \
 
 <aside class="note">
     <strong>閱讀原始碼</strong
-    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L929"
+    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L942"
         >durable <code>compact()</code></a
     >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/compaction-comparison.md"
         >主流 compaction 比較</a

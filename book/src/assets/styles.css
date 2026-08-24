@@ -165,9 +165,57 @@ figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem
     .chapter-footer a:last-child { text-align: left; }
 }
 
+/* Animated data-flow figures: pure CSS keyframes; JS only adds a pause toggle. */
+figure.data-anim { margin: 1.8rem 0; padding: 1.1rem 1.1rem 1.2rem; border: 1px solid var(--line); background: var(--bg); }
+figure.data-anim figcaption { margin-top: .65rem; color: var(--muted); font-size: .85rem; }
+.anim-track { display: flex; flex-wrap: wrap; align-items: stretch; gap: .5rem; list-style: none; margin: 0; padding: 0; }
+.anim-node { flex: 1 1 9.5rem; min-width: 9rem; padding: .7rem .85rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--paper); }
+.anim-title { display: block; font-weight: 700; font-size: .92rem; }
+.anim-data { display: block; margin-top: .35rem; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .76rem; line-height: 1.5; overflow-wrap: anywhere; }
+.anim-arrow { align-self: center; padding: 0 .1rem; color: var(--muted); }
+.data-anim .chip { display: inline-block; margin: .2rem .25rem 0 0; padding: .02rem .4rem; border: 1px solid var(--line); border-radius: .3rem; background: var(--soft); color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .72rem; }
+.data-anim .chip.keep { border-color: var(--accent); }
+.data-anim .chip.drop { text-decoration: line-through; animation: anim-chip-drop 9s infinite; }
+.anim-toggle { margin-top: .6rem; padding: .28rem .6rem; border: 1px solid var(--line); border-radius: .35rem; background: var(--paper); color: var(--muted); cursor: pointer; font-size: .75rem; }
+
+@keyframes anim-node-active {
+    0% { border-color: var(--line); background: var(--paper); box-shadow: none; }
+    4%, 16% { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--paper)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+    24%, 100% { border-color: var(--line); background: var(--paper); box-shadow: none; }
+}
+@keyframes anim-arrow-active {
+    0% { color: var(--muted); }
+    4%, 16% { color: var(--accent-strong); }
+    24%, 100% { color: var(--muted); }
+}
+@keyframes anim-chip-drop {
+    0%, 20% { opacity: 1; }
+    26%, 90% { opacity: .3; }
+    97%, 100% { opacity: 1; }
+}
+.anim-node.s1 { animation: anim-node-active 9s infinite; }
+.anim-node.s2 { animation: anim-node-active 9s infinite 1.5s; }
+.anim-node.s3 { animation: anim-node-active 9s infinite 3s; }
+.anim-node.s4 { animation: anim-node-active 9s infinite 4.5s; }
+.anim-node.s5 { animation: anim-node-active 9s infinite 6s; }
+.anim-node.s6 { animation: anim-node-active 9s infinite 7.5s; }
+.anim-arrow.a1 { animation: anim-arrow-active 9s infinite .75s; }
+.anim-arrow.a2 { animation: anim-arrow-active 9s infinite 2.25s; }
+.anim-arrow.a3 { animation: anim-arrow-active 9s infinite 3.75s; }
+.anim-arrow.a4 { animation: anim-arrow-active 9s infinite 5.25s; }
+.anim-arrow.a5 { animation: anim-arrow-active 9s infinite 6.75s; }
+.data-anim.paused .anim-node, .data-anim.paused .anim-arrow, .data-anim.paused .chip { animation-play-state: paused; }
+
+@media (max-width: 860px) {
+    .anim-track { flex-direction: column; }
+    .anim-arrow { transform: rotate(90deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
     html { scroll-behavior: auto; }
     *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+    .anim-node, .anim-arrow, .data-anim .chip { animation: none !important; }
+    .anim-toggle { display: none; }
 }
 
 @media (prefers-reduced-transparency: reduce) {
@@ -185,4 +233,7 @@ figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem
     pre { white-space: pre-wrap; break-inside: avoid; }
     h2, h3 { break-after: avoid; }
     .step-flow li, .decision-tree li { break-inside: avoid; }
+    .anim-toggle { display: none !important; }
+    .anim-node, .anim-arrow, .data-anim .chip { animation: none !important; }
+    figure.data-anim { break-inside: avoid; }
 }

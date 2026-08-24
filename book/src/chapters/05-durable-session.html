@@ -174,6 +174,38 @@
     load(): Promise&lt;SessionState&gt;;
     close(): Promise&lt;void&gt;;
 }</code></pre>
+<figure class="data-anim" id="fig-05-commit" aria-labelledby="fig-05-commit-caption">
+    <ol class="anim-track">
+        <li class="anim-node s1">
+            <span class="anim-title">NewFact[]</span>
+            <span class="anim-data">{kind:"record", type:"toolStarted", …}（還沒有 seq、沒有 ID）</span>
+        </li>
+        <li class="anim-arrow a1" aria-hidden="true">→</li>
+        <li class="anim-node s2">
+            <span class="anim-title">驗證 + 編號</span>
+            <span class="anim-data">檢查 reference 與 ownership；分配 <span class="chip keep">seq+1</span><span class="chip keep">UUIDv7</span><span class="chip keep">timestamp</span></span>
+        </li>
+        <li class="anim-arrow a2" aria-hidden="true">→</li>
+        <li class="anim-node s3">
+            <span class="anim-title">序列化成一行</span>
+            <span class="anim-data">[{…},{…}] + LF（整個 array 是一筆原子交易）</span>
+        </li>
+        <li class="anim-arrow a3" aria-hidden="true">→</li>
+        <li class="anim-node s4">
+            <span class="anim-title">append 到 OS</span>
+            <span class="anim-data">LF 落盤 → 這筆交易從此算數；半截尾巴重開時會被丟棄</span>
+        </li>
+        <li class="anim-arrow a4" aria-hidden="true">→</li>
+        <li class="anim-node s5">
+            <span class="anim-title">更新 memory state</span>
+            <span class="anim-data">順序不能反：先 durable，才更新記憶體</span>
+        </li>
+    </ol>
+    <figcaption id="fig-05-commit-caption">
+        動圖 3：<code>commit()</code> 裡面一筆交易的完整旅程——這些步驟全部藏在介面後面，呼叫方只看得到「一個陣列進去，一個陣列出來」。
+    </figcaption>
+</figure>
+
 <p>
     <code>commit</code> 隱藏 seq、IDs、timestamp、serialization 與 FIFO queue；<code>load</code> 隱藏 framing、torn-tail
     repair 與 pure reduction。刪除這個 module 會讓複雜度重新散回 agent loop，因此它是真正通過 deletion test 的 deep
@@ -197,7 +229,7 @@ node -e 'const b=require("fs").readFileSync(process.argv[1]); const i=b.lastInde
     test，確認修復後才能繼續 append：
 </p>
 <pre data-lang="sh"><code>cd typescript
-node --import tsx --test --test-name-pattern="repairs a torn tail" test/session.test.ts</code></pre>
+node --import tsx --test --test-name-pattern="repairs a torn tail" tests/session.test.ts</code></pre>
 <p>
     <code>--test-name-pattern</code> 必須放在檔案路徑之前，Node.js 的 test runner 才會實際過濾；放在
     <code>npm test --</code> 之後會被接到 glob 尾端而完全不生效，因此這裡直接呼叫

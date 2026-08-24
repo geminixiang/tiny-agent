@@ -69,10 +69,33 @@
     };
 }</code></pre>
 <p>Type assertion 只影響編譯器，不會移除 runtime 欄位。正確 seam 是：</p>
-<pre><code>provider wire shape
-→ validate + normalize
-→ canonical assistant message
-→ Agent / Session</code></pre>
+
+<figure class="data-anim" id="fig-02-normalize" aria-labelledby="fig-02-normalize-caption">
+    <ol class="anim-track">
+        <li class="anim-node s1">
+            <span class="anim-title">provider wire shape</span>
+            <span class="anim-data"><span class="chip keep">role</span><span class="chip keep">content</span><span class="chip keep">tool_calls</span><span class="chip drop">reasoning</span><span class="chip drop">refusal</span><span class="chip drop">annotations</span></span>
+        </li>
+        <li class="anim-arrow a1" aria-hidden="true">→</li>
+        <li class="anim-node s2">
+            <span class="anim-title">validate + normalize</span>
+            <span class="anim-data">逐欄檢查：role、content、每個 tool call 的 id / name / arguments；不合法 → throw</span>
+        </li>
+        <li class="anim-arrow a2" aria-hidden="true">→</li>
+        <li class="anim-node s3">
+            <span class="anim-title">canonical Message</span>
+            <span class="anim-data"><span class="chip keep">role</span><span class="chip keep">content</span><span class="chip keep">tool_calls</span>（provider 專屬欄位已丟棄）</span>
+        </li>
+        <li class="anim-arrow a3" aria-hidden="true">→</li>
+        <li class="anim-node s4">
+            <span class="anim-title">Agent / Session</span>
+            <span class="anim-data">只有乾淨的 canonical message 進入 transcript 與 durable log</span>
+        </li>
+    </ol>
+    <figcaption id="fig-02-normalize-caption">
+        動圖 2：provider 回應通過 normalization seam 時，哪些欄位存活、哪些被丟棄（划線肌漸淡的 chip）。
+    </figcaption>
+</figure>
 
 <h2 id="stop-reason">Stop Reason 也是狀態</h2>
 <p>不能只看「有沒有 tool calls」。Provider 的 <code>finish_reason</code> 至少要映射成：</p>
@@ -107,11 +130,16 @@ cacheHitRate = cacheRead / (input + cacheRead + cacheWrite)</code></pre>
     用既有的 offline regression test 重播真實 provider wire shape；它會加入 <code>reasoning</code>、<code>refusal</code>
     與額外 tool-call 欄位，然後確認 Session 只留下 canonical message：
 </p>
-<pre data-lang="sh"><code>npm --prefix typescript test -- \
-  --test-name-pattern="normalizes provider-only"
+<pre data-lang="sh"><code>cd typescript
+node --import tsx --test \
+  --test-name-pattern="normalizes provider-only" tests/index.test.ts
 
-npm --prefix typescript test -- \
-  --test-name-pattern="rejects malformed provider assistant"</code></pre>
+node --import tsx --test \
+  --test-name-pattern="rejects malformed provider assistant" tests/index.test.ts</code></pre>
+<p>
+    <code>--test-name-pattern</code> 必須放在檔案路徑之前，Node.js 的 test runner 才會實際過濾；接在
+    <code>npm test --</code> 後面會被接到 glob 尾端而完全不生效，會跑完整個 test suite。
+</p>
 <p>
     第一組應成功完成且可重新開啟 Session；第二組應保存一次 usage 與 failed outcome，而不是讓
     <code>INVALID_FACT</code> 洩漏到 CLI。接著閱讀 test 中的 mock response，逐欄標出哪些屬於 provider wire、哪些能進入
@@ -124,9 +152,9 @@ npm --prefix typescript test -- \
 
 <aside class="note">
     <strong>閱讀原始碼</strong
-    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L198"
+    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L188"
         >Provider message normalization：<code>normalizeAssistantMessage</code></a
-    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L659"
+    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L675"
         >OpenRouter call adapter：<code>callModel</code></a
     >。
 </aside>
