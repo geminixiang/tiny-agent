@@ -1,14 +1,6 @@
-import type { SessionState, ToolCallState } from "./session-reducer.js";
+import { SYNTHETIC_CONTENT, type SessionState, type SyntheticReason, type ToolCallState } from "./session-reducer.js";
 
-export const SYNTHETIC_CONTENT = {
-    invalidArguments: "Error: Tool arguments were invalid; the tool was not executed.",
-    unknownTool: "Error: Unknown tool; the tool was not executed.",
-    truncated: "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.",
-    aborted: "Operation aborted before execution.",
-    interrupted: "Operation interrupted after execution status became unknown; the tool was not replayed.",
-} as const;
-
-type SyntheticReason = keyof typeof SYNTHETIC_CONTENT;
+export { SYNTHETIC_CONTENT };
 export type CurrentTool = {
     name: string;
     definitionDigest: string;

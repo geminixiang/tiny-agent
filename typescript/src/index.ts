@@ -3,6 +3,7 @@ import { basename, dirname, resolve } from "node:path";
 import { canonicalDigest } from "./canonical-json.js";
 import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
 import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
+import type { ConfigurationSnapshot, ToolCall } from "./session-reducer.js";
 import {
     builtInTools,
     durableToolReplay,
@@ -44,7 +45,6 @@ type Message = {
     tool_call_id?: string;
     tool_calls?: ToolCall[];
 };
-type ToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
 type Skill = { name: string; description: string; path: string };
 export type Usage = {
     input: number;
@@ -91,15 +91,6 @@ export type RunEvent =
           durationMs: number;
       }
     | { type: "mcp.failed"; timestamp: string; server: string; stage: "connect"; cause: string };
-
-type ConfigurationSnapshot = {
-    model: string;
-    systemPromptDigest: string;
-    tools: { name: string; definitionDigest: string }[];
-    adapterIdentity: string;
-    routingIdentity: string;
-    outputOptionsDigest: string;
-};
 
 const digest = canonicalDigest;
 
