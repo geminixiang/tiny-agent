@@ -21,8 +21,21 @@ test("merges file values with defaults", async () => {
     });
 });
 
-test("environment host overrides the file host", async () => {
-    const path = await writeJson({ host: "0.0.0.0" });
-    const config = await loadConfig(path, { APP_HOST: "localhost" });
-    assert.equal(config.host, "localhost");
+test("environment values override and parse file values", async () => {
+    const path = await writeJson({ port: 8080, host: "0.0.0.0", features: ["file"] });
+    const config = await loadConfig(path, {
+        APP_PORT: "4321",
+        APP_HOST: "localhost",
+        APP_FEATURES: " alpha, beta ,, gamma ",
+    });
+    assert.deepEqual(config, {
+        port: 4321,
+        host: "localhost",
+        features: ["alpha", "beta", "gamma"],
+    });
+});
+
+test("rejects non-string feature entries", async () => {
+    const path = await writeJson({ features: ["ok", 3] });
+    await assert.rejects(() => loadConfig(path, {}), /features/i);
 });

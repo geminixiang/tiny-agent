@@ -2,7 +2,7 @@
 
 需求：
 - 回傳新的 tasks array，不修改原 array 或 task objects。
-- 指定 id 的 task 要改成 `completed: true`。
+- 指定 id 的 task 要改成 `completed: true`；只為該 task 建立新 object，其他 task 必須保留原本的 object reference。
 - 找不到 id 時丟出 `Error("Unknown task: <id>")`。
 - 保持現有功能正常。
 - 只修改 `src/tasks.js`；不要修改測試、`package.json` 或建立其他檔案。

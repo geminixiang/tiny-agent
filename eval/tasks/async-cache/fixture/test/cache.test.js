@@ -18,3 +18,24 @@ test("keeps different keys independent", async () => {
     assert.equal(await cached("a"), "a:1");
     assert.equal(await cached("b"), "b:2");
 });
+
+test("shares one pending load for concurrent calls", async () => {
+    let calls = 0;
+    let release;
+    const gate = new Promise((resolve) => {
+        release = resolve;
+    });
+    const cached = memoizeAsync(async (key) => {
+        calls += 1;
+        await gate;
+        return `value:${key}`;
+    });
+
+    const first = cached("same");
+    const second = cached("same");
+    await Promise.resolve();
+    assert.equal(calls, 1);
+    release();
+    assert.equal(await first, "value:same");
+    assert.equal(await second, "value:same");
+});
