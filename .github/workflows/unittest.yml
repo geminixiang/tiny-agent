@@ -1,0 +1,54 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    name: TypeScript and book
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      - run: npm ci --prefix typescript
+      - run: npm --prefix typescript test
+      - run: cd typescript && node --import tsx --test ../eval/run.test.ts
+      - run: npm --prefix book test
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv run --project python --python 3.14 python -m unittest discover -s python/tests
+
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: go/go.sum
+      - run: go -C go test ./...
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cd rust && cargo test --locked

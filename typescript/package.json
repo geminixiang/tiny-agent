@@ -11,7 +11,7 @@
         "build": "tsc",
         "prepare": "npm run build",
         "check": "tsc --noEmit",
-        "lint": "oxlint src test",
+        "lint": "oxlint src tests",
         "format": "oxfmt .",
         "format:check": "oxfmt --check .",
         "test": "node --import tsx --test tests/*.test.ts",
