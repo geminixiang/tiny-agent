@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -265,25 +266,23 @@ func (s *SessionStore) Commit(facts []map[string]any) error {
 	now := time.Now()
 	transaction := make([]map[string]any, len(facts))
 	for index, fact := range facts {
-		copy := make(map[string]any, len(fact)+3)
-		for key, value := range fact {
-			copy[key] = value
+		cloned := make(map[string]any, len(fact)+3)
+		maps.Copy(cloned, fact)
+		if _, exists := cloned["id"]; !exists {
+			cloned["id"] = uuid7(now.Add(time.Duration(index) * time.Nanosecond))
 		}
-		if _, exists := copy["id"]; !exists {
-			copy["id"] = uuid7(now.Add(time.Duration(index) * time.Nanosecond))
+		cloned["seq"] = s.nextSeq + index
+		if _, exists := cloned["timestamp"]; !exists {
+			cloned["timestamp"] = now.UnixMilli()
 		}
-		copy["seq"] = s.nextSeq + index
-		if _, exists := copy["timestamp"]; !exists {
-			copy["timestamp"] = now.UnixMilli()
-		}
-		transaction[index] = copy
+		transaction[index] = cloned
 	}
 	encoded, err := json.Marshal(transaction)
 	if err != nil {
 		return err
 	}
 	encoded = append(encoded, '\n')
-	candidate := append(append([]byte{}, s.data...), encoded...)
+	candidate := append(bytes.Clone(s.data), encoded...)
 	state, err := reduceSession(candidate)
 	if err != nil {
 		return err

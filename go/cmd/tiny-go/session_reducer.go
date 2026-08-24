@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -177,12 +179,8 @@ func sessionObject(v any, code string, line int, seq ...int) (map[string]any, er
 	return m, nil
 }
 func sessionExact(m map[string]any, keys ...string) bool {
-	allowed := map[string]bool{}
-	for _, k := range keys {
-		allowed[k] = true
-	}
-	for k := range m {
-		if !allowed[k] {
+	for key := range m {
+		if !slices.Contains(keys, key) {
 			return false
 		}
 	}
@@ -483,10 +481,10 @@ func sessionClone(s *sessionInternal) *sessionInternal {
 	n := *s
 	n.Transcript = append([]sessionMessage{}, s.Transcript...)
 	n.ActiveContext = append([]sessionMessage{}, s.ActiveContext...)
-	n.IDs = copyBool(s.IDs)
-	n.Reserved = copyString(s.Reserved)
-	n.Entries = copyEntries(s.Entries)
-	n.Records = copyRecords(s.Records)
+	n.IDs = maps.Clone(s.IDs)
+	n.Reserved = maps.Clone(s.Reserved)
+	n.Entries = maps.Clone(s.Entries)
+	n.Records = maps.Clone(s.Records)
 	n.Operations = map[string]*sessionOperationInfo{}
 	for k, v := range s.Operations {
 		x := *v
@@ -509,7 +507,7 @@ func sessionClone(s *sessionInternal) *sessionInternal {
 		x := *v
 		n.Tools[k] = &x
 	}
-	n.ToolPairs = copyBool(s.ToolPairs)
+	n.ToolPairs = maps.Clone(s.ToolPairs)
 	if s.Operation.Step != nil {
 		x := *s.Operation.Step
 		x.ConfigurationSnapshot.Tools = append([]sessionToolDeclaration{}, s.Operation.Step.ConfigurationSnapshot.Tools...)
@@ -519,34 +517,6 @@ func sessionClone(s *sessionInternal) *sessionInternal {
 	n.Operation.compactedEntryIDs = append([]string{}, s.Operation.compactedEntryIDs...)
 	n.Operation.retainedEntryIDs = append([]string{}, s.Operation.retainedEntryIDs...)
 	return &n
-}
-func copyBool(m map[string]bool) map[string]bool {
-	n := map[string]bool{}
-	for k, v := range m {
-		n[k] = v
-	}
-	return n
-}
-func copyString(m map[string]string) map[string]string {
-	n := map[string]string{}
-	for k, v := range m {
-		n[k] = v
-	}
-	return n
-}
-func copyEntries(m map[string]sessionEntryInfo) map[string]sessionEntryInfo {
-	n := map[string]sessionEntryInfo{}
-	for k, v := range m {
-		n[k] = v
-	}
-	return n
-}
-func copyRecords(m map[string]map[string]any) map[string]map[string]any {
-	n := map[string]map[string]any{}
-	for k, v := range m {
-		n[k] = v
-	}
-	return n
 }
 
 func sessionReserve(s *sessionInternal, v any, line, seq int, kind string) (string, error) {
@@ -1528,17 +1498,10 @@ func sessionApplyFact(s *sessionInternal, v any, line int) error {
 }
 func sessionAttachSeq(info sessionEntryInfo, seq int) sessionEntryInfo {
 	if info.Entry != nil {
-		info.Entry = copyAnyMap(info.Entry)
+		info.Entry = maps.Clone(info.Entry)
 		info.Entry["_seq"] = seq
 	}
 	return info
-}
-func copyAnyMap(m map[string]any) map[string]any {
-	n := map[string]any{}
-	for k, v := range m {
-		n[k] = v
-	}
-	return n
 }
 func sessionValidateTranscript(messages []sessionMessage, line, seq int) error {
 	pending := map[string]bool{}

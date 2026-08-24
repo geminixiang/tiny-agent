@@ -382,69 +382,54 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 		return nil, fmt.Errorf("MCP connect: %w", err)
 	}
 	mcp := &MCPClient{config: config, session: session, protocolVersion: session.InitializeResult().ProtocolVersion}
+	fail := func(err error) (*MCPClient, error) { _ = mcp.Close(); return nil, err }
 	listed, err := listAllMCPTools(ctx, session)
 	if err != nil {
-		_ = mcp.Close()
-		return nil, fmt.Errorf("MCP tools/list: %w", err)
+		return fail(fmt.Errorf("MCP tools/list: %w", err))
 	}
 	if len(listed.Tools) > maxMCPTools {
-		_ = mcp.Close()
-		return nil, fmt.Errorf("MCP server returned more than %d tools", maxMCPTools)
-	}
-	allowed := map[string]bool{}
-	for _, name := range config.AllowedTools {
-		allowed[name] = true
+		return fail(fmt.Errorf("MCP server returned more than %d tools", maxMCPTools))
 	}
 	endpointDigest := digestMCPIdentity(map[string]any{"endpoint": endpoint, "auth": config.AuthHeader, "protocol": mcp.protocolVersion})
 	seenRemote := map[string]bool{}
 	seenMapped := map[string]bool{}
 	for _, remote := range listed.Tools {
 		if seenRemote[remote.Name] {
-			_ = mcp.Close()
-			return nil, fmt.Errorf("duplicate MCP tool name: %s", remote.Name)
+			return fail(fmt.Errorf("duplicate MCP tool name: %s", remote.Name))
 		}
 		seenRemote[remote.Name] = true
 		if remote.Name == "" {
-			_ = mcp.Close()
-			return nil, errors.New("MCP tool name must not be empty")
+			return fail(errors.New("MCP tool name must not be empty"))
 		}
-		if config.AllowedToolsSet && !allowed[remote.Name] {
+		if config.AllowedToolsSet && !slices.Contains(config.AllowedTools, remote.Name) {
 			continue
 		}
 		schema, ok := remote.InputSchema.(map[string]any)
 		if !ok {
-			_ = mcp.Close()
-			return nil, fmt.Errorf("MCP tool inputSchema must be an object: %s", remote.Name)
+			return fail(fmt.Errorf("MCP tool inputSchema must be an object: %s", remote.Name))
 		}
 		if err := validateMCPToolSchema(schema, remote.Name); err != nil {
-			_ = mcp.Close()
-			return nil, err
+			return fail(err)
 		}
 		encoded, _ := json.Marshal(schema)
 		if len(encoded) > maxMCPSchemaBytes {
-			_ = mcp.Close()
-			return nil, fmt.Errorf("MCP tool schema exceeds 50KB: %s", remote.Name)
+			return fail(fmt.Errorf("MCP tool schema exceeds 50KB: %s", remote.Name))
 		}
 		if jsonDepth(schema) > maxMCPSchemaDepth {
-			_ = mcp.Close()
-			return nil, fmt.Errorf("MCP tool schema exceeds depth %d: %s", maxMCPSchemaDepth, remote.Name)
+			return fail(fmt.Errorf("MCP tool schema exceeds depth %d: %s", maxMCPSchemaDepth, remote.Name))
 		}
 		if containsXMCPHeader(schema) {
-			_ = mcp.Close()
-			return nil, fmt.Errorf("MCP tool x-mcp-header declarations are not supported: %s", remote.Name)
+			return fail(fmt.Errorf("MCP tool x-mcp-header declarations are not supported: %s", remote.Name))
 		}
 		if len([]byte(remote.Description)) > maxMCPDescription {
-			_ = mcp.Close()
-			return nil, fmt.Errorf("MCP tool description exceeds 8KB: %s", remote.Name)
+			return fail(fmt.Errorf("MCP tool description exceeds 8KB: %s", remote.Name))
 		}
 		mapped, err := mapMCPToolName(config.Alias, remote.Name)
 		if err != nil {
-			_ = mcp.Close()
-			return nil, err
+			return fail(err)
 		}
 		if seenMapped[mapped] {
-			_ = mcp.Close()
-			return nil, fmt.Errorf("duplicate mapped MCP tool name: %s", mapped)
+			return fail(fmt.Errorf("duplicate mapped MCP tool name: %s", mapped))
 		}
 		seenMapped[mapped] = true
 		remoteName := remote.Name
@@ -454,10 +439,9 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 		}})
 	}
 	if config.AllowedToolsSet {
-		for name := range allowed {
+		for _, name := range config.AllowedTools {
 			if !seenRemote[name] {
-				_ = mcp.Close()
-				return nil, fmt.Errorf("MCP allowlisted tool is missing: %s", name)
+				return fail(fmt.Errorf("MCP allowlisted tool is missing: %s", name))
 			}
 		}
 	}
@@ -585,20 +569,15 @@ func validateMCPToolSchema(schema map[string]any, toolName string) error {
 }
 
 func validateSharedSchema(schema map[string]any, path string, root bool) error {
-	allowed := map[string]bool{
-		"type": true, "properties": true, "required": true, "additionalProperties": true,
-		"items": true, "enum": true, "const": true, "oneOf": true,
-		"minimum": true, "maximum": true, "exclusiveMinimum": true, "exclusiveMaximum": true,
-		"minLength": true, "maxLength": true, "pattern": true, "minItems": true, "maxItems": true,
-	}
+	allowed := []string{"type", "properties", "required", "additionalProperties", "items", "enum", "const", "oneOf", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "pattern", "minItems", "maxItems"}
 	for key := range schema {
-		if !allowed[key] {
+		if !slices.Contains(allowed, key) {
 			return fmt.Errorf("unsupported schema keyword %s/%s", path, key)
 		}
 	}
 	if raw, ok := schema["type"]; ok {
 		typeName, valid := raw.(string)
-		if !valid || !map[string]bool{"object": true, "array": true, "string": true, "number": true, "integer": true, "boolean": true, "null": true}[typeName] {
+		if !valid || !slices.Contains([]string{"object", "array", "string", "number", "integer", "boolean", "null"}, typeName) {
 			return fmt.Errorf("%s/type must be a supported type string", path)
 		}
 	} else if root {

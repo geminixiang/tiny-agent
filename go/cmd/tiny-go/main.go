@@ -11,11 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -134,10 +135,7 @@ func formatToolEvent(e ToolEvent) string {
 }
 
 func loadProjectInstructions() string {
-	b, err := os.ReadFile(filepath.Join(cwd, "AGENTS.md"))
-	if err != nil {
-		return ""
-	}
+	b, _ := os.ReadFile(filepath.Join(cwd, "AGENTS.md"))
 	return string(b)
 }
 
@@ -167,7 +165,7 @@ func loadSkills(extra []string) ([]Skill, error) {
 		}
 		skills = append(skills, Skill{name, description, path})
 	}
-	sort.Slice(skills, func(i, j int) bool { return skills[i].Path < skills[j].Path })
+	slices.SortFunc(skills, func(a, b Skill) int { return strings.Compare(a.Path, b.Path) })
 	return skills, nil
 }
 
@@ -196,11 +194,7 @@ var toolDefinitions = []map[string]any{
 }
 
 func toolDefinition(name, description string, properties map[string]any) map[string]any {
-	required := make([]string, 0, len(properties))
-	for key := range properties {
-		required = append(required, key)
-	}
-	sort.Strings(required)
+	required := slices.Sorted(maps.Keys(properties))
 	return map[string]any{"type": "function", "function": map[string]any{"name": name, "description": description, "parameters": map[string]any{"type": "object", "properties": properties, "required": required}}}
 }
 
@@ -276,11 +270,9 @@ type cappedWriter struct {
 	exceeded chan struct{}
 }
 
-func newCappedWriter() *cappedWriter { return &cappedWriter{exceeded: make(chan struct{}, 1)} }
-func (w *cappedWriter) Len() int     { return w.buffer.Len() }
-func (w *cappedWriter) Bytes() []byte {
-	return w.buffer.Bytes()
-}
+func newCappedWriter() *cappedWriter   { return &cappedWriter{exceeded: make(chan struct{}, 1)} }
+func (w *cappedWriter) Len() int       { return w.buffer.Len() }
+func (w *cappedWriter) Bytes() []byte  { return w.buffer.Bytes() }
 func (w *cappedWriter) String() string { return w.buffer.String() }
 func (w *cappedWriter) Write(p []byte) (int, error) {
 	remaining := maxBashOutput - w.Len()
@@ -693,6 +685,10 @@ type keyEvent struct {
 	key byte
 	err error
 }
+type operationResult struct {
+	answer string
+	err    error
+}
 
 type crlfWriter struct{ io.Writer }
 
@@ -909,16 +905,10 @@ func (t *terminal) run(agent *Agent, operation func() (string, error)) (string, 
 	if t.old == nil {
 		return operation()
 	}
-	done := make(chan struct {
-		answer string
-		err    error
-	}, 1)
+	done := make(chan operationResult, 1)
 	go func() {
 		answer, err := operation()
-		done <- struct {
-			answer string
-			err    error
-		}{answer, err}
+		done <- operationResult{answer, err}
 	}()
 	for {
 		select {
@@ -984,9 +974,8 @@ func runCLI(args []string) error {
 	if len(selectedPlugins) == 0 {
 		selectedPlugins = []string{"bash", "read", "write", "edit"}
 	}
-	available := map[string]bool{"bash": true, "read": true, "write": true, "edit": true}
 	for _, plugin := range selectedPlugins {
-		if !available[plugin] {
+		if !slices.Contains([]string{"bash", "read", "write", "edit"}, plugin) {
 			return fmt.Errorf("Unknown plugin: %s. Available plugins: bash, read, write, edit", plugin)
 		}
 	}
