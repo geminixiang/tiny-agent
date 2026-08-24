@@ -263,7 +263,7 @@ async def execute_bash(command: str, cancelled: asyncio.Event) -> str:
         if process is not None: await kill_and_reap()
         if cancelled.is_set(): raise InterruptedError("Operation aborted") from None
         raise
-    except BaseException:
+    except Exception:
         if process is not None: await kill_and_reap()
         raise
     finally:
@@ -514,7 +514,12 @@ class Agent:
             self.on_tool({"phase": "start", "name": action["toolName"], "args": action["arguments"]})
             content = await tool["execute"](action["arguments"], cancelled) if "execute" in tool else await execute_tool(action["toolName"], action["arguments"], cancelled)
             result = {"type": "success"}
-        except BaseException as error:
+        except asyncio.CancelledError:
+            aborted = self._is_aborted(operation_id, cancelled)
+            if not aborted: raise
+            content = "Operation interrupted after execution status became unknown; the tool was not replayed."
+            result = {"type": "synthetic", "reason": "interrupted"}
+        except Exception as error:
             aborted = self._is_aborted(operation_id, cancelled)
             content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
             result = {"type": "synthetic", "reason": "interrupted"} if aborted else {"type": "error"}
@@ -588,7 +593,13 @@ class Agent:
                 step_id, attempt_id = self._attempt(operation_id, context_id)
             cancelled = self.begin(operation_id, "model")
             try: answer, usage, stop_reason = await self.call_model(self.messages, model_tools, cancelled)
-            except BaseException as error:
+            except asyncio.CancelledError:
+                aborted = self._is_aborted(operation_id, cancelled); self.end()
+                if not aborted: raise
+                self.session.append(record_fact(step_failed_record(operation_id, step_id, attempt_id, "aborted", "Operation aborted")))
+                self._finish(operation_id, "aborted")
+                return "Operation aborted."
+            except Exception as error:
                 aborted = self._is_aborted(operation_id, cancelled); self.end()
                 code = "aborted" if aborted else "model_error"
                 message = "Operation aborted" if aborted else str(error)
@@ -652,7 +663,12 @@ class Agent:
                         self.on_tool({"phase": "start", "name": name, "args": args})
                         content = await tool["execute"](args, cancelled) if "execute" in tool else await execute_tool(name, args, cancelled)
                         result_type = "success"
-                    except BaseException as error:
+                    except asyncio.CancelledError:
+                        aborted = self._is_aborted(operation_id, cancelled)
+                        if not aborted: raise
+                        content = "Operation interrupted after execution status became unknown; the tool was not replayed."
+                        result_type = "synthetic"
+                    except Exception as error:
                         aborted = self._is_aborted(operation_id, cancelled); content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
                         result_type = "synthetic" if aborted else "error"
                     if not aborted:
@@ -726,7 +742,13 @@ class Agent:
             ], None, cancelled)
             text = summary.get("content") or ""
             if stop_reason != "stop" or not text.strip(): raise RuntimeError("Model returned an invalid compaction summary")
-        except BaseException as error:
+        except asyncio.CancelledError:
+            aborted = self._is_aborted(operation_id, cancelled); self.end()
+            if not aborted: raise
+            self.session.append(record_fact(step_failed_record(operation_id, step_id, attempt_id, "aborted", "Operation aborted")))
+            self._finish(operation_id, "aborted", operation_kind="compaction")
+            return "Compaction aborted."
+        except Exception as error:
             aborted = self._is_aborted(operation_id, cancelled); self.end()
             code = "aborted" if aborted else "model_error"
             message = "Operation aborted" if aborted else str(error)

@@ -376,7 +376,10 @@ async def load_mcp_tools(config: McpConfig, cancelled: asyncio.Event | None = No
             missing = [name for name in client.config.allowed_tools or [] if name not in remote_names]
             if missing: raise RuntimeError(f"MCP allowed tools were not found: {', '.join(missing)}")
         return LoadedMcpTools(tools, client.protocol_version or "", client.close)
-    except BaseException:
+    except asyncio.CancelledError:
+        await client.close()
+        raise
+    except Exception:
         await client.close()
         raise
 
