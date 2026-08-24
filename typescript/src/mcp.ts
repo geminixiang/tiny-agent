@@ -2,12 +2,12 @@ import { Client, isInputRequiredResult, StreamableHTTPClientTransport } from "@m
 import { canonicalDigest } from "./canonical-json.js";
 import type { Tool } from "./tools.js";
 
-const MAX_RESULT_BYTES = 50 * 1024,
-    MAX_SCHEMA_BYTES = 50 * 1024,
-    MAX_DESCRIPTION_BYTES = 8 * 1024,
-    MAX_SCHEMA_DEPTH = 20,
-    MAX_TOOLS = 64,
-    CONFIG_KEYS = new Set(["alias", "url", "headers", "callTimeoutMs", "allowedTools"]);
+const MAX_RESULT_BYTES = 50 * 1024;
+const MAX_SCHEMA_BYTES = 50 * 1024;
+const MAX_DESCRIPTION_BYTES = 8 * 1024;
+const MAX_SCHEMA_DEPTH = 20;
+const MAX_TOOLS = 64;
+const CONFIG_KEYS = new Set(["alias", "url", "headers", "callTimeoutMs", "allowedTools"]);
 
 export type McpConfig = {
     alias: string;

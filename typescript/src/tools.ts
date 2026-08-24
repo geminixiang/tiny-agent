@@ -4,9 +4,9 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
-const run = promisify(exec),
-    root = process.cwd(),
-    MAX_TOOL_OUTPUT = 50 * 1024;
+const run = promisify(exec);
+const root = process.cwd();
+const MAX_TOOL_OUTPUT = 50 * 1024;
 
 type ToolEdit = { oldText: string; newText: string };
 
@@ -70,13 +70,13 @@ export function formatToolEvent({ phase, name, args, result }: ToolEvent) {
         if (result?.startsWith("Error:") || result === "Operation aborted") return `  └ ${result}`;
         return `  └ ${result === "ok" || result === "(no output)" ? result : `${result?.length ?? 0} chars`}`;
     }
-    const target = name === "bash" ? args.command : args.path,
-        suffix =
-            name === "write"
-                ? ` (${args.content?.length ?? 0} chars)`
-                : name === "edit"
-                  ? ` (${args.edits?.length ?? 0} blocks)`
-                  : "";
+    const target = name === "bash" ? args.command : args.path;
+    const suffix =
+        name === "write"
+            ? ` (${args.content?.length ?? 0} chars)`
+            : name === "edit"
+              ? ` (${args.edits?.length ?? 0} blocks)`
+              : "";
     return `◆ ${name}${target ? ` ${target.length > 80 ? target.slice(0, 77) + "..." : target}` : ""}${suffix}`;
 }
 
@@ -93,9 +93,9 @@ async function limitBashOutput(output: string, complete = true) {
     while (byteStart < buffer.length && (buffer[byteStart] & 0xc0) === 0x80) byteStart++;
     let tailLines = buffer.subarray(byteStart).toString().split("\n");
     if (tailLines.length > 2_000) tailLines = tailLines.slice(-2_000);
-    const tail = tailLines.join("\n"),
-        start = Math.max(1, lines.length - tailLines.length + 1),
-        path = resolve(root, ".tiny-agent/tool-output", `${randomUUID()}.log`);
+    const tail = tailLines.join("\n");
+    const start = Math.max(1, lines.length - tailLines.length + 1);
+    const path = resolve(root, ".tiny-agent/tool-output", `${randomUUID()}.log`);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, output);
     const label = complete ? "Full output" : "Captured output; command exceeded the 10MB safety cap";
@@ -122,12 +122,12 @@ const bashTool: Tool = {
     },
     async execute(args, signal) {
         if (signal?.aborted) throw Error("Operation aborted");
-        const command = requiredString(args.command, "command"),
-            timeout = args.timeout ?? 120;
+        const command = requiredString(args.command, "command");
+        const timeout = args.timeout ?? 120;
         if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0)
             throw Error("timeout must be a positive number of seconds");
-        let stdout = "",
-            stderr = "";
+        let stdout = "";
+        let stderr = "";
         try {
             ({ stdout, stderr } = await run(command, {
                 cwd: root,
@@ -184,9 +184,9 @@ function readLines(text: string, offset = 1, limit = 2_000) {
 
 const trustedReadExecute: Tool["execute"] = async (args, signal) => {
     if (signal?.aborted) throw Error("Operation aborted");
-    const path = requiredString(args.path, "path"),
-        offset = optionalPositiveInteger(args.offset, "offset"),
-        limit = optionalPositiveInteger(args.limit, "limit");
+    const path = requiredString(args.path, "path");
+    const offset = optionalPositiveInteger(args.offset, "offset");
+    const limit = optionalPositiveInteger(args.limit, "limit");
     const text = await readFile(resolvePath(path), { encoding: "utf8", signal });
     return readLines(text, offset, limit);
 };
@@ -267,15 +267,15 @@ const editTool: Tool = {
     },
     async execute(args, signal) {
         if (signal?.aborted) throw Error("Operation aborted");
-        const requestedPath = requiredString(args.path, "path"),
-            edits = requiredEdits(args.edits),
-            path = resolvePath(requestedPath);
-        const original = await readFile(path, { encoding: "utf8", signal }),
-            bom = original.startsWith("\uFEFF"),
-            text = bom ? original.slice(1) : original,
-            ending = text.match(/\r\n|\n/)?.[0] ?? "\n";
-        let normalized = "",
-            source = 0;
+        const requestedPath = requiredString(args.path, "path");
+        const edits = requiredEdits(args.edits);
+        const path = resolvePath(requestedPath);
+        const original = await readFile(path, { encoding: "utf8", signal });
+        const bom = original.startsWith("\uFEFF");
+        const text = bom ? original.slice(1) : original;
+        const ending = text.match(/\r\n|\n/)?.[0] ?? "\n";
+        let normalized = "";
+        let source = 0;
         const positions = [0];
         while (source < text.length) {
             if (text.startsWith("\r\n", source)) {
@@ -289,8 +289,8 @@ const editTool: Tool = {
         const ranges = edits.map((edit, index) => {
             const oldText = edit.oldText.replace(/\r\n/g, "\n");
             if (!oldText) throw Error(`edits[${index}].oldText must not be empty`);
-            const start = normalized.indexOf(oldText),
-                second = start < 0 ? -1 : normalized.indexOf(oldText, start + 1);
+            const start = normalized.indexOf(oldText);
+            const second = start < 0 ? -1 : normalized.indexOf(oldText, start + 1);
             if (start < 0) throw Error(`edits[${index}].oldText was not found in ${requestedPath}.`);
             if (second >= 0)
                 throw Error(`edits[${index}].oldText occurs more than once in ${requestedPath}; add more context.`);
