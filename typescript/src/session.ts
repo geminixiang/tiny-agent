@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, readdir, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { environmentIdentityOverride } from "./env.js";
 import { reduceSession, type SessionState } from "./session-reducer.js";
 
 export type SessionFact = Record<string, unknown>;
@@ -13,7 +14,7 @@ const writers = new Set<string>();
 export function uuid7(now = Date.now()) { const bytes = randomBytes(16); let time = BigInt(now); for (let index = 5; index >= 0; index--) { bytes[index] = Number(time & 0xffn); time >>= 8n; } bytes[6] = (bytes[6] & 15) | 0x70; bytes[8] = (bytes[8] & 63) | 0x80; const hex = bytes.toString("hex"); return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`; }
 
 export async function environmentIdentity(cwd: string) {
-    return process.env.TINY_AGENT_ENVIRONMENT_IDENTITY?.trim() || (await realpath(cwd));
+    return environmentIdentityOverride() || (await realpath(cwd));
 }
 
 function countFacts(bytes: Uint8Array) {
