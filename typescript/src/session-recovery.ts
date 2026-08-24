@@ -1,12 +1,13 @@
-import { SYNTHETIC_CONTENT, type SessionState, type SyntheticReason, type ToolCallState } from "./session-reducer.js";
+import {
+    SYNTHETIC_CONTENT,
+    type ConfigurationTool,
+    type SessionState,
+    type SyntheticReason,
+    type ToolCallState,
+} from "./session-reducer.js";
 
 export { SYNTHETIC_CONTENT };
-export type CurrentTool = {
-    name: string;
-    definitionDigest: string;
-    replay: "safe" | "never";
-    replayKey: string;
-};
+export type CurrentTool = ConfigurationTool & { replay: "safe" | "never"; replayKey: string };
 export type CurrentConfiguration = {
     configurationDigest: string;
     environmentIdentity: string;

@@ -1,4 +1,4 @@
-import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { Client, isInputRequiredResult, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { canonicalDigest } from "./canonical-json.js";
 import type { Tool } from "./tools.js";
 
@@ -87,7 +87,7 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
                             allowInputRequired: true,
                         },
                     );
-                    if (isInputRequired(result)) {
+                    if (isInputRequiredResult(result)) {
                         throw Error("MCP tool requires additional user input; input_required is not supported");
                     }
                     const normalized = normalizeResult(result);
@@ -197,9 +197,6 @@ function mapToolName(alias: string, remoteName: string) {
     if (name.length > 64) throw Error(`mapped MCP tool name exceeds 64 characters: ${remoteName}`);
     return name;
 }
-
-// prettier-ignore
-function isInputRequired(result: unknown) { return result !== null && typeof result === "object" && "resultType" in result && result.resultType === "input_required"; }
 
 function normalizeResult(result: {
     content?: Array<{
