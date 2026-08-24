@@ -12,9 +12,10 @@ import unicodedata
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from .agent import Agent, DEFAULT_MODEL, TOOL_DEFINITIONS, format_tool_event, format_usage, load_project_instructions, load_skills
+from .agent import Agent, TOOL_DEFINITIONS, format_tool_event, format_usage, load_project_instructions, load_skills
 from .session import Session
 from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases, split_names
+from .settings import Settings
 
 PLUGIN_NAMES = tuple(tool["function"]["name"] for tool in TOOL_DEFINITIONS)
 class Terminal:
@@ -124,7 +125,7 @@ async def run_cli(argv: list[str] | None = None) -> int:
             agent.on_tool = show_tool
             restored = "\nrestored: yes" if args.session else ""
             names = ", ".join(display_tool_name(tool["function"]["name"]) for tool in tools) or "(none)"
-            print(f"\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {os.getenv('TINY_MODEL') or DEFAULT_MODEL}\nsession: {session.id}\npath: {session.path}\ntools: {names}\nmcp: {', '.join(aliases) or '(none)'}{restored}")
+            print(f"\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {Settings().tiny_model}\nsession: {session.id}\npath: {session.path}\ntools: {names}\nmcp: {', '.join(aliases) or '(none)'}{restored}")
             resume = lambda: print(f"\nResume: tiny-py --session {session.id}")
             try:
                 with Terminal() as terminal:

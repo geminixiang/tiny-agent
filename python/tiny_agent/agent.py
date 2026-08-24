@@ -15,8 +15,8 @@ from .http import close_writer, read_http_response, remaining, wait_owned
 from .session import Session, environment_identity, uuid7
 from .session_recovery import plan_recovery
 from .session_reducer import configuration_digest, source_digest
+from .settings import DEFAULT_MODEL, Settings
 
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MAX_BASH_OUTPUT = 10 * 1024 * 1024
 BASH_TIMEOUT_SECONDS = 120
@@ -291,7 +291,7 @@ class Agent:
             function = tool["function"]
             definition = json.dumps({key: function[key] for key in ("name", "description", "parameters")}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             declarations.append({"name": function["name"], "definitionDigest": digest(definition)})
-        model = os.getenv("TINY_MODEL") or DEFAULT_MODEL
+        model = Settings().tiny_model
         return {
             "model": model, "systemPromptDigest": digest(prompt), "tools": declarations,
             "adapterIdentity": "openrouter:chat-completions:v1", "routingIdentity": f"openrouter:{model}",
@@ -488,14 +488,14 @@ class Agent:
         return await self._run_operation(operation_id, action["contextThroughEntryId"], action)
 
     async def call_model(self, messages: list[dict], tools: list | None, cancelled: asyncio.Event) -> tuple[dict, dict, str]:
-        key = os.getenv("OPENROUTER_API_KEY")
+        settings = Settings(); key = settings.openrouter_api_key
         if not key: raise RuntimeError("Set OPENROUTER_API_KEY")
-        body = {"model": os.getenv("TINY_MODEL") or DEFAULT_MODEL, "messages": messages, **({"tools": tools} if tools else {})}
+        body = {"model": settings.tiny_model, "messages": messages, **({"tools": tools} if tools else {})}
         if self.requester:
             data = await self.requester(body, cancelled)
         else:
             data = await _post_json(OPENROUTER_URL, body, {
-                "Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                "Authorization": f"Bearer {key.get_secret_value()}", "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com/geminixiang/tiny-agent",
             }, 120, cancelled)
         raw_usage = data.get("usage", {}); details = raw_usage.get("prompt_tokens_details", {})

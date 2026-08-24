@@ -4,15 +4,16 @@ import asyncio
 import base64
 import json
 import math
-import os
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable
 from urllib.parse import urlsplit
 
 from .http import close_writer, read_http_response_headers, remaining
+from .settings import Settings
 
 MAX_RESULT_BYTES = 50 * 1024
 MAX_SCHEMA_BYTES = 50 * 1024
@@ -53,11 +54,12 @@ def split_names(values: list[str] | None) -> list[str]:
 split_mcp_aliases = split_names
 
 
-def load_mcp_configs(aliases: list[str], env: dict[str, str] | os._Environ[str] | None = None) -> list[McpConfig]:
+def load_mcp_configs(aliases: list[str], env: Mapping[str, str] | None = None) -> list[McpConfig]:
     if not aliases: return []
-    env = os.environ if env is None else env
-    if not env.get("TINY_MCP_CONFIG"): raise ValueError("TINY_MCP_CONFIG must be set to use --mcp")
-    path = Path(env["TINY_MCP_CONFIG"]).resolve()
+    settings = Settings(); env = settings.environment if env is None else env
+    configured_path = settings.tiny_mcp_config if env is settings.environment else env.get("TINY_MCP_CONFIG")
+    if not configured_path: raise ValueError("TINY_MCP_CONFIG must be set to use --mcp")
+    path = Path(configured_path).resolve()
     try: value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): raise ValueError("Failed to load MCP catalog: file is missing, unreadable, or invalid JSON") from None
     catalog = _validate_catalog(value)

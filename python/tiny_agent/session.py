@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .session_reducer import reduce_session
+from .settings import Settings
 
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 ROOT = Path.cwd().resolve()
 _WRITERS: set[Path] = set()
 _WRITERS_LOCK = threading.Lock()
@@ -26,7 +26,7 @@ def uuid7(now_ms: int | None = None) -> str:
 
 
 def environment_identity(cwd: Path = ROOT) -> str:
-    override = os.getenv("TINY_AGENT_ENVIRONMENT_IDENTITY", "").strip()
+    override = Settings().tiny_agent_environment_identity.strip()
     return override or str(cwd.resolve())
 
 
@@ -51,7 +51,7 @@ class Session:
         header = {
             "kind": "header", "version": 2, "id": session_id,
             "createdAt": int(now.timestamp() * 1000), "cwd": str(cwd.resolve()),
-            "provider": "openrouter", "model": os.getenv("TINY_MODEL") or DEFAULT_MODEL,
+            "provider": "openrouter", "model": Settings().tiny_model,
             "environmentIdentity": environment_identity(cwd),
         }
         data = (json.dumps(header, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
