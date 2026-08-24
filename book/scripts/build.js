@@ -33,6 +33,7 @@ function layout({ title, description, path, current = "", body, assets, type = "
 <title>${escape(title)}｜tiny-agent Book</title>
 <meta name="description" content="${escape(description)}">
 <link rel="canonical" href="${canonical}">
+<link rel="icon" type="image/png" sizes="64x64" href="/assets/${assets.favicon}">
 <meta property="og:type" content="${type === "home" ? "website" : "article"}">
 <meta property="og:title" content="${escape(title)}｜tiny-agent Book">
 <meta property="og:description" content="${escape(description)}">
@@ -101,14 +102,20 @@ function homePage(assets) {
 async function main() {
     await rm(out, { recursive: true, force: true });
     await mkdir(join(out, "assets"), { recursive: true });
-    const [cssContent, jsContent] = await Promise.all([
+    const [cssContent, jsContent, faviconContent] = await Promise.all([
         readFile(join(bookRoot, "src/assets/styles.css"), "utf8"),
         readFile(join(bookRoot, "src/assets/book.js"), "utf8"),
+        readFile(join(bookRoot, "src/assets/favicon.png")),
     ]);
-    const assets = { css: `styles.${hash(cssContent)}.css`, js: `book.${hash(jsContent)}.js` };
+    const assets = {
+        css: `styles.${hash(cssContent)}.css`,
+        js: `book.${hash(jsContent)}.js`,
+        favicon: `favicon.${hash(faviconContent)}.png`,
+    };
     await Promise.all([
         writeFile(join(out, "assets", assets.css), cssContent),
         writeFile(join(out, "assets", assets.js), jsContent),
+        writeFile(join(out, "assets", assets.favicon), faviconContent),
         writeFile(join(out, "index.html"), homePage(assets)),
     ]);
     for (const [index, chapter] of chapters.entries()) {

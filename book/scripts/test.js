@@ -44,6 +44,7 @@ for (const file of htmlFiles) {
 const generatedAssets = [...assets].filter((path) => path.startsWith("/assets/"));
 const cssAsset = generatedAssets.find((path) => /^\/assets\/styles\.[a-f0-9]{12}\.css$/.test(path));
 const jsAsset = generatedAssets.find((path) => /^\/assets\/book\.[a-f0-9]{12}\.js$/.test(path));
+const faviconAsset = generatedAssets.find((path) => /^\/assets\/favicon\.[a-f0-9]{12}\.png$/.test(path));
 
 test("chapter registry is unique and complete", () => {
     assert.equal(new Set(chapters.map((chapter) => chapter.slug)).size, chapters.length);
@@ -70,11 +71,13 @@ test("build emits Cloudflare Pages files and content-hashed assets", async () =>
     }
     assert.ok(cssAsset, "hashed CSS asset");
     assert.ok(jsAsset, "hashed JavaScript asset");
-    assert.equal(generatedAssets.length, 2);
+    assert.ok(faviconAsset, "hashed favicon asset");
+    assert.equal(generatedAssets.length, 3);
     assert.equal(pages.size, chapters.length + 2);
     for (const html of pages.values()) {
         assert.match(html, new RegExp(`<link rel="stylesheet" href="${cssAsset}">`));
         assert.match(html, new RegExp(`<script src="${jsAsset}" defer></script>`));
+        assert.match(html, new RegExp(`<link rel="icon" type="image/png" sizes="64x64" href="${faviconAsset}">`));
         assert.doesNotMatch(html, /<script(?:\s[^>]*)?>\s*[^<]/);
     }
 });
