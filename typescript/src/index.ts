@@ -1,6 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { canonicalDigest } from "./canonical-json.js";
+import { MODEL, requireOpenRouterApiKey } from "./env.js";
 import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
 import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
 import type { ConfigurationSnapshot, ToolCall } from "./session-reducer.js";
@@ -37,7 +38,7 @@ export {
     type ToolEvent,
 } from "./tools.js";
 
-export const MODEL = process.env.TINY_MODEL || "deepseek/deepseek-v4-flash-0731";
+export { MODEL };
 const root = process.cwd();
 type Message = {
     role: "system" | "user" | "assistant" | "tool";
@@ -657,8 +658,7 @@ ${list}
         return assistant.tool_calls![toolIndex].id;
     }
     async callModel(messages = this.messages, tools: unknown = toolDefinitions(this.tools), signal?: AbortSignal) {
-        const key = process.env.OPENROUTER_API_KEY;
-        if (!key) throw Error("Set OPENROUTER_API_KEY");
+        const key = requireOpenRouterApiKey();
         const body = { model: MODEL, messages, ...(tools ? { tools } : {}) };
         const r = await this.fetcher("https://openrouter.ai/api/v1/chat/completions", {
             method: "POST",

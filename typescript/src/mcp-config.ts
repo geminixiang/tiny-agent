@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { requireMcpConfigPath, systemEnv } from "./env.js";
 import { validateNonemptyStringArray, type McpConfig } from "./mcp.js";
 
 const ROOT_KEYS = new Set(["servers"]),
@@ -19,10 +20,9 @@ export type McpServerCatalog = {
     >;
 };
 
-export async function loadMcpConfigs(aliases: string[], env: NodeJS.ProcessEnv = process.env): Promise<McpConfig[]> {
+export async function loadMcpConfigs(aliases: string[], env: NodeJS.ProcessEnv = systemEnv): Promise<McpConfig[]> {
     if (!aliases.length) return [];
-    if (!env.TINY_MCP_CONFIG) throw Error("TINY_MCP_CONFIG must be set to use --mcp");
-    const path = resolve(env.TINY_MCP_CONFIG);
+    const path = resolve(requireMcpConfigPath(env));
     let value: unknown;
     try {
         value = JSON.parse(await readFile(path, "utf8"));
