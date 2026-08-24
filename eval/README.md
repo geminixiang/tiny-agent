@@ -40,6 +40,48 @@ Only compare results with the same task Spec. Prompt or verifier changes create 
 
 <!-- EVAL_RUNS -->
 
+## 2026-08-24T18:21:57.200Z
+
+Commit: `3d9640753e9b` · Platform: `darwin-arm64` · Node: `v24.14.1`
+
+### Summary
+
+| Agent | Model | Passed | Pass rate | Median time | Median tokens | Median tools |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| tiny-ts | deepseek/deepseek-v4-flash-0731 | 4/6 | 66.7% | 28.9s | 4349 | 6.5 |
+| tiny-go | deepseek/deepseek-v4-flash-0731 | 6/6 | 100.0% | 15.5s | 3632 | 5.5 |
+| tiny-py | deepseek/deepseek-v4-flash-0731 | 6/6 | 100.0% | 22.7s | 3521 | 6 |
+| tiny-rs | deepseek/deepseek-v4-flash-0731 | 5/6 | 83.3% | 18.8s | 3307 | 5 |
+
+### Tasks
+
+| Task | Spec | Agent | Model | Result | Time | Input | Output | Cache read | Cache write | Tools | Detail |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| add-feature | `0f8d6aacf51b` | tiny-ts | deepseek/deepseek-v4-flash-0731 | FAIL | 61.0s | 5088 | 2191 | 27136 | 0 | 10 | ✔ returns only active tasks (0.495042ms) ✔ completeTask marks task completed without mutation (0.09ms) ✔ completeTask throws on unknown id (0.139375ms) ℹ tests 3 ℹ suites 0 ℹ pass 3 ℹ fail 0 ℹ cancelled 0 ℹ skipped 0 ℹ todo 0 ℹ duration_ms 34.54725 diff --git a/test/tasks.test.js b/test/tasks.test.js index 81c7616..590ed19 100644 --- a/test/tasks.test.js +++ b/test/tasks.test.js @@ -1,6 +1,6 @@  import test from "node:test";  import assert from "node:assert/strict"; -import { activeTasks } from "../src/tasks.js"; +import { activeTasks, completeTask } from "../src/tasks.js";    test("returns only active tasks", () => {      const tasks = [ @@ -9,3 +9,21 @@ test("returns only active tasks", () => {      ];      assert.deepEqual(activeTasks(tasks), [tasks[0]]);  }); + +test("completeTask marks task completed without mutation", () => { +    const tasks = [ +        { id: "a", title: "Alpha", completed: false }, +        { id: "b", title: "Beta", completed: false }, +    ]; +    const original = tasks.map((t) => ({ ...t })); +    const result = completeTask(tasks, "a"); +    assert.equal(result[0].completed, true); +    assert.deepEqual(tasks, original); +    assert.equal(result[1], tasks[1]); +    assert.notEqual(result[0], original[0]); +}); + +test("completeTask throws on unknown id", () => { +    const tasks = [{ id: "a", title: "Alpha", completed: false }]; +    assert.throws(() => completeTask(tasks, "zzz"), /Unknown task: zzz/); +}); |
+| add-feature | `0f8d6aacf51b` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 6.9s | 6736 | 706 | 1024 | 0 | 5 |  |
+| add-feature | `0f8d6aacf51b` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 24.2s | 5507 | 1181 | 4864 | 0 | 7 |  |
+| add-feature | `0f8d6aacf51b` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 20.7s | 1778 | 760 | 7936 | 0 | 6 |  |
+| async-cache | `e8a6ec21d892` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 27.9s | 3115 | 1186 | 8704 | 0 | 7 |  |
+| async-cache | `e8a6ec21d892` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 13.2s | 10825 | 2017 | 5376 | 0 | 8 |  |
+| async-cache | `e8a6ec21d892` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 48.8s | 8364 | 1791 | 16896 | 0 | 13 |  |
+| async-cache | `e8a6ec21d892` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 53.6s | 4618 | 2216 | 20480 | 0 | 9 |  |
+| config-loader | `abc0206f5793` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 51.1s | 8854 | 2233 | 11264 | 0 | 6 |  |
+| config-loader | `abc0206f5793` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 22.6s | 2176 | 1220 | 5376 | 0 | 6 |  |
+| config-loader | `abc0206f5793` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 16.7s | 2605 | 936 | 5120 | 0 | 5 |  |
+| config-loader | `abc0206f5793` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 13.9s | 3110 | 830 | 6656 | 0 | 4 |  |
+| fix-bug | `14237efa45fb` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 22.9s | 2322 | 819 | 7168 | 0 | 5 |  |
+| fix-bug | `14237efa45fb` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 16.5s | 1978 | 897 | 4352 | 0 | 5 |  |
+| fix-bug | `14237efa45fb` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 15.0s | 1852 | 641 | 3584 | 0 | 5 |  |
+| fix-bug | `14237efa45fb` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 17.0s | 2383 | 724 | 5632 | 0 | 5 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 22.1s | 3666 | 672 | 4864 | 0 | 4 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 18.5s | 2034 | 881 | 6912 | 0 | 8 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 21.1s | 2920 | 563 | 2304 | 0 | 4 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 13.6s | 1920 | 505 | 3840 | 0 | 3 |  |
+| session-summary | `9921736b1f76` | tiny-ts | deepseek/deepseek-v4-flash-0731 | FAIL | 30.0s | 3305 | 1054 | 12032 | 0 | 8 | node:internal/modules/run_main:107     triggerUncaughtException(     ^  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal: + actual - expected    {     byType: {       message: 1,       started: 1,       tool: 3     },     durationMs: 160, +   lastError: { +     at: 250, +     error: 'second failure', +     ok: false, +     type: 'tool' +   }, -   lastError: 'second failure',     toolFailures: 2,     total: 5   }      at file:///Users/geminixiang/github/tiny-agent/eval/tasks/session-summary/verify.mjs:25:8 {   generatedMessage: true,   code: 'ERR_ASSERTION',   actual: {     total: 5,     byType: { started: 1, tool: 3, message: 1 },     durationMs: 160,     toolFailures: 2,     lastError: { type: 'tool', at: 250, ok: false, error: 'second failure' }   },   expected: {     total: 5,     byType: { started: 1, tool: 3, message: 1 },     durationMs: 160,     toolFailures: 2,     lastError: 'second failure'   },   operator: 'deepStrictEqual',   diff: 'simple' }  Node.js v24.14.1 |
+| session-summary | `9921736b1f76` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 14.5s | 2902 | 965 | 7168 | 0 | 5 |  |
+| session-summary | `9921736b1f76` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 24.2s | 2389 | 1111 | 7680 | 0 | 7 |  |
+| session-summary | `9921736b1f76` | tiny-rs | deepseek/deepseek-v4-flash-0731 | FAIL | 25.4s | 2581 | 926 | 6656 | 0 | 5 | node:internal/modules/run_main:107     triggerUncaughtException(     ^  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal: + actual - expected    {     byType: {       message: 1,       started: 1,       tool: 3     },     durationMs: 160, +   lastError: { +     at: 250, +     error: 'second failure', +     ok: false, +     type: 'tool' +   }, -   lastError: 'second failure',     toolFailures: 2,     total: 5   }      at file:///Users/geminixiang/github/tiny-agent/eval/tasks/session-summary/verify.mjs:25:8 {   generatedMessage: true,   code: 'ERR_ASSERTION',   actual: {     total: 5,     byType: { started: 1, tool: 3, message: 1 },     durationMs: 160,     toolFailures: 2,     lastError: { type: 'tool', at: 250, ok: false, error: 'second failure' }   },   expected: {     total: 5,     byType: { started: 1, tool: 3, message: 1 },     durationMs: 160,     toolFailures: 2,     lastError: 'second failure'   },   operator: 'deepStrictEqual',   diff: 'simple' }  Node.js v24.14.1 |
+
 ### Legacy runs
 
 Runs below predate the full measurement contract and do not contain commit, model, platform, or task Spec metadata.

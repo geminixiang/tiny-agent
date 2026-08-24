@@ -316,6 +316,7 @@ async function main() {
     if (!process.env.OPENROUTER_API_KEY)
         throw new Error("Set OPENROUTER_API_KEY before running evals.");
 
+    const metadata = await runMetadata();
     const results: Result[] = [];
     for (const task of tasks) {
         for (const agent of agents) {
@@ -335,7 +336,7 @@ async function main() {
         );
         if (result.detail) console.log(`  ${result.detail.split("\n").at(-1)}`);
     }
-    await writeResultsMarkdown(results, await runMetadata());
+    await writeResultsMarkdown(results, metadata);
     console.log(`\nWrote eval/README.md`);
     if (results.some((result) => !result.passed)) process.exitCode = 1;
 }
