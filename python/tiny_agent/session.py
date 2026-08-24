@@ -5,6 +5,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
@@ -18,9 +19,16 @@ _WRITERS_LOCK = threading.Lock()
 
 
 def uuid7(now_ms: int | None = None) -> str:
-    value = bytearray(secrets.token_bytes(16)); value[:6] = (now_ms or time.time_ns() // 1_000_000).to_bytes(6, "big")
-    value[6] = value[6] & 0x0F | 0x70; value[8] = value[8] & 0x3F | 0x80
-    h = value.hex(); return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+    if now_ms is None:
+        return str(uuid.uuid7())
+
+    value = bytearray(secrets.token_bytes(16))
+    value[:6] = now_ms.to_bytes(6, "big")
+    value[6] = (value[6] & 0x0F) | 0x70
+    value[8] = (value[8] & 0x3F) | 0x80
+
+    encoded = value.hex()
+    return f"{encoded[:8]}-{encoded[8:12]}-{encoded[12:16]}-{encoded[16:20]}-{encoded[20:]}"
 
 
 def environment_identity(cwd: Path = ROOT) -> str:
