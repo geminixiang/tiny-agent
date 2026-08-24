@@ -1,0 +1,11 @@
+修正 `src/cache.js` 的 `memoizeAsync(load, options)`。
+
+需求：
+- 同一個 key 在快取有效期限內只呼叫一次 `load`。
+- 同一個 key 的並行呼叫必須共享同一個 pending Promise，而不是同時呼叫 `load` 多次。
+- 不同 key 不互相影響。
+- `ttlMs` 到期後要重新載入。
+- `load` reject 時不要快取失敗結果；下一次呼叫應該重試。
+- 不要修改測試或 `package.json`。
+
+完成後執行測試，並簡短說明結果。

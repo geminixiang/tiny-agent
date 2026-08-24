@@ -1,0 +1,11 @@
+改進 `src/config.js` 的 `loadConfig(path, env)`。
+
+需求：
+- 讀取 JSON 檔，和預設值合併：`port: 3000`、`host: "127.0.0.1"`、`features: []`。
+- 環境變數可覆蓋設定：`APP_PORT`、`APP_HOST`、`APP_FEATURES`。
+- `APP_FEATURES` 是逗號分隔字串，要 trim 每個項目並忽略空項目。
+- 驗證最終設定：`port` 必須是 1 到 65535 的整數；`host` 必須是非空字串；`features` 必須是 string array。
+- 驗證失敗時丟出清楚的 `Error`，訊息要包含欄位名稱。
+- 不要修改測試或 `package.json`。
+
+完成後執行測試，並簡短說明結果。

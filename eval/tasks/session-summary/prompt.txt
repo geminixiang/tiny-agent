@@ -1,0 +1,13 @@
+實作 `src/session.js` 的 `summarizeEvents(events)`。
+
+需求：
+- 回傳物件：`total`、`byType`、`durationMs`、`toolFailures`、`lastError`。
+- 先忽略不是 object 或缺少 string `type` 的項目；後續統計都只看有效事件。
+- `total` 是有效事件數，不是原始 array 長度。
+- `byType` 統計每個有效事件的 `event.type` 出現次數。
+- `durationMs` 是最小 `at` 到最大 `at` 的差；沒有有效 timestamp 時為 0。
+- `toolFailures` 統計 `type === "tool"` 且 `ok === false` 的事件數。
+- `lastError` 是最後一個有非空字串 `error` 的事件；沒有時為 `null`。
+- 不要修改測試或 `package.json`。
+
+完成後執行測試，並簡短說明結果。

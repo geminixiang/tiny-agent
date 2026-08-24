@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const AGENTS = ["tiny-ts", "tiny-go", "tiny-py", "tiny-rs"];
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const tasksDir = join(root, "eval/tasks");
+const resultsPath = join(root, "eval/results.md");
 
 type CommandResult = {
     code: number | null;
@@ -146,6 +147,35 @@ async function evaluate(task: string, agent: string): Promise<Result> {
     }
 }
 
+function resultMarkdown(results: Result[]) {
+    const timestamp = new Date().toISOString();
+    const lines = [
+        `## ${timestamp}`,
+        "",
+        "| Task | Agent | Result | Time | Tokens | Tools | Detail |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- |",
+    ];
+    for (const result of results) {
+        const detail = result.detail.replaceAll("\n", " ").replaceAll("|", "\\|");
+        lines.push(
+            `| ${result.task} | ${result.agent} | ${result.passed ? "PASS" : "FAIL"} | ${(result.durationMs / 1000).toFixed(1)}s | ${result.tokens} | ${result.toolCalls} | ${detail} |`,
+        );
+    }
+    lines.push("");
+    return `${lines.join("\n")}\n`;
+}
+
+async function writeResultsMarkdown(results: Result[]) {
+    let previous = "";
+    try {
+        previous = await readFile(resultsPath, "utf8");
+    } catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || error.code !== "ENOENT") throw error;
+    }
+    await mkdir(join(root, "eval"), { recursive: true });
+    await writeFile(resultsPath, `${resultMarkdown(results)}${previous}`, "utf8");
+}
+
 async function main() {
     const selectedAgent = process.env.AGENT;
     const selectedTask = process.env.TASK;
@@ -182,6 +212,8 @@ async function main() {
         );
         if (result.detail) console.log(`  ${result.detail.split("\n").at(-1)}`);
     }
+    await writeResultsMarkdown(results);
+    console.log(`\nWrote eval/results.md`);
     if (results.some((result) => !result.passed)) process.exitCode = 1;
 }
 
