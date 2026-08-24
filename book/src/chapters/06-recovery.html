@@ -268,7 +268,7 @@ interrupted      → intent已寫，effect狀態未知，不重播</code></pre>
     兩條 recovery fixture：
 </p>
 <pre data-lang="sh"><code>cd typescript
-node --import tsx --test --test-name-pattern="replay-safe-tool|interrupted-never-tool" test/session-reducer.test.ts
+node --import tsx --test --test-name-pattern="replay-safe-tool|interrupted-never-tool" tests/session-reducer.test.ts
 
 cat ../schemas/session/planner-fixtures/replay-safe-tool.expected.json
 cat ../schemas/session/planner-fixtures/interrupted-never-tool.expected.json</code></pre>
@@ -288,9 +288,9 @@ cat ../schemas/session/planner-fixtures/interrupted-never-tool.expected.json</co
 
 <aside class="note">
     <strong>閱讀原始碼</strong
-    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session-reducer.ts#L1097"
+    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session-reducer.ts#L1083"
         ><code>reduceSession()</code></a
-    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session-recovery.ts#L113"
+    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session-recovery.ts#L111"
         ><code>planRecovery()</code></a
     >。
 </aside>

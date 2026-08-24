@@ -37,20 +37,17 @@
         },
         required: ["path"],
     },
-    async execute(args, signal) {
-        const path = requiredString(args.path, "path");
-        return trustedReadExecute(path, { offset: args.offset, signal });
-    },
+    execute: trustedReadExecute,
 });</code></pre>
 <p>
-    <code>trustedReadExecute</code> 是概念名稱，代表 host 已套用實際的工作區規則、分頁與輸出上限；它不是 Node.js
-    標準函式。若直接把 <code>readFile(path)</code> 暴露給模型，模型就能要求讀取任何程序可存取的路徑，不能當成
-    production-safe Tool。
+    <code>trustedReadExecute</code> 是 <code>tools.ts</code> 中真實存在的函式：它負責分頁（offset/limit）與輸出上限（最多
+    2,000 行或 50 KB），但不做任何工作區路徑檢查。模型可以要求讀取任何這個 process 有權存取的路徑。
 </p>
 <p>
-    tiny-agent 的 file tools 會解析 canonical path，拒絕離開目前工作區的路徑與指向外部的 symlink。這是 application-level
-    containment，不是 sandbox，也不是完整的授權系統；路徑檢查與實際開檔之間仍可能存在 TOCTOU
-    race。多租戶或惡意工作負載必須由外層 execution capsule 提供 OS 層隔離。
+    這是刻意的設計：tiny-agent 的 file tools 不做 application-level path
+    containment。字串層級的路徑檢查與實際開檔之間存在 TOCTOU race，擋不住惡意並行的 filesystem
+    mutation，卻會給人「已經安全」的錯覺；coding agent 也經常有正當理由讀取工作區之外的檔案（例如全域設定或依賴原始碼）。
+    因此檔案工具直接解析路徑並跟隨 symlink，真正的隔離交給外層 execution capsule 在 OS 層提供（見第 08 章）。
 </p>
 
 <h2 id="validation">JSON Schema 不等於 Runtime Validation</h2>
@@ -111,15 +108,17 @@ replayKey = builtin:read:v1</code></pre>
 
 <h2 id="hands-on">親手驗證</h2>
 <p>先跑 injected Tool 與 filesystem containment 的離線測試，不需要 OpenRouter key：</p>
-<pre data-lang="sh"><code>npm --prefix typescript test -- \
-  --test-name-pattern="injected tool|filesystem tools contain canonical paths"
+<pre data-lang="sh"><code>cd typescript
+node --import tsx --test \
+  --test-name-pattern="injected tool|paths outside cwd" tests/index.test.ts
+cd ..
 
 go -C go test ./cmd/tiny-go \
-  -run 'TestFilesystemToolsContainCanonicalPaths' -count=1</code></pre>
+  -run 'TestFilesystemToolsOperateOutsideCwdIncludingSymlinks' -count=1</code></pre>
 <p>
     在 test 中追蹤四個步驟：model-facing schema、provider 產生的 call、runtime argument validation、tool result 回到
-    transcript。Symlink 案例只證明靜態 path containment；它不能取代面對惡意並行 filesystem mutation 的 OS
-    sandbox。完整安全邊界見第 08 章。
+    transcript。Symlink 案例證明 file tools 會跟隨 symlink 離開 cwd——這正是「檔案工具不是安全邊界」的具體證據；隔離必須由
+    OS 層 execution capsule 提供。完整安全邊界見第 08 章。
 </p>
 
 <p class="bridge">Tool 決定能力邊界，但要讓 Agent 一次只看到需要的能力與規則——這是下一章 Context 的工作。</p>
