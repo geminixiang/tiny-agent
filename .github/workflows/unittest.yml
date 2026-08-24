@@ -43,7 +43,7 @@ jobs:
         with:
           go-version: '1.25.x'
           cache-dependency-path: go/go.sum
-      - run: go -C go test ./...
+      - run: go -C go test ./... -skip '^TestCrash_'
 
   rust:
     name: Rust

@@ -76,12 +76,13 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "10MB limit"): await tiny.execute_bash("yes x | head -n 10000", asyncio.Event())
         finally: tiny.MAX_BASH_OUTPUT = old_limit
         cancelled = asyncio.Event()
-        task = asyncio.create_task(tiny.execute_bash("sleep 30 & wait", cancelled))
+        sleeper = "python3 -c 'import time; time.sleep(30)'"
+        task = asyncio.create_task(tiny.execute_bash(sleeper, cancelled))
         await asyncio.sleep(0.1); cancelled.set()
         with self.assertRaises(InterruptedError): await asyncio.wait_for(task, 1)
 
         cancelled = asyncio.Event()
-        task = asyncio.create_task(tiny.execute_bash("sleep 30 &", cancelled))
+        task = asyncio.create_task(tiny.execute_bash(f"{sleeper} &", cancelled))
         await asyncio.sleep(0.1); cancelled.set()
         with self.assertRaises(InterruptedError): await asyncio.wait_for(task, 1)
 
