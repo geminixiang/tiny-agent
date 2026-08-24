@@ -34,16 +34,6 @@ const (
 	maxMCPResultBytes = 50 * 1024
 )
 
-type Tool struct {
-	Name        string
-	Description string
-	Parameters  map[string]any
-	Replay      string
-	ReplayKey   string
-	Identity    string
-	Execute     func(context.Context, map[string]any) (string, error)
-}
-
 type MCPConfig struct {
 	Alias           string
 	URL             string
