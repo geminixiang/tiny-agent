@@ -188,155 +188,38 @@ func TestToolsAndPathGuard(t *testing.T) {
 	if got, _ := executeTool(ctx, "read", map[string]string{"path": filepath.Join(cwd, "a.txt")}); got != "hi" {
 		t.Fatalf("absolute read: %q", got)
 	}
-	if _, err := executeTool(ctx, "read", map[string]string{"path": "../secret"}); err == nil {
-		t.Fatal("path escaped cwd")
+	outside := filepath.Join(t.TempDir(), "tiny-agent-outside.txt")
+	if got, err := executeTool(ctx, "write", map[string]string{"path": outside, "content": "secret"}); err != nil || got != "ok" {
+		t.Fatalf("outside write: %q %v", got, err)
+	}
+	if got, err := executeTool(ctx, "read", map[string]string{"path": outside}); err != nil || got != "secret" {
+		t.Fatalf("outside read: %q %v", got, err)
 	}
 }
 
-func TestFilesystemToolsContainCanonicalPathsAndAllowInternalSymlinks(t *testing.T) {
+func TestFilesystemToolsOperateOutsideCwdIncludingSymlinks(t *testing.T) {
 	dir := inTempDir(t)
 	outside := t.TempDir()
-	prefixSibling := dir + "-sibling"
-	if err := os.Mkdir(prefixSibling, 0o755); err != nil {
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("outside"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(prefixSibling, "secret.txt"), []byte("prefix"), 0o644); err != nil {
-		t.Fatal(err)
+	ctx := context.Background()
+	if got, err := executeTool(ctx, "read", map[string]string{"path": secret}); err != nil || got != "outside" {
+		t.Fatalf("outside read: %q %v", got, err)
 	}
-	if _, err := executeTool(context.Background(), "read", map[string]string{"path": filepath.Join(prefixSibling, "secret.txt")}); err == nil || !strings.Contains(err.Error(), "resolve inside cwd") {
-		t.Fatalf("prefix sibling read: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("outside"), 0o644); err != nil {
-		t.Fatal(err)
+	newPath := filepath.Join(outside, "nested", "new.txt")
+	if got, err := executeTool(ctx, "write", map[string]string{"path": newPath, "content": "new"}); err != nil || got != "ok" {
+		t.Fatalf("outside write: %q %v", got, err)
 	}
 	if err := os.Symlink(outside, filepath.Join(dir, "outside-link")); err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
-	if _, err := executeTool(ctx, "read", map[string]string{"path": "outside-link/secret.txt"}); err == nil || !strings.Contains(err.Error(), "resolve inside cwd") {
-		t.Fatalf("outside read: %v", err)
+	if got, err := executeTool(ctx, "edit", map[string]string{"path": "outside-link/secret.txt", "oldText": "outside", "newText": "edited"}); err != nil || got != "ok" {
+		t.Fatalf("outside edit: %q %v", got, err)
 	}
-	if _, err := executeTool(ctx, "write", map[string]string{"path": "outside-link/new.txt", "content": "escaped"}); err == nil || !strings.Contains(err.Error(), "resolve inside cwd") {
-		t.Fatalf("outside write: %v", err)
-	}
-	if _, err := executeTool(ctx, "edit", map[string]string{"path": "outside-link/secret.txt", "oldText": "outside", "newText": "escaped"}); err == nil || !strings.Contains(err.Error(), "resolve inside cwd") {
-		t.Fatalf("outside edit: %v", err)
-	}
-	if b, err := os.ReadFile(filepath.Join(outside, "secret.txt")); err != nil || string(b) != "outside" {
-		t.Fatalf("outside changed: %q %v", b, err)
-	}
-	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("outside new file: %v", err)
-	}
-
-	inside := filepath.Join(dir, "inside")
-	if err := os.MkdirAll(inside, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(inside, "file.txt"), []byte("inside"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("inside", filepath.Join(dir, "inside-link")); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := executeTool(ctx, "read", map[string]string{"path": "inside-link/file.txt"}); err != nil || got != "inside" {
-		t.Fatalf("inside read: %q %v", got, err)
-	}
-	if err := os.Symlink("inside/file.txt", filepath.Join(dir, "inside-file-link")); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := executeTool(ctx, "read", map[string]string{"path": "inside-file-link"}); err != nil || got != "inside" {
-		t.Fatalf("inside leaf read: %q %v", got, err)
-	}
-	if got, err := executeTool(ctx, "write", map[string]string{"path": "inside-file-link", "content": "written"}); err != nil || got != "ok" {
-		t.Fatalf("inside leaf write: %q %v", got, err)
-	}
-	if got, err := executeTool(ctx, "edit", map[string]string{"path": "inside-file-link", "oldText": "written", "newText": "edited"}); err != nil || got != "ok" {
-		t.Fatalf("inside leaf edit: %q %v", got, err)
-	}
-	if b, err := os.ReadFile(filepath.Join(inside, "file.txt")); err != nil || string(b) != "edited" {
-		t.Fatalf("inside leaf result: %q %v", b, err)
-	}
-	if got, err := executeTool(ctx, "write", map[string]string{"path": "inside-link/nested/new.txt", "content": "new"}); err != nil || got != "ok" {
-		t.Fatalf("inside write: %q %v", got, err)
-	}
-	if b, err := os.ReadFile(filepath.Join(inside, "nested", "new.txt")); err != nil || string(b) != "new" {
-		t.Fatalf("inside new file: %q %v", b, err)
-	}
-	if got, err := executeTool(ctx, "edit", map[string]string{"path": "inside-link/file.txt", "oldText": "edited", "newText": "finished"}); err != nil || got != "ok" {
-		t.Fatalf("inside edit: %q %v", got, err)
-	}
-	if b, err := os.ReadFile(filepath.Join(inside, "file.txt")); err != nil || string(b) != "finished" {
-		t.Fatalf("inside edit result: %q %v", b, err)
-	}
-
-	if _, err := executeTool(ctx, "write", map[string]string{"path": "normal/nested.txt", "content": "normal"}); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := executeTool(ctx, "read", map[string]string{"path": "normal/nested.txt"}); err != nil || got != "normal" {
-		t.Fatalf("normal read: %q %v", got, err)
-	}
-}
-
-func TestFilesystemToolsThroughSymlinkSpelledCwd(t *testing.T) {
-	originalCwd, getwdErr := os.Getwd()
-	if getwdErr != nil {
-		t.Fatal(getwdErr)
-	}
-	originalRoot := cwd
-	parent := t.TempDir()
-	realRoot := filepath.Join(parent, "workspace")
-	linkRoot := filepath.Join(parent, "workspace-link")
-	outside := filepath.Join(parent, "outside")
-	prefixSibling := realRoot + "-sibling"
-	for _, path := range []string{realRoot, outside, prefixSibling} {
-		if err := os.Mkdir(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Symlink(realRoot, linkRoot); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(linkRoot); err != nil {
-		t.Fatal(err)
-	}
-	cwd = linkRoot
-	t.Cleanup(func() {
-		cwd = originalRoot
-		_ = os.Chdir(originalCwd)
-	})
-
-	ctx := context.Background()
-	canonicalFile := filepath.Join(realRoot, "file.txt")
-	if err := os.WriteFile(canonicalFile, []byte("original"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := executeTool(ctx, "read", map[string]string{"path": canonicalFile}); err != nil || got != "original" {
-		t.Fatalf("canonical read: %q %v", got, err)
-	}
-	if got, err := executeTool(ctx, "write", map[string]string{"path": filepath.Join(realRoot, "new.txt"), "content": "new"}); err != nil || got != "ok" {
-		t.Fatalf("canonical write: %q %v", got, err)
-	}
-	if got, err := executeTool(ctx, "edit", map[string]string{"path": canonicalFile, "oldText": "original", "newText": "edited"}); err != nil || got != "ok" {
-		t.Fatalf("canonical edit: %q %v", got, err)
-	}
-	if content, err := os.ReadFile(canonicalFile); err != nil || string(content) != "edited" {
-		t.Fatalf("canonical result: %q %v", content, err)
-	}
-	for _, path := range []string{filepath.Join(outside, "secret.txt"), filepath.Join(prefixSibling, "secret.txt")} {
-		if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := executeTool(ctx, "read", map[string]string{"path": path}); err == nil || !strings.Contains(err.Error(), "resolve inside cwd") {
-			t.Fatalf("outside read %s: %v", path, err)
-		}
-		newPath := filepath.Join(filepath.Dir(path), "new.txt")
-		if _, err := executeTool(ctx, "write", map[string]string{"path": newPath, "content": "escaped"}); err == nil || !strings.Contains(err.Error(), "resolve inside cwd") {
-			t.Fatalf("outside write %s: %v", newPath, err)
-		}
-		if _, err := os.Stat(newPath); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("outside file created %s: %v", newPath, err)
-		}
+	if content, err := os.ReadFile(secret); err != nil || string(content) != "edited" {
+		t.Fatalf("outside result: %q %v", content, err)
 	}
 }
 

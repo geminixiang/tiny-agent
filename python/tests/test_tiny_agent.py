@@ -57,7 +57,11 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await tiny.execute_tool("write", {"path": "a.txt", "content": "hello"}), "ok")
         self.assertEqual(await tiny.execute_tool("read", {"path": str(tiny.ROOT / "a.txt")}), "hello")
         self.assertEqual(await tiny.execute_tool("edit", {"path": "a.txt", "oldText": "hello", "newText": "hi"}), "ok")
-        with self.assertRaisesRegex(ValueError, "inside cwd"): await tiny.execute_tool("read", {"path": "../secret"})
+        outside = Path(self.temp.name).resolve().parent / "tiny-agent-outside.txt"
+        try:
+            self.assertEqual(await tiny.execute_tool("write", {"path": str(outside), "content": "secret"}), "ok")
+            self.assertEqual(await tiny.execute_tool("read", {"path": str(outside)}), "secret")
+        finally: outside.unlink(missing_ok=True)
         result = await tiny.execute_tool(
             "bash", {"command": "printf begin; yes x | head -n 30000; printf end"}
         )

@@ -263,7 +263,8 @@ async def execute_tool(name: str, args: dict[str, str], cancelled: asyncio.Event
     if name == "bash": return await execute_bash(args["command"], cancelled)
 
     def execute_file_tool() -> str:
-        path = Path(args["path"]).resolve() if Path(args["path"]).is_absolute() else (ROOT / args["path"]).resolve()
+        path = Path(args["path"])
+        path = path if path.is_absolute() else ROOT / path
         if name == "read": return path.read_text(encoding="utf-8")[:100_000]
         if name == "write":
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -2086,7 +2086,7 @@ pub fn tool_definitions_json() -> &'static str {
           "parameters": {
             "type": "object",
             "properties": {
-              "path": { "type": "string", "description": "Path to the UTF-8 text file within the working directory." },
+              "path": { "type": "string", "description": "Path to the UTF-8 text file." },
               "offset": { "type": "integer", "minimum": 1, "description": "1-indexed line number to start reading from." },
               "limit": { "type": "integer", "minimum": 1, "description": "Maximum number of lines to return." }
             },
@@ -2143,34 +2143,15 @@ pub fn tool_definitions_json() -> &'static str {
 // tools
 // ---------------------------------------------------------------------------
 fn resolve_path(cwd: &str, path: &str, new_file: bool) -> Result<String, String> {
-    let root = std::fs::canonicalize(cwd).map_err(|e| e.to_string())?;
     let candidate = if FsPath::new(path).is_absolute() {
         FsPath::new(path).to_path_buf()
     } else {
-        root.join(path)
+        FsPath::new(cwd).join(path)
     };
-    let exists = candidate.exists();
-    let full = if !exists {
-        let mut existing = candidate.as_path();
-        while !existing.exists() {
-            existing = existing.parent().ok_or("path must stay inside cwd")?;
-        }
-        let base = std::fs::canonicalize(existing).map_err(|e| e.to_string())?;
-        base.join(
-            candidate
-                .strip_prefix(existing)
-                .map_err(|e| e.to_string())?,
-        )
-    } else {
-        std::fs::canonicalize(&candidate).map_err(|e| e.to_string())?
-    };
-    if full != root && !full.starts_with(&root) {
-        return Err("path must stay inside cwd".to_string());
-    }
-    if !new_file && !exists {
+    if !new_file && !candidate.exists() {
         return Err(format!("{} does not exist", candidate.display()));
     }
-    Ok(full.to_string_lossy().to_string())
+    Ok(candidate.to_string_lossy().to_string())
 }
 
 fn run_bash(command: &str, timeout: f64, cancel: &Arc<AtomicBool>, cwd: &str) -> String {

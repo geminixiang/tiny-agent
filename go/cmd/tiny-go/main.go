@@ -204,90 +204,12 @@ func toolDefinition(name, description string, properties map[string]any) map[str
 	return map[string]any{"type": "function", "function": map[string]any{"name": name, "description": description, "parameters": map[string]any{"type": "object", "properties": properties, "required": required}}}
 }
 
-// containPath prevents static workspace escapes; it is not a race-free filesystem sandbox.
-func containPath(path, canonicalRoot string) (string, error) {
-	rel, err := filepath.Rel(canonicalRoot, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", errors.New("path must resolve inside cwd")
-	}
-	return path, nil
-}
-
-func canonicalRoot() (string, error) {
-	root, err := filepath.EvalSymlinks(cwd)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Abs(root)
-}
-
-func requestedPath(path, root string) (string, error) {
+func resolveToolPath(path string) (string, error) {
 	full := filepath.Clean(path)
 	if !filepath.IsAbs(full) {
-		full = filepath.Join(root, full)
+		full = filepath.Join(cwd, full)
 	}
 	return filepath.Abs(full)
-}
-
-func existingPathInRoot(path string) (string, error) {
-	root, err := canonicalRoot()
-	if err != nil {
-		return "", err
-	}
-	full, err := requestedPath(path, root)
-	if err != nil {
-		return "", err
-	}
-	canonical, err := filepath.EvalSymlinks(full)
-	if err != nil {
-		return "", err
-	}
-	return containPath(canonical, root)
-}
-
-func writePathInRoot(path string) (string, error) {
-	root, err := canonicalRoot()
-	if err != nil {
-		return "", err
-	}
-	full, err := requestedPath(path, root)
-	if err != nil {
-		return "", err
-	}
-	if _, err := os.Lstat(full); err == nil {
-		canonical, err := filepath.EvalSymlinks(full)
-		if err != nil {
-			return "", err
-		}
-		return containPath(canonical, root)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	ancestor := filepath.Dir(full)
-	for {
-		if _, err := os.Lstat(ancestor); err == nil {
-			break
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", err
-		}
-		parent := filepath.Dir(ancestor)
-		if parent == ancestor {
-			return "", os.ErrNotExist
-		}
-		ancestor = parent
-	}
-	canonicalAncestor, err := filepath.EvalSymlinks(ancestor)
-	if err != nil {
-		return "", err
-	}
-	if _, err := containPath(canonicalAncestor, root); err != nil {
-		return "", err
-	}
-	rel, err := filepath.Rel(ancestor, full)
-	if err != nil {
-		return "", err
-	}
-	return containPath(filepath.Join(canonicalAncestor, rel), root)
 }
 
 func executeTool(ctx context.Context, name string, args map[string]string) (string, error) {
@@ -297,13 +219,7 @@ func executeTool(ctx context.Context, name string, args map[string]string) (stri
 	if name == "bash" {
 		return executeBash(ctx, args["command"])
 	}
-	var path string
-	var err error
-	if name == "write" {
-		path, err = writePathInRoot(args["path"])
-	} else {
-		path, err = existingPathInRoot(args["path"])
-	}
+	path, err := resolveToolPath(args["path"])
 	if err != nil {
 		return "", err
 	}

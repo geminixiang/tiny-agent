@@ -1732,34 +1732,34 @@ fn write_reports_bytes_and_edit_applies_atomic_replacements() {
         std::fs::read_to_string(format!("{}/windows.txt", cwd)).unwrap(),
         "\u{FEFF}你好😀\r\nthird\r\nfourth\r\ntail\n"
     );
-    // path guard
-    let mut g = args();
-    g.path = "../secret".to_string();
-    assert!(
-        agent
-            .execute_tool("read", &g)
-            .unwrap_err()
-            .contains("inside cwd")
+    let outside = std::env::temp_dir().join(format!("tiny-agent-outside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join("secret.txt");
+    std::fs::write(&outside_file, "outside").unwrap();
+    let mut outside_read = args();
+    outside_read.path = outside_file.to_string_lossy().to_string();
+    assert_eq!(
+        agent.execute_tool("read", &outside_read).unwrap(),
+        "outside"
     );
+    let mut outside_write = args();
+    outside_write.path = outside.join("nested/new.txt").to_string_lossy().to_string();
+    outside_write.content = "new".into();
+    agent.execute_tool("write", &outside_write).unwrap();
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(std::env::temp_dir(), format!("{}/outside", cwd)).unwrap();
-        for name in ["read", "write", "edit"] {
-            let mut escaped = args();
-            escaped.path = "outside/tiny-agent-secret".into();
-            escaped.content = "secret".into();
-            escaped.edits = vec![ToolEdit {
-                old_text: "x".into(),
-                new_text: "y".into(),
-            }];
-            assert!(
-                agent
-                    .execute_tool(name, &escaped)
-                    .unwrap_err()
-                    .contains("inside cwd")
-            );
-        }
+        std::os::unix::fs::symlink(&outside, format!("{}/outside", cwd)).unwrap();
+        let mut outside_edit = args();
+        outside_edit.path = "outside/secret.txt".into();
+        outside_edit.edits = vec![ToolEdit {
+            old_text: "outside".into(),
+            new_text: "edited".into(),
+        }];
+        agent.execute_tool("edit", &outside_edit).unwrap();
+        assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "edited");
     }
+    std::fs::remove_dir_all(outside).unwrap();
 }
 
 #[test]

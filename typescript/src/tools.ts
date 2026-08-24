@@ -200,7 +200,7 @@ const readTool: Tool = Object.freeze({
     parameters: {
         type: "object",
         properties: {
-            path: { type: "string", description: "Path to the UTF-8 text file within the working directory." },
+            path: { type: "string", description: "Path to the UTF-8 text file." },
             offset: { type: "integer", minimum: 1, description: "1-indexed line number to start reading from." },
             limit: { type: "integer", minimum: 1, description: "Maximum number of lines to return." },
         },
