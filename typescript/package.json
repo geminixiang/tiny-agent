@@ -14,9 +14,9 @@
         "lint": "oxlint src test",
         "format": "oxfmt .",
         "format:check": "oxfmt --check .",
-        "test": "node --import tsx --test test/*.test.ts",
-        "test:mcp": "node --import tsx --test test/mcp.test.ts",
-        "test:mcp:live": "node --import tsx --test test/mcp-github.live.ts"
+        "test": "node --import tsx --test tests/*.test.ts",
+        "test:mcp": "node --import tsx --test tests/mcp.test.ts",
+        "test:mcp:live": "node --import tsx --test tests/mcp-github.live.ts"
     },
     "dependencies": {
         "@modelcontextprotocol/client": "^2.0.0"

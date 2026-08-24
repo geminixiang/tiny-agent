@@ -10,6 +10,7 @@
 - Keep non-core formatting helpers on one line when that reduces visual noise; keep agent, session, tool, and cancellation flows expanded for teaching.
 - Use four spaces, never tabs. Run the language formatter instead of hand-aligning code.
 - Preserve valid model transcripts, append-only sessions, resumability, and cancellation semantics when simplifying.
+- Prefer unit tests under a `tests` directory when the language tooling supports it cleanly; keep Go tests beside code for Go conventions, and keep Rust inline `mod tests` only when testing private helpers is simpler than exposing them.
 - Keep TypeScript, Go, and Python behavior equivalent unless a language constraint is documented.
 - Treat terminal input as structured key sequences, not independent bytes; consume complete ANSI escape sequences so arrow keys never leak as `[A`/`[D` or trigger a standalone `Esc` action.
 - For hand-written line editing, keep the buffer and cursor in Unicode code points, but calculate rendering in terminal display cells: CJK/fullwidth characters use two cells and combining/format characters use zero.
