@@ -153,62 +153,69 @@ function fail(code: SessionCorruptionCode, line: number, seq?: number, message?:
     throw new SessionCorruption(code, line, seq, message);
 }
 
-function object(value: unknown, code: SessionCorruptionCode, line: number, seq?: number): JsonObject {
+// Documents an invariant established earlier in the same validation pass (the value was already
+// looked up and checked once) instead of silently trusting it with a bare `!` at the point of use.
+export function expect<T>(value: T | undefined, message: string): T {
+    if (value === undefined) throw Error(message);
+    return value;
+}
+
+function assertObject(value: unknown, code: SessionCorruptionCode, line: number, seq?: number): JsonObject {
     if (value === null || typeof value !== "object" || Array.isArray(value)) fail(code, line, seq);
     return value as JsonObject;
 }
 
-function exact(value: JsonObject, keys: string[], code: SessionCorruptionCode, line: number, seq?: number) {
+function assertExactKeys(value: JsonObject, keys: string[], code: SessionCorruptionCode, line: number, seq?: number) {
     if (Object.keys(value).some((key) => !keys.includes(key))) fail(code, line, seq);
 }
 
-function string(value: unknown, code: SessionCorruptionCode, line: number, seq?: number) {
+function assertString(value: unknown, code: SessionCorruptionCode, line: number, seq?: number) {
     if (typeof value !== "string" || !value.length) fail(code, line, seq);
     return value;
 }
 
-function safeInteger(value: unknown, code: SessionCorruptionCode, line: number, seq?: number, minimum = 0) {
+function assertSafeInteger(value: unknown, code: SessionCorruptionCode, line: number, seq?: number, minimum = 0) {
     if (!Number.isSafeInteger(value) || (value as number) < minimum) fail(code, line, seq);
     return value as number;
 }
 
-function id(value: unknown, code: SessionCorruptionCode, line: number, seq?: number) {
-    const result = string(value, code, line, seq);
+function assertId(value: unknown, code: SessionCorruptionCode, line: number, seq?: number) {
+    const result = assertString(value, code, line, seq);
     if (!UUID7.test(result)) fail(code, line, seq);
     return result;
 }
 
 function parseMessage(value: unknown, line: number, seq: number): SessionMessage {
-    const message = object(value, "INVALID_FACT", line, seq);
+    const message = assertObject(value, "INVALID_FACT", line, seq);
     const role = message.role;
     if (role === "user") {
-        exact(message, ["role", "content"], "INVALID_FACT", line, seq);
-        return { role, content: string(message.content, "INVALID_FACT", line, seq) };
+        assertExactKeys(message, ["role", "content"], "INVALID_FACT", line, seq);
+        return { role, content: assertString(message.content, "INVALID_FACT", line, seq) };
     }
     if (role === "tool") {
-        exact(message, ["role", "content", "tool_call_id"], "INVALID_FACT", line, seq);
+        assertExactKeys(message, ["role", "content", "tool_call_id"], "INVALID_FACT", line, seq);
         return {
             role,
             content: typeof message.content === "string" ? message.content : fail("INVALID_FACT", line, seq),
-            tool_call_id: string(message.tool_call_id, "INVALID_FACT", line, seq),
+            tool_call_id: assertString(message.tool_call_id, "INVALID_FACT", line, seq),
         };
     }
     if (role !== "assistant") fail("INVALID_FACT", line, seq);
-    exact(message, ["role", "content", "tool_calls"], "INVALID_FACT", line, seq);
+    assertExactKeys(message, ["role", "content", "tool_calls"], "INVALID_FACT", line, seq);
     if (message.content !== null && typeof message.content !== "string") fail("INVALID_FACT", line, seq);
     if (message.tool_calls === undefined) return { role, content: message.content as string | null };
     if (!Array.isArray(message.tool_calls) || !message.tool_calls.length) fail("INVALID_FACT", line, seq);
     const calls = message.tool_calls.map((raw) => {
-        const call = object(raw, "INVALID_FACT", line, seq);
-        exact(call, ["id", "type", "function"], "INVALID_FACT", line, seq);
+        const call = assertObject(raw, "INVALID_FACT", line, seq);
+        assertExactKeys(call, ["id", "type", "function"], "INVALID_FACT", line, seq);
         if (call.type !== "function") fail("INVALID_FACT", line, seq);
-        const fn = object(call.function, "INVALID_FACT", line, seq);
-        exact(fn, ["name", "arguments"], "INVALID_FACT", line, seq);
+        const fn = assertObject(call.function, "INVALID_FACT", line, seq);
+        assertExactKeys(fn, ["name", "arguments"], "INVALID_FACT", line, seq);
         return {
-            id: string(call.id, "INVALID_FACT", line, seq),
+            id: assertString(call.id, "INVALID_FACT", line, seq),
             type: "function" as const,
             function: {
-                name: string(fn.name, "INVALID_FACT", line, seq),
+                name: assertString(fn.name, "INVALID_FACT", line, seq),
                 arguments: typeof fn.arguments === "string" ? fn.arguments : fail("INVALID_FACT", line, seq),
             },
         };
@@ -228,31 +235,31 @@ function reserve(
     seq: number,
     kind: "identity" | "toolResult" | "compactionResult" = "identity",
 ) {
-    const key = id(value, "INVALID_FACT", line, seq);
+    const key = assertId(value, "INVALID_FACT", line, seq);
     if (state.ids.has(key) || state.reservedIds.has(key)) fail("DUPLICATE_ID", line, seq);
     state.reservedIds.set(key, kind);
     return key;
 }
 
 function configuration(value: unknown, line: number, seq: number): ConfigurationSnapshot {
-    const snapshot = object(value, "INVALID_FACT", line, seq);
-    exact(
+    const snapshot = assertObject(value, "INVALID_FACT", line, seq);
+    assertExactKeys(
         snapshot,
         ["model", "systemPromptDigest", "tools", "adapterIdentity", "routingIdentity", "outputOptionsDigest"],
         "INVALID_FACT",
         line,
         seq,
     );
-    const model = string(snapshot.model, "INVALID_FACT", line, seq);
+    const model = assertString(snapshot.model, "INVALID_FACT", line, seq);
     const systemPromptDigest = String(snapshot.systemPromptDigest);
     const outputOptionsDigest = String(snapshot.outputOptionsDigest);
     if (!DIGEST.test(systemPromptDigest) || !DIGEST.test(outputOptionsDigest)) fail("INVALID_FACT", line, seq);
     if (!Array.isArray(snapshot.tools)) fail("INVALID_FACT", line, seq);
     const names = new Set<string>();
     const tools = snapshot.tools.map((raw) => {
-        const tool = object(raw, "INVALID_FACT", line, seq);
-        exact(tool, ["name", "definitionDigest"], "INVALID_FACT", line, seq);
-        const name = string(tool.name, "INVALID_FACT", line, seq);
+        const tool = assertObject(raw, "INVALID_FACT", line, seq);
+        assertExactKeys(tool, ["name", "definitionDigest"], "INVALID_FACT", line, seq);
+        const name = assertString(tool.name, "INVALID_FACT", line, seq);
         if (names.has(name)) fail("INVALID_FACT", line, seq);
         names.add(name);
         const definitionDigest = String(tool.definitionDigest);
@@ -263,8 +270,8 @@ function configuration(value: unknown, line: number, seq: number): Configuration
         model,
         systemPromptDigest,
         tools,
-        adapterIdentity: string(snapshot.adapterIdentity, "INVALID_FACT", line, seq),
-        routingIdentity: string(snapshot.routingIdentity, "INVALID_FACT", line, seq),
+        adapterIdentity: assertString(snapshot.adapterIdentity, "INVALID_FACT", line, seq),
+        routingIdentity: assertString(snapshot.routingIdentity, "INVALID_FACT", line, seq),
         outputOptionsDigest,
     };
 }
@@ -407,7 +414,7 @@ function scanJson(source: string, line: number) {
 }
 
 function operation(state: InternalState, operationId: unknown, line: number, seq: number) {
-    const key = id(operationId, "INVALID_FACT", line, seq);
+    const key = assertId(operationId, "INVALID_FACT", line, seq);
     const found = state.operations.get(key);
     if (!found) fail("INVALID_REFERENCE", line, seq);
     if (found.finished) fail("INVALID_TRANSITION", line, seq);
@@ -437,19 +444,25 @@ function validateSyntheticContent(reason: SyntheticReason, content: string, line
 }
 
 function applyEntry(state: InternalState, fact: Fact, line: number) {
-    exact(fact, ["kind", "seq", "id", "timestamp", "entry"], "INVALID_FACT", line, fact.seq);
-    const entry = object(fact.entry, "INVALID_FACT", line, fact.seq);
+    assertExactKeys(fact, ["kind", "seq", "id", "timestamp", "entry"], "INVALID_FACT", line, fact.seq);
+    const entry = assertObject(fact.entry, "INVALID_FACT", line, fact.seq);
     const type = entry.type;
     if (type === "message") {
         const message = parseMessage(entry.message, line, fact.seq);
         if (message.role === "user") {
             if (state.reservedIds.has(fact.id)) fail("DUPLICATE_ID", line, fact.seq);
-            exact(entry, ["type", "message"], "INVALID_FACT", line, fact.seq);
+            assertExactKeys(entry, ["type", "message"], "INVALID_FACT", line, fact.seq);
         } else if (message.role === "assistant") {
             if (state.reservedIds.has(fact.id)) fail("DUPLICATE_ID", line, fact.seq);
-            exact(entry, ["type", "stepId", "attemptId", "stopReason", "message"], "INVALID_FACT", line, fact.seq);
-            const stepId = id(entry.stepId, "INVALID_FACT", line, fact.seq);
-            const attemptId = id(entry.attemptId, "INVALID_FACT", line, fact.seq);
+            assertExactKeys(
+                entry,
+                ["type", "stepId", "attemptId", "stopReason", "message"],
+                "INVALID_FACT",
+                line,
+                fact.seq,
+            );
+            const stepId = assertId(entry.stepId, "INVALID_FACT", line, fact.seq);
+            const attemptId = assertId(entry.attemptId, "INVALID_FACT", line, fact.seq);
             const stopReason = entry.stopReason;
             if (!["stop", "toolUse", "length"].includes(stopReason as string)) fail("INVALID_FACT", line, fact.seq);
             const attempt = state.attempts.get(attemptId);
@@ -470,18 +483,18 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
             const preExecution = entry.assistantEntryId !== undefined || entry.toolIndex !== undefined;
             const preKeys = ["type", "stepId", "assistantEntryId", "toolIndex", "message", "toolName", "result"];
             const startedKeys = ["type", "stepId", "message", "toolName", "toolStartedId", "result"];
-            exact(entry, preExecution ? preKeys : startedKeys, "INVALID_FACT", line, fact.seq);
-            const result = object(entry.result, "INVALID_FACT", line, fact.seq);
-            exact(result, ["type", "reason"], "INVALID_FACT", line, fact.seq);
-            const stepId = id(entry.stepId, "INVALID_FACT", line, fact.seq);
-            const toolName = string(entry.toolName, "INVALID_FACT", line, fact.seq);
+            assertExactKeys(entry, preExecution ? preKeys : startedKeys, "INVALID_FACT", line, fact.seq);
+            const result = assertObject(entry.result, "INVALID_FACT", line, fact.seq);
+            assertExactKeys(result, ["type", "reason"], "INVALID_FACT", line, fact.seq);
+            const stepId = assertId(entry.stepId, "INVALID_FACT", line, fact.seq);
+            const toolName = assertString(entry.toolName, "INVALID_FACT", line, fact.seq);
             if (preExecution) {
                 if (result.type !== "synthetic") fail("INVALID_FACT", line, fact.seq);
                 const reason = String(result.reason) as SyntheticReason;
                 if (!["invalidArguments", "unknownTool", "truncated", "aborted"].includes(reason))
                     fail("INVALID_FACT", line, fact.seq);
-                const assistantEntryId = id(entry.assistantEntryId, "INVALID_FACT", line, fact.seq);
-                const toolIndex = safeInteger(entry.toolIndex, "INVALID_FACT", line, fact.seq);
+                const assistantEntryId = assertId(entry.assistantEntryId, "INVALID_FACT", line, fact.seq);
+                const toolIndex = assertSafeInteger(entry.toolIndex, "INVALID_FACT", line, fact.seq);
                 const assistantInfo = state.entries.get(assistantEntryId);
                 const assistant = assistantInfo?.entry;
                 if (
@@ -513,7 +526,7 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
                     if (result.reason !== "interrupted") fail("INVALID_FACT", line, fact.seq);
                     validateSyntheticContent("interrupted", message.content, line, fact.seq);
                 } else if (result.reason !== undefined) fail("INVALID_FACT", line, fact.seq);
-                const startedId = id(entry.toolStartedId, "INVALID_FACT", line, fact.seq);
+                const startedId = assertId(entry.toolStartedId, "INVALID_FACT", line, fact.seq);
                 const started = state.tools.get(startedId);
                 if (
                     !started ||
@@ -538,7 +551,7 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
         state.activeContextThroughEntryId = fact.id;
         if (message.role === "user") state.entries.set(fact.id, { entry });
         else if (message.role === "assistant") {
-            const attempt = state.attempts.get(String(entry.attemptId))!;
+            const attempt = expect(state.attempts.get(String(entry.attemptId)), "applyEntry: attempt not found");
             state.entries.set(fact.id, {
                 entry,
                 operationId: attempt.operationId,
@@ -546,7 +559,7 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
                 attemptId: attempt.attemptId,
             });
         } else if (message.role === "tool" && entry.toolStartedId !== undefined) {
-            const started = state.tools.get(String(entry.toolStartedId))!;
+            const started = expect(state.tools.get(String(entry.toolStartedId)), "applyEntry: tool call not found");
             state.entries.set(fact.id, {
                 entry,
                 operationId: started.operationId,
@@ -557,7 +570,7 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
     }
     if (type !== "compaction") fail("INVALID_FACT", line, fact.seq);
     if (state.reservedIds.get(fact.id) !== "compactionResult") fail("INVALID_REFERENCE", line, fact.seq);
-    exact(
+    assertExactKeys(
         entry,
         ["type", "operationId", "summary", "compactedThroughEntryId", "retainedTail"],
         "INVALID_FACT",
@@ -568,7 +581,7 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
     if (found.kind !== "compaction" || state.operation.kind !== "compaction" || state.operation.operationId !== key)
         fail("INVALID_TRANSITION", line, fact.seq);
     if (state.operation.resultEntryId !== fact.id) fail("INVALID_REFERENCE", line, fact.seq);
-    const through = id(entry.compactedThroughEntryId, "INVALID_FACT", line, fact.seq);
+    const through = assertId(entry.compactedThroughEntryId, "INVALID_FACT", line, fact.seq);
     if (!state.entries.has(through)) fail("INVALID_REFERENCE", line, fact.seq);
     const summary = typeof entry.summary === "string" ? entry.summary : fail("INVALID_FACT", line, fact.seq);
     if (!Array.isArray(entry.retainedTail)) fail("INVALID_FACT", line, fact.seq);
@@ -582,9 +595,9 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
         .slice(boundary + 1, inputBoundary + 1)
         .filter((sourceId) => state.entries.get(sourceId)?.entry.type === "message");
     const retained = entry.retainedTail.map((raw: unknown, retainedIndex: number) => {
-        const item = object(raw, "INVALID_FACT", line, fact.seq);
-        exact(item, ["sourceEntryId", "message"], "INVALID_FACT", line, fact.seq);
-        const sourceId = id(item.sourceEntryId, "INVALID_FACT", line, fact.seq);
+        const item = assertObject(raw, "INVALID_FACT", line, fact.seq);
+        assertExactKeys(item, ["sourceEntryId", "message"], "INVALID_FACT", line, fact.seq);
+        const sourceId = assertId(item.sourceEntryId, "INVALID_FACT", line, fact.seq);
         const source = state.entries.get(sourceId)?.entry;
         const message = parseMessage(item.message, line, fact.seq);
         if (sourceId !== expectedIds[retainedIndex] || source?.type !== "message")
@@ -604,8 +617,9 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
     currentAttempt.closed = true;
     currentAttempt.settledEntryId = fact.id;
     state.reservedIds.delete(fact.id);
-    state.operation.step!.status = "settled";
-    state.operation.step!.settledEntryId = fact.id;
+    const step = expect(state.operation.step, "applyEntry: compaction without an active step");
+    step.status = "settled";
+    step.settledEntryId = fact.id;
     state.entries.set(fact.id, {
         entry,
         operationId: key,
@@ -615,17 +629,26 @@ function applyEntry(state: InternalState, fact: Fact, line: number) {
 }
 
 function applyRecord(state: InternalState, fact: Fact, line: number) {
-    exact(fact, ["kind", "seq", "id", "timestamp", "record"], "INVALID_FACT", line, fact.seq);
-    const record = object(fact.record, "INVALID_FACT", line, fact.seq);
+    assertExactKeys(fact, ["kind", "seq", "id", "timestamp", "record"], "INVALID_FACT", line, fact.seq);
+    const record = assertObject(fact.record, "INVALID_FACT", line, fact.seq);
     const type = record.type;
     if (type === "runStarted") {
-        exact(record, ["type", "operationId", "operationKind", "inputEntryId"], "INVALID_FACT", line, fact.seq);
+        assertExactKeys(
+            record,
+            ["type", "operationId", "operationKind", "inputEntryId"],
+            "INVALID_FACT",
+            line,
+            fact.seq,
+        );
         if (record.operationKind !== "run" || state.operation.kind !== "idle")
             fail("INVALID_TRANSITION", line, fact.seq);
         const operationId = reserve(state, record.operationId, line, fact.seq);
-        const inputEntryId = id(record.inputEntryId, "INVALID_FACT", line, fact.seq);
+        const inputEntryId = assertId(record.inputEntryId, "INVALID_FACT", line, fact.seq);
         const input = state.entries.get(inputEntryId)?.entry;
-        if (input?.type !== "message" || object(input.message, "INVALID_REFERENCE", line, fact.seq).role !== "user")
+        if (
+            input?.type !== "message" ||
+            assertObject(input.message, "INVALID_REFERENCE", line, fact.seq).role !== "user"
+        )
             fail("INVALID_REFERENCE", line, fact.seq);
         state.operations.set(operationId, {
             kind: "run",
@@ -637,7 +660,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         return;
     }
     if (type === "compactionStarted") {
-        exact(
+        assertExactKeys(
             record,
             [
                 "type",
@@ -656,7 +679,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         if (record.operationKind !== "compaction" || state.operation.kind !== "idle")
             fail("INVALID_TRANSITION", line, fact.seq);
         const operationId = reserve(state, record.operationId, line, fact.seq);
-        const inputThroughEntryId = id(record.inputThroughEntryId, "INVALID_FACT", line, fact.seq);
+        const inputThroughEntryId = assertId(record.inputThroughEntryId, "INVALID_FACT", line, fact.seq);
         const resultEntryId = reserve(state, record.resultEntryId, line, fact.seq, "compactionResult");
         if (!state.entries.has(inputThroughEntryId)) fail("INVALID_REFERENCE", line, fact.seq);
         if (
@@ -666,7 +689,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         )
             fail("INVALID_FACT", line, fact.seq);
         const partition = [...record.compactedEntryIds, ...record.retainedEntryIds].map((value) =>
-            id(value, "INVALID_FACT", line, fact.seq),
+            assertId(value, "INVALID_FACT", line, fact.seq),
         );
         const sourceIds = [...state.entries.keys()].filter(
             (entryId) => state.entries.get(entryId)?.entry.type === "message",
@@ -695,7 +718,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         return;
     }
     if (type === "stepAttempt") {
-        exact(
+        assertExactKeys(
             record,
             [
                 "type",
@@ -713,16 +736,16 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
             fact.seq,
         );
         const { key, found } = operation(state, record.operationId, line, fact.seq);
-        const attempt = safeInteger(record.attempt, "INVALID_FACT", line, fact.seq, 1);
+        const attempt = assertSafeInteger(record.attempt, "INVALID_FACT", line, fact.seq, 1);
         const stepId =
             attempt === 1
                 ? reserve(state, record.stepId, line, fact.seq)
-                : id(record.stepId, "INVALID_FACT", line, fact.seq);
+                : assertId(record.stepId, "INVALID_FACT", line, fact.seq);
         const attemptId = reserve(state, record.attemptId, line, fact.seq);
         if (attempt > 2 || (record.stepKind !== "assistant" && record.stepKind !== "compaction"))
             fail("INVALID_FACT", line, fact.seq);
         if (record.stepKind !== found.kind.replace("run", "assistant")) fail("INVALID_TRANSITION", line, fact.seq);
-        const contextId = id(record.contextThroughEntryId, "INVALID_FACT", line, fact.seq);
+        const contextId = assertId(record.contextThroughEntryId, "INVALID_FACT", line, fact.seq);
         if (!state.entries.has(contextId)) fail("INVALID_REFERENCE", line, fact.seq);
         if (attempt === 1 && contextId !== state.activeContextThroughEntryId)
             fail("INVALID_TRANSITION", line, fact.seq);
@@ -793,14 +816,20 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         return;
     }
     if (type === "stepFailed") {
-        exact(record, ["type", "operationId", "stepId", "attemptId", "error"], "INVALID_FACT", line, fact.seq);
+        assertExactKeys(
+            record,
+            ["type", "operationId", "stepId", "attemptId", "error"],
+            "INVALID_FACT",
+            line,
+            fact.seq,
+        );
         const { key } = operation(state, record.operationId, line, fact.seq);
-        const attemptId = id(record.attemptId, "INVALID_FACT", line, fact.seq);
+        const attemptId = assertId(record.attemptId, "INVALID_FACT", line, fact.seq);
         const attempt = state.attempts.get(attemptId);
-        const error = object(record.error, "INVALID_FACT", line, fact.seq);
-        exact(error, ["code", "message"], "INVALID_FACT", line, fact.seq);
-        string(error.code, "INVALID_FACT", line, fact.seq);
-        string(error.message, "INVALID_FACT", line, fact.seq);
+        const error = assertObject(record.error, "INVALID_FACT", line, fact.seq);
+        assertExactKeys(error, ["code", "message"], "INVALID_FACT", line, fact.seq);
+        assertString(error.code, "INVALID_FACT", line, fact.seq);
+        assertString(error.message, "INVALID_FACT", line, fact.seq);
         if (!attempt || attempt.operationId !== key || attempt.stepId !== record.stepId || attempt.closed)
             fail("INVALID_REFERENCE", line, fact.seq);
         attempt.closed = true;
@@ -811,7 +840,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         return;
     }
     if (type === "toolStarted") {
-        exact(
+        assertExactKeys(
             record,
             [
                 "type",
@@ -834,32 +863,32 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         const { key, found } = operation(state, record.operationId, line, fact.seq);
         if (found.kind !== "run" || state.operation.kind !== "run" || state.operation.operationId !== key)
             fail("INVALID_TRANSITION", line, fact.seq);
-        const assistantEntryId = id(record.assistantEntryId, "INVALID_FACT", line, fact.seq);
+        const assistantEntryId = assertId(record.assistantEntryId, "INVALID_FACT", line, fact.seq);
         const assistantInfo = state.entries.get(assistantEntryId);
         const assistant = assistantInfo?.entry;
         if (assistant?.type !== "message" || assistant.stopReason !== "toolUse" || assistantInfo?.operationId !== key)
             fail("INVALID_REFERENCE", line, fact.seq);
         const message = parseMessage(assistant.message, line, fact.seq);
-        const toolIndex = safeInteger(record.toolIndex, "INVALID_FACT", line, fact.seq);
+        const toolIndex = assertSafeInteger(record.toolIndex, "INVALID_FACT", line, fact.seq);
         const call = message.role === "assistant" ? message.tool_calls?.[toolIndex] : undefined;
-        const toolCallId = string(record.toolCallId, "INVALID_FACT", line, fact.seq);
-        const toolName = string(record.toolName, "INVALID_FACT", line, fact.seq);
+        const toolCallId = assertString(record.toolCallId, "INVALID_FACT", line, fact.seq);
+        const toolName = assertString(record.toolName, "INVALID_FACT", line, fact.seq);
         if (!call || call.id !== toolCallId || call.function.name !== toolName || assistant.stepId !== record.stepId)
             fail("INVALID_REFERENCE", line, fact.seq);
         const pair = `${assistantEntryId}:${toolIndex}`;
         if (state.toolPairs.has(pair)) fail("INVALID_TRANSITION", line, fact.seq);
-        const args = object(record.arguments, "INVALID_FACT", line, fact.seq);
+        const args = assertObject(record.arguments, "INVALID_FACT", line, fact.seq);
         if (record.replay !== "safe" && record.replay !== "never") fail("INVALID_FACT", line, fact.seq);
         const attempt = assistantInfo?.attemptId ? state.attempts.get(assistantInfo.attemptId) : undefined;
         const declaration = attempt?.configurationSnapshot.tools.find((item) => item.name === toolName);
-        const replayKey = string(record.replayKey, "INVALID_FACT", line, fact.seq);
-        const environmentIdentity = string(record.environmentIdentity, "INVALID_FACT", line, fact.seq);
+        const replayKey = assertString(record.replayKey, "INVALID_FACT", line, fact.seq);
+        const environmentIdentity = assertString(record.environmentIdentity, "INVALID_FACT", line, fact.seq);
         if (!declaration) fail("INVALID_TRANSITION", line, fact.seq);
         const resultEntryId = reserve(state, record.resultEntryId, line, fact.seq, "toolResult");
         const tool: ToolCallState & { operationId: string } = {
             operationId: key,
             toolStartedId: fact.id,
-            stepId: id(record.stepId, "INVALID_FACT", line, fact.seq),
+            stepId: assertId(record.stepId, "INVALID_FACT", line, fact.seq),
             assistantEntryId,
             toolIndex,
             toolCallId,
@@ -878,7 +907,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         return;
     }
     if (type === "abortRequested") {
-        exact(
+        assertExactKeys(
             record,
             ["type", "operationId", "operationKind", "phase", "toolCallId", "reason"],
             "INVALID_FACT",
@@ -897,7 +926,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         return;
     }
     if (type !== "operationFinished") fail("INVALID_FACT", line, fact.seq);
-    exact(
+    assertExactKeys(
         record,
         ["type", "operationId", "operationKind", "outcome", "completion", "finalEntryId", "error"],
         "INVALID_FACT",
@@ -913,7 +942,7 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
         if (found.kind === "run" && record.completion !== "normal" && record.completion !== "truncated")
             fail("INVALID_FACT", line, fact.seq);
         if (found.kind === "compaction" && record.completion !== undefined) fail("INVALID_FACT", line, fact.seq);
-        const finalId = id(record.finalEntryId, "INVALID_FACT", line, fact.seq);
+        const finalId = assertId(record.finalEntryId, "INVALID_FACT", line, fact.seq);
         if (found.kind === "run") {
             const info = state.entries.get(finalId);
             if (info?.operationId !== key || info.entry.type !== "message") fail("INVALID_REFERENCE", line, fact.seq);
@@ -957,10 +986,10 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
     } else if (record.finalEntryId !== undefined) fail("INVALID_FACT", line, fact.seq);
     if (record.outcome !== "completed" && record.completion !== undefined) fail("INVALID_FACT", line, fact.seq);
     if (record.outcome === "failed") {
-        const error = object(record.error, "INVALID_FACT", line, fact.seq);
-        exact(error, ["code", "message"], "INVALID_FACT", line, fact.seq);
-        string(error.code, "INVALID_FACT", line, fact.seq);
-        string(error.message, "INVALID_FACT", line, fact.seq);
+        const error = assertObject(record.error, "INVALID_FACT", line, fact.seq);
+        assertExactKeys(error, ["code", "message"], "INVALID_FACT", line, fact.seq);
+        assertString(error.code, "INVALID_FACT", line, fact.seq);
+        assertString(error.message, "INVALID_FACT", line, fact.seq);
     } else if (record.error !== undefined) fail("INVALID_FACT", line, fact.seq);
     found.finished = true;
     state.operation = { kind: "idle" };
@@ -968,43 +997,43 @@ function applyRecord(state: InternalState, fact: Fact, line: number) {
 }
 
 function applyUsage(state: InternalState, fact: Fact, line: number) {
-    exact(
+    assertExactKeys(
         fact,
         ["kind", "seq", "id", "timestamp", "operationId", "attemptId", "toolStartedId", "usage"],
         "INVALID_FACT",
         line,
         fact.seq,
     );
-    const operationId = id(fact.operationId, "INVALID_FACT", line, fact.seq);
+    const operationId = assertId(fact.operationId, "INVALID_FACT", line, fact.seq);
     if (!state.operations.has(operationId)) fail("INVALID_REFERENCE", line, fact.seq);
     const hasAttempt = fact.attemptId !== undefined;
     const hasTool = fact.toolStartedId !== undefined;
     if (hasAttempt === hasTool) fail("INVALID_FACT", line, fact.seq);
     if (hasAttempt) {
-        const attemptId = id(fact.attemptId, "INVALID_FACT", line, fact.seq);
+        const attemptId = assertId(fact.attemptId, "INVALID_FACT", line, fact.seq);
         const attempt = state.attempts.get(attemptId);
         if (!attempt || attempt.operationId !== operationId) fail("INVALID_REFERENCE", line, fact.seq);
     }
     if (hasTool) {
-        const toolId = id(fact.toolStartedId, "INVALID_FACT", line, fact.seq);
+        const toolId = assertId(fact.toolStartedId, "INVALID_FACT", line, fact.seq);
         const tool = state.tools.get(toolId);
         if (!tool || tool.operationId !== operationId) fail("INVALID_REFERENCE", line, fact.seq);
     }
-    const usage = object(fact.usage, "INVALID_FACT", line, fact.seq);
-    exact(usage, ["input", "output", "cacheRead", "cacheWrite"], "INVALID_FACT", line, fact.seq);
+    const usage = assertObject(fact.usage, "INVALID_FACT", line, fact.seq);
+    assertExactKeys(usage, ["input", "output", "cacheRead", "cacheWrite"], "INVALID_FACT", line, fact.seq);
     for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
-        const amount = safeInteger(usage[key], "INVALID_FACT", line, fact.seq);
+        const amount = assertSafeInteger(usage[key], "INVALID_FACT", line, fact.seq);
         if (state.usage[key] > Number.MAX_SAFE_INTEGER - amount) fail("INVALID_FACT", line, fact.seq);
         state.usage[key] += amount;
     }
 }
 
 function applyFact(state: InternalState, value: unknown, line: number) {
-    const fact = object(value, "INVALID_FACT", line) as Fact;
-    const seq = safeInteger(fact.seq, "INVALID_FACT", line, undefined, 1);
+    const fact = assertObject(value, "INVALID_FACT", line) as Fact;
+    const seq = assertSafeInteger(fact.seq, "INVALID_FACT", line, undefined, 1);
     if (seq !== state.nextSeq) fail("SEQ_MISMATCH", line, seq);
-    const factId = id(fact.id, "INVALID_FACT", line, seq);
-    safeInteger(fact.timestamp, "INVALID_FACT", line, seq);
+    const factId = assertId(fact.id, "INVALID_FACT", line, seq);
+    assertSafeInteger(fact.timestamp, "INVALID_FACT", line, seq);
     if (state.ids.has(factId)) fail("DUPLICATE_ID", line, seq);
     if (fact.kind === "entry") applyEntry(state, fact, line);
     else if (fact.kind === "record") applyRecord(state, fact, line);
@@ -1032,8 +1061,8 @@ function validateTranscript(messages: SessionMessage[], line: number, seq?: numb
 }
 
 function validateHeader(value: unknown, line: number) {
-    const header = object(value, "INVALID_HEADER", line);
-    exact(
+    const header = assertObject(value, "INVALID_HEADER", line);
+    assertExactKeys(
         header,
         ["kind", "version", "id", "createdAt", "cwd", "provider", "model", "environmentIdentity"],
         "INVALID_HEADER",
@@ -1042,12 +1071,12 @@ function validateHeader(value: unknown, line: number) {
     if (header.kind !== "header") fail("INVALID_HEADER", line);
     if (header.version !== 2) fail("UNSUPPORTED_VERSION", line);
     return {
-        id: id(header.id, "INVALID_HEADER", line),
-        createdAt: safeInteger(header.createdAt, "INVALID_HEADER", line),
-        cwd: string(header.cwd, "INVALID_HEADER", line),
-        provider: string(header.provider, "INVALID_HEADER", line),
-        model: string(header.model, "INVALID_HEADER", line),
-        environmentIdentity: string(header.environmentIdentity, "INVALID_HEADER", line),
+        id: assertId(header.id, "INVALID_HEADER", line),
+        createdAt: assertSafeInteger(header.createdAt, "INVALID_HEADER", line),
+        cwd: assertString(header.cwd, "INVALID_HEADER", line),
+        provider: assertString(header.provider, "INVALID_HEADER", line),
+        model: assertString(header.model, "INVALID_HEADER", line),
+        environmentIdentity: assertString(header.environmentIdentity, "INVALID_HEADER", line),
     };
 }
 

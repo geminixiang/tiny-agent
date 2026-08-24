@@ -4,7 +4,7 @@ import { canonicalDigest } from "./canonical-json.js";
 import { MODEL, requireOpenRouterApiKey } from "./env.js";
 import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
 import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
-import type { ConfigurationSnapshot, ToolCall } from "./session-reducer.js";
+import { expect, type ConfigurationSnapshot, type ToolCall } from "./session-reducer.js";
 import {
     builtInTools,
     durableToolReplay,
@@ -64,6 +64,18 @@ class ModelResponseError extends Error {
     }
 }
 
+function usageFactIfModelError(error: unknown, operationId: string, attemptId: string) {
+    return error instanceof ModelResponseError
+        ? [{ kind: "usage" as const, operationId, attemptId, usage: error.usage }]
+        : [];
+}
+
+// Names the `...(condition ? { field } : {})` idiom used to conditionally include an optional
+// key in an object literal, instead of repeating the ternary-spread at every call site.
+function when<T extends object>(condition: unknown, value: T): T | Record<string, never> {
+    return condition ? value : {};
+}
+
 export type RunResult = {
     status: "succeeded" | "failed" | "cancelled";
     answer?: string;
@@ -105,7 +117,7 @@ export function buildConfiguration(systemPrompt: string, tools: readonly Tool[])
                 name: tool.name,
                 description: tool.description,
                 parameters: tool.parameters,
-                ...(tool.definitionIdentity ? { definitionIdentity: tool.definitionIdentity } : {}),
+                ...when(tool.definitionIdentity, { definitionIdentity: tool.definitionIdentity }),
             }),
         })),
         adapterIdentity: "openrouter:chat-completions:v1",
@@ -159,8 +171,8 @@ export async function loadSkills(extra: string[] = []) {
     ];
     return Promise.all(
         files.map(async (path) => {
-            const text = await readFile(path, "utf8"),
-                head = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
+            const text = await readFile(path, "utf8");
+            const head = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
             const field = (key: string) => head.match(new RegExp(`^${key}:\\s*["']?(.*?)["']?$`, "m"))?.[1] ?? "";
             return {
                 name: field("name") || basename(dirname(path)),
@@ -302,8 +314,9 @@ ${list}
     }
     private beginOperation(phase: "model" | "tool" | "compact", operationId: string, toolCallId?: string) {
         const controller = new AbortController();
-        this.active = { controller, phase, operationId, toolCallId, abortPersisted: false };
-        return controller.signal;
+        const active: ActiveOperation = { controller, phase, operationId, toolCallId, abortPersisted: false };
+        this.active = active;
+        return active;
     }
     private endOperation(active: ActiveOperation) {
         if (this.active === active) this.active = undefined;
@@ -322,7 +335,7 @@ ${list}
                 operationId,
                 operationKind: phase === "compact" ? "compaction" : "run",
                 phase,
-                ...(toolCallId ? { toolCallId } : {}),
+                ...when(toolCallId, { toolCallId }),
                 reason: "escape",
             },
         });
@@ -335,9 +348,9 @@ ${list}
         stepId: string,
         attemptId: string,
     ) {
-        const signal = this.beginOperation(phase, operationId),
-            active = this.active!,
-            started = performance.now();
+        const active = this.beginOperation(phase, operationId);
+        const signal = active.controller.signal;
+        const started = performance.now();
         try {
             const response = await this.callModel(messages, tools, signal);
             if (await this.settleOperation(active)) {
@@ -362,16 +375,14 @@ ${list}
                 durationMs: performance.now() - started,
                 usage: {
                     ...response.usage,
-                    ...(response.cacheHitRate === undefined ? {} : { cacheHitRate: response.cacheHitRate }),
+                    ...when(response.cacheHitRate !== undefined, { cacheHitRate: response.cacheHitRate }),
                 },
             });
             return response;
         } catch (error) {
             if (!(await this.settleOperation(active))) throw error;
             await this.session?.append([
-                ...(error instanceof ModelResponseError
-                    ? [{ kind: "usage" as const, operationId, attemptId, usage: error.usage }]
-                    : []),
+                ...usageFactIfModelError(error, operationId, attemptId),
                 {
                     kind: "record",
                     record: {
@@ -404,13 +415,12 @@ ${list}
             const current = {
                 configurationDigest: configuration.configurationDigest,
                 environmentIdentity: await environmentIdentity(state.header.cwd),
-                tools: configuration.configurationSnapshot.tools.map((snapshot) => {
-                    const tool = this.tools.find((candidate) => candidate.name === snapshot.name)!;
-                    return {
-                        ...snapshot,
-                        ...durableToolReplay(tool),
-                    };
-                }),
+                // this.tools and configurationSnapshot.tools come from the same buildConfiguration map,
+                // so they line up index-for-index without needing to re-find each tool by name.
+                tools: this.tools.map((tool, index) => ({
+                    ...configuration.configurationSnapshot.tools[index],
+                    ...durableToolReplay(tool),
+                })),
             };
             const plan = planRecovery(state, current);
             const operationId = operation.operationId;
@@ -437,15 +447,15 @@ ${list}
                         operationId,
                         operationKind: operation.kind,
                         outcome: plan.outcome,
-                        ...(plan.completion ? { completion: plan.completion } : {}),
-                        ...(plan.finalEntryId ? { finalEntryId: plan.finalEntryId } : {}),
-                        ...(plan.error ? { error: plan.error } : {}),
+                        ...when(plan.completion, { completion: plan.completion }),
+                        ...when(plan.finalEntryId, { finalEntryId: plan.finalEntryId }),
+                        ...when(plan.error, { error: plan.error }),
                     },
                 });
                 continue;
             }
             if (plan.type === "closeAttempt") {
-                const step = state.operation.step!;
+                const step = expect(state.operation.step, "resumeSession: closeAttempt without an active step");
                 await this.session.append({
                     kind: "record",
                     record: {
@@ -459,8 +469,9 @@ ${list}
                 continue;
             }
             if (plan.type === "appendSynthetic") {
+                const step = expect(state.operation.step, "resumeSession: appendSynthetic without an active step");
                 await this.session.append(
-                    plan.results.map((result) => this.syntheticRecoveryFact(operation.step!.stepId, result)),
+                    plan.results.map((result) => this.syntheticRecoveryFact(step.stepId, result)),
                 );
                 continue;
             }
@@ -524,9 +535,7 @@ ${list}
             } catch (error) {
                 recoveryError = error instanceof Error ? error : Error(String(error));
                 await this.session.append([
-                    ...(error instanceof ModelResponseError
-                        ? [{ kind: "usage" as const, operationId, attemptId, usage: error.usage }]
-                        : []),
+                    ...usageFactIfModelError(error, operationId, attemptId),
                     {
                         kind: "record",
                         record: {
@@ -589,7 +598,10 @@ ${list}
         plan: Extract<ReturnType<typeof planRecovery>, { type: "startTool" }>,
     ) {
         if (!this.session || state.operation.kind !== "run" || !state.operation.step) return;
-        const tool = this.tools.find((candidate) => candidate.name === plan.toolName)!;
+        const tool = expect(
+            this.tools.find((candidate) => candidate.name === plan.toolName),
+            `Missing recovery tool: ${plan.toolName}`,
+        );
         let toolStartedId = plan.toolStartedId;
         let resultEntryId: string;
         if (plan.mode === "start") {
@@ -613,7 +625,10 @@ ${list}
                 },
             });
         } else {
-            const pending = state.operation.toolCalls.find((call) => call.toolStartedId === toolStartedId)!;
+            const pending = expect(
+                state.operation.toolCalls.find((call) => call.toolStartedId === toolStartedId),
+                `Missing pending recovery tool call: ${toolStartedId}`,
+            );
             resultEntryId = pending.resultEntryId;
         }
         const toolCallId = this.recoveryToolCallId(state, plan.assistantEntryId, plan.toolIndex);
@@ -621,8 +636,8 @@ ${list}
         let result: { type: "success" } | { type: "error" } | { type: "synthetic"; reason: "interrupted" } = {
             type: "success",
         };
-        const signal = this.beginOperation("tool", state.operation.operationId, toolCallId);
-        const active = this.active!;
+        const active = this.beginOperation("tool", state.operation.operationId, toolCallId);
+        const signal = active.controller.signal;
         try {
             content = await executeDurableTool(tool, plan.arguments, signal);
         } catch (error) {
@@ -651,15 +666,15 @@ ${list}
         assistantEntryId: string,
         toolIndex: number,
     ) {
-        const assistant = state.transcript.findLast(
-            (message) => message.role === "assistant" && message.tool_calls?.[toolIndex],
-        );
-        if (!assistant || assistant.role !== "assistant") throw Error(`Missing recovery tool call ${assistantEntryId}`);
-        return assistant.tool_calls![toolIndex].id;
+        for (const message of state.transcript.toReversed()) {
+            const calls = message.role === "assistant" ? message.tool_calls : undefined;
+            if (calls?.[toolIndex]) return calls[toolIndex].id;
+        }
+        throw Error(`Missing recovery tool call ${assistantEntryId}`);
     }
     async callModel(messages = this.messages, tools: unknown = toolDefinitions(this.tools), signal?: AbortSignal) {
         const key = requireOpenRouterApiKey();
-        const body = { model: MODEL, messages, ...(tools ? { tools } : {}) };
+        const body = { model: MODEL, messages, ...when(tools, { tools }) };
         const r = await this.fetcher("https://openrouter.ai/api/v1/chat/completions", {
             method: "POST",
             signal,
@@ -671,18 +686,18 @@ ${list}
             body: JSON.stringify(body),
         });
         if (!r.ok) throw Error(`OpenRouter ${r.status}: ${await r.text()}`);
-        const data = (await r.json()) as any,
-            u = data.usage ?? {},
-            details = u.prompt_tokens_details ?? {};
-        const cacheRead = details.cached_tokens ?? u.prompt_cache_hit_tokens ?? 0,
-            cacheWrite = details.cache_write_tokens ?? 0;
+        const data = (await r.json()) as any;
+        const u = data.usage ?? {};
+        const details = u.prompt_tokens_details ?? {};
+        const cacheRead = details.cached_tokens ?? u.prompt_cache_hit_tokens ?? 0;
+        const cacheWrite = details.cache_write_tokens ?? 0;
         const input = Math.max(0, (u.prompt_tokens ?? 0) - cacheRead - cacheWrite);
         this.usage.input += input;
         this.usage.output += u.completion_tokens ?? 0;
         this.usage.cacheRead += cacheRead;
         this.usage.cacheWrite += cacheWrite;
-        const prompt = input + cacheRead + cacheWrite,
-            cacheHitRate = prompt > 0 ? (cacheRead / prompt) * 100 : undefined;
+        const prompt = input + cacheRead + cacheWrite;
+        const cacheHitRate = prompt > 0 ? (cacheRead / prompt) * 100 : undefined;
         const choice = data.choices?.[0];
         const usage = { input, output: u.completion_tokens ?? 0, cacheRead, cacheWrite };
         if (!choice?.message) throw new ModelResponseError("OpenRouter returned no assistant message", usage);
@@ -703,22 +718,23 @@ ${list}
     }
     async runAgentLoop(text: string) {
         if (!this.session) throw Error("Session is required");
-        const accepted = runFacts(this.session, text);
-        await this.session.append(accepted.facts);
+        const session = this.session;
+        const accepted = runFacts(session, text);
+        await session.append(accepted.facts);
         const user: Message = { role: "user", content: text };
         this.messages.push(user);
         const operationId = accepted.operationId;
         let contextThroughEntryId = accepted.inputEntryId;
         const configuration = buildConfiguration(this.systemPrompt, this.tools);
         const finish = (outcome: "completed" | "aborted" | "failed", extra: Record<string, unknown> = {}) =>
-            this.session!.append({
+            session.append({
                 kind: "record",
                 record: { type: "operationFinished", operationId, operationKind: "run", outcome, ...extra },
             });
         for (;;) {
-            const stepId = this.session.allocateId();
-            const attemptId = this.session.allocateId();
-            await this.session.append({
+            const stepId = session.allocateId();
+            const attemptId = session.allocateId();
+            await session.append({
                 kind: "record",
                 record: {
                     type: "stepAttempt",
@@ -745,10 +761,8 @@ ${list}
                 );
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
-                await this.session.append([
-                    ...(error instanceof ModelResponseError
-                        ? [{ kind: "usage" as const, operationId, attemptId, usage: error.usage }]
-                        : []),
+                await session.append([
+                    ...usageFactIfModelError(error, operationId, attemptId),
                     {
                         kind: "record",
                         record: {
@@ -777,8 +791,8 @@ ${list}
                 return "Operation aborted.";
             }
             const { message: answer, usage, stopReason } = response;
-            const assistantEntryId = this.session.allocateId();
-            await this.session.append([
+            const assistantEntryId = session.allocateId();
+            await session.append([
                 {
                     kind: "entry",
                     id: assistantEntryId,
@@ -811,8 +825,8 @@ ${list}
                         tool_call_id: call.id,
                         content: SYNTHETIC_CONTENT[reason],
                     };
-                    const id = this.session!.allocateId();
-                    await this.session!.append({
+                    const id = session.allocateId();
+                    await session.append({
                         kind: "entry",
                         id,
                         entry: {
@@ -842,10 +856,10 @@ ${list}
                     await synthetic("unknownTool");
                     continue;
                 }
-                const toolStartedId = this.session.allocateId();
-                const resultEntryId = this.session.allocateId();
-                const environment = (await this.session.load()).header.environmentIdentity;
-                await this.session.append({
+                const toolStartedId = session.allocateId();
+                const resultEntryId = session.allocateId();
+                const environment = (await session.load()).header.environmentIdentity;
+                await session.append({
                     kind: "record",
                     id: toolStartedId,
                     record: {
@@ -863,9 +877,9 @@ ${list}
                     },
                 });
                 const started = performance.now();
-                let content: string,
-                    aborted = false,
-                    ok = false;
+                let content: string;
+                let aborted = false;
+                let ok = false;
                 this.onEvent({
                     type: "tool.started",
                     timestamp: new Date().toISOString(),
@@ -873,8 +887,8 @@ ${list}
                     tool: tool.name,
                 });
                 this.onTool({ phase: "start", name: tool.name, args });
-                const signal = this.beginOperation("tool", operationId, call.id);
-                const active = this.active!;
+                const active = this.beginOperation("tool", operationId, call.id);
+                const signal = active.controller.signal;
                 try {
                     content = await tool.execute(args, signal);
                     ok = true;
@@ -896,7 +910,7 @@ ${list}
                     ok,
                 });
                 const result: Message = { role: "tool", tool_call_id: call.id, content };
-                await this.session.append({
+                await session.append({
                     kind: "entry",
                     id: resultEntryId,
                     entry: {
@@ -942,7 +956,7 @@ ${list}
 
         const operationId = this.session.allocateId();
         const resultEntryId = this.session.allocateId();
-        const inputThroughEntryId = source.at(-1)!.id;
+        const inputThroughEntryId = expect(source.at(-1), "compact: source unexpectedly empty").id;
         await this.session.append({
             kind: "record",
             record: {

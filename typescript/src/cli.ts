@@ -74,8 +74,8 @@ async function main() {
     );
     const loadedMcp = activeMcp;
     const configs = await loadMcpConfigs(mcp);
-    const skills = await loadSkills(extras),
-        instructions = await loadProjectInstructions();
+    const skills = await loadSkills(extras);
+    const instructions = await loadProjectInstructions();
     const session = sessionId
         ? await Session.open(sessionId, process.cwd())
         : await Session.create(process.cwd(), MODEL);
@@ -148,8 +148,8 @@ async function main() {
     const resume = () => {
         if (!json) console.log(`\nResume: tiny-ts --session ${session.id}`);
     };
-    const rl = createInterface({ input: process.stdin, output: process.stdout }),
-        ask = (q: string) => new Promise<string>((ok) => rl.question(q, ok));
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const ask = (q: string) => new Promise<string>((ok) => rl.question(q, ok));
     emitKeypressEvents(process.stdin, rl);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     let exiting = false;

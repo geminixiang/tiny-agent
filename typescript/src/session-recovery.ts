@@ -1,4 +1,5 @@
 import {
+    expect,
     SYNTHETIC_CONTENT,
     type ConfigurationTool,
     type SessionState,
@@ -256,7 +257,8 @@ export function planRecovery(state: SessionState, current: CurrentConfiguration)
             type: "startStep",
             stepKind: "assistant",
             attempt: 1,
-            contextThroughEntryId: operation.toolCalls.at(-1)!.resultEntryId,
+            contextThroughEntryId: expect(operation.toolCalls.at(-1), "planRecovery: no tool calls recorded")
+                .resultEntryId,
         };
     const tool = pending.sort((left, right) => left.toolIndex - right.toolIndex)[0];
     if (tool.environmentIdentity !== current.environmentIdentity)

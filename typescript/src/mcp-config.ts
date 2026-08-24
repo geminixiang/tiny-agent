@@ -3,9 +3,9 @@ import { resolve } from "node:path";
 import { requireMcpConfigPath, systemEnv } from "./env.js";
 import { validateNonemptyStringArray, type McpConfig } from "./mcp.js";
 
-const ROOT_KEYS = new Set(["servers"]),
-    SERVER_KEYS = new Set(["url", "tokenEnv", "auth", "allowedTools", "callTimeoutMs"]),
-    AUTH_KEYS = new Set(["type", "tokenEnv"]);
+const ROOT_KEYS = new Set(["servers"]);
+const SERVER_KEYS = new Set(["url", "tokenEnv", "auth", "allowedTools", "callTimeoutMs"]);
+const AUTH_KEYS = new Set(["type", "tokenEnv"]);
 
 export type McpServerCatalog = {
     servers: Record<
@@ -55,14 +55,14 @@ export async function loadMcpConfigs(aliases: string[], env: NodeJS.ProcessEnv =
 }
 
 function validateCatalog(value: unknown): McpServerCatalog {
-    const root = object(value, "MCP catalog");
-    unknownField(root, ROOT_KEYS, "MCP catalog");
-    const servers = object(root.servers, "MCP catalog servers");
+    const root = assertObject(value, "MCP catalog");
+    assertNoUnknownField(root, ROOT_KEYS, "MCP catalog");
+    const servers = assertObject(root.servers, "MCP catalog servers");
     const validated = Object.create(null) as McpServerCatalog["servers"];
     for (const [alias, value] of Object.entries(servers)) {
         if (!alias.trim()) throw Error("MCP server alias must not be empty");
-        const server = object(value, `MCP server ${alias}`);
-        unknownField(server, SERVER_KEYS, `MCP server ${alias}`);
+        const server = assertObject(value, `MCP server ${alias}`);
+        assertNoUnknownField(server, SERVER_KEYS, `MCP server ${alias}`);
         if (typeof server.url !== "string" || !server.url) throw Error(`MCP server ${alias} url must be a string`);
         if (server.tokenEnv !== undefined) validateTokenEnv(server.tokenEnv, `MCP server ${alias} tokenEnv`);
         if (server.tokenEnv !== undefined && server.auth !== undefined) {
@@ -70,8 +70,8 @@ function validateCatalog(value: unknown): McpServerCatalog {
         }
         let auth: McpServerCatalog["servers"][string]["auth"];
         if (server.auth !== undefined) {
-            const value = object(server.auth, `MCP server ${alias} auth`);
-            unknownField(value, AUTH_KEYS, `MCP server ${alias} auth`);
+            const value = assertObject(server.auth, `MCP server ${alias} auth`);
+            assertNoUnknownField(value, AUTH_KEYS, `MCP server ${alias} auth`);
             if (value.type !== "metabaseApiKey") {
                 throw Error(`MCP server ${alias} auth type must be metabaseApiKey`);
             }
@@ -112,12 +112,12 @@ function validateTokenEnv(value: unknown, name: string): asserts value is string
     }
 }
 
-function object(value: unknown, name: string): Record<string, unknown> {
+function assertObject(value: unknown, name: string): Record<string, unknown> {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw Error(`${name} must be an object`);
     return value as Record<string, unknown>;
 }
 
-function unknownField(value: Record<string, unknown>, allowed: Set<string>, name: string) {
+function assertNoUnknownField(value: Record<string, unknown>, allowed: Set<string>, name: string) {
     const field = Object.keys(value).find((key) => !allowed.has(key));
     if (field) throw Error(`Unknown ${name} field: ${field}`);
 }
