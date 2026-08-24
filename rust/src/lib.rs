@@ -256,7 +256,7 @@ pub fn load_project_instructions(cwd: &str) -> String {
 
 fn build_system_prompt(cwd: &str, project: &str, list: &str) -> String {
     format!(
-        "You are tiny-agent, a concise coding agent in {}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.\n\nFor implementation tasks, inspect only what is needed, then make the changes and run focused tests. Do not keep researching the same uncertainty when a mature dependency or direct implementation is available.\nUse read to inspect files, write for new files, edit for existing files, and bash for discovery, commands, builds, and tests.\nPrefer completing a small working implementation over exhaustively researching every option. If repeated experiments fail, reconsider the approach instead of making another similar attempt.{}\n\n<available_skills>\n{}\n</available_skills>",
+        "You are tiny-agent, a concise coding agent in {}. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.{}\n\n<available_skills>\n{}\n</available_skills>",
         cwd, project, list
     )
 }
@@ -428,11 +428,14 @@ pub fn new_agent(
     instructions: String,
     cwd: &str,
 ) -> Agent {
-    let list = skills
+    let mut list = skills
         .iter()
         .map(format_skill)
         .collect::<Vec<_>>()
         .join("\n");
+    if list.is_empty() {
+        list = "(none)".to_string();
+    }
     let project = if instructions.is_empty() {
         String::new()
     } else {

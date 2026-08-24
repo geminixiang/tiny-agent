@@ -326,7 +326,7 @@ class Agent:
         self.active: dict | None = None; self.activity_generation = 0
         listing = "\n".join(f"<skill>\n<name>{s['name']}</name>\n<description>{s['description']}</description>\n<location>{s['path']}</location>\n</skill>" for s in self.skills) or "(none)"
         project = f'\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="{ROOT / "AGENTS.md"}">\n{instructions}\n</project_instructions>\n\n</project_context>' if instructions else ""
-        prompt = f"You are tiny-agent, a concise coding agent in {ROOT}. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.{project}\n\n<available_skills>\n{listing}\n</available_skills>"
+        prompt = f"You are tiny-agent, a concise coding agent in {ROOT}. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.{project}\n\n<available_skills>\n{listing}\n</available_skills>"
         self.messages = [{"role": "system", "content": prompt}]
         self.configuration = self._configuration(prompt)
         self.configuration_digest = configuration_digest(self.configuration)

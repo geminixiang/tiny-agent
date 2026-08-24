@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -224,6 +225,10 @@ func TestFilesystemToolsOperateOutsideCwdIncludingSymlinks(t *testing.T) {
 }
 
 func TestSkillsAndProjectInstructions(t *testing.T) {
+	template, err := os.ReadFile("../../../fixtures/agent/system-prompt.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := inTempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("Always be brief."), 0o644); err != nil {
 		t.Fatal(err)
@@ -242,9 +247,13 @@ func TestSkillsAndProjectInstructions(t *testing.T) {
 	if len(skills) != 1 || skills[0].Name != "hello" || skills[0].Description != "Greets users." {
 		t.Fatalf("skills: %#v", skills)
 	}
-	system := value(newAgent(skills, nil, loadProjectInstructions()).Messages[0].Content)
-	if !strings.Contains(system, "Always be brief.") || !strings.Contains(system, skill) || strings.Contains(system, "SECRET") {
-		t.Fatalf("system prompt: %s", system)
+	instructions := loadProjectInstructions()
+	system := value(newAgent(skills, nil, instructions).Messages[0].Content)
+	project := fmt.Sprintf("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"%s\">\n%s\n</project_instructions>\n\n</project_context>", filepath.Join(dir, "AGENTS.md"), instructions)
+	listing := fmt.Sprintf("<skill>\n<name>hello</name>\n<description>Greets users.</description>\n<location>%s</location>\n</skill>", skill)
+	expected := strings.NewReplacer("{{cwd}}", dir, "{{project}}", project, "{{skills}}", listing).Replace(string(template))
+	if system != expected {
+		t.Fatalf("system prompt mismatch:\n%s", system)
 	}
 }
 

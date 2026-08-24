@@ -386,7 +386,7 @@ func newAgent(skills []Skill, session *SessionStore, instructions string) *Agent
 	if instructions != "" {
 		project = fmt.Sprintf("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"%s\">\n%s\n</project_instructions>\n\n</project_context>", filepath.Join(cwd, "AGENTS.md"), instructions)
 	}
-	prompt := fmt.Sprintf("You are tiny-agent, a concise coding agent in %s. Use tools to inspect and change files. Follow the project instructions below. When a task matches an available skill, use read on its location before following it.%s\n\n<available_skills>\n%s\n</available_skills>", cwd, project, list)
+	prompt := fmt.Sprintf("You are tiny-agent, a concise coding agent in %s. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.%s\n\n<available_skills>\n%s\n</available_skills>", cwd, project, list)
 	return &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: openRouterURL, OnTool: func(ToolEvent) {}, Tools: localTools()}
 }
 

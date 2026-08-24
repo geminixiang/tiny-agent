@@ -19,6 +19,7 @@ from tiny_agent.cli import Terminal
 from tiny_agent.session_reducer import configuration_digest, reduce_session, source_digest
 
 FIXTURES = Path(__file__).resolve().parents[2] / "schemas/session/fixtures"
+SYSTEM_PROMPT_TEMPLATE = (Path(__file__).resolve().parents[2] / "fixtures/agent/system-prompt.txt").read_text(encoding="utf-8")
 
 
 async def async_value(value):
@@ -196,8 +197,12 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         )
         skills = tiny.load_skills([str(path)])
         self.assertEqual([(s["name"], s["description"]) for s in skills], [("hello", "Greets users.")])
-        system = tiny.Agent(skills, instructions=tiny.load_project_instructions()).messages[0]["content"]
-        self.assertIn("Always be brief.", system); self.assertIn(str(path), system); self.assertNotIn("SECRET", system)
+        instructions = tiny.load_project_instructions()
+        system = tiny.Agent(skills, instructions=instructions).messages[0]["content"]
+        project = f'\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="{tiny.ROOT / "AGENTS.md"}">\n{instructions}\n</project_instructions>\n\n</project_context>'
+        listing = f"<skill>\n<name>hello</name>\n<description>Greets users.</description>\n<location>{path}</location>\n</skill>"
+        expected = SYSTEM_PROMPT_TEMPLATE.replace("{{cwd}}", str(tiny.ROOT)).replace("{{project}}", project).replace("{{skills}}", listing)
+        self.assertEqual(system, expected)
 
     async def test_session_shape_and_idle_resume(self):
         now = datetime(2026, 8, 3, 3, 55, 50, 62000, timezone.utc)

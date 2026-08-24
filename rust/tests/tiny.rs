@@ -662,17 +662,31 @@ fn loads_cwd_instructions_and_skills() {
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "teach");
     assert_eq!(skills[0].description, "Teaches tiny agents.");
-    let agent = new_agent(skills.clone(), None, instructions, &cwd);
+    let agent = new_agent(skills.clone(), None, instructions.clone(), &cwd);
     let system = agent.messages[0].content.clone().unwrap();
-    assert!(system.contains("<project_context>"));
-    assert!(system.contains("<name>teach</name>"));
-    assert!(system.contains("<description>Teaches tiny agents.</description>"));
-    assert!(system.contains(&skills[0].path));
-    assert!(!system.contains("SECRET"));
-    assert!(
-        system.contains("inspect only what is needed, then make the changes and run focused tests")
+    let project = format!(
+        "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"{}/AGENTS.md\">\n{}\n</project_instructions>\n\n</project_context>",
+        cwd, instructions
     );
-    assert!(system.contains("If repeated experiments fail, reconsider the approach"));
+    let listing = format!(
+        "<skill>\n<name>teach</name>\n<description>Teaches tiny agents.</description>\n<location>{}</location>\n</skill>",
+        skills[0].path
+    );
+    let expected = include_str!("../../fixtures/agent/system-prompt.txt")
+        .replace("{{cwd}}", &cwd)
+        .replace("{{project}}", &project)
+        .replace("{{skills}}", &listing);
+    assert_eq!(system, expected);
+
+    let empty = new_agent(Vec::new(), None, String::new(), &cwd);
+    let expected_empty = include_str!("../../fixtures/agent/system-prompt.txt")
+        .replace("{{cwd}}", &cwd)
+        .replace("{{project}}", "")
+        .replace("{{skills}}", "(none)");
+    assert_eq!(
+        empty.messages[0].content.as_deref(),
+        Some(expected_empty.as_str())
+    );
 }
 
 // ---------------------------------------------------------------------------
