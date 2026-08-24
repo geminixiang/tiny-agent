@@ -16,7 +16,28 @@
     font-synthesis: none;
 }
 
+/* OS 暗色偏好：純 CSS 就生效，不等 JavaScript，避免換頁白色閃爍。明確選擇 light 時不套用。 */
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        color-scheme: dark;
+        --bg: #121715;
+        --paper: #1a211e;
+        --ink: #eef2ee;
+        --muted: #a5afa9;
+        --line: #34403a;
+        --soft: #242d29;
+        --accent: #79c7b5;
+        --accent-strong: #9addce;
+        --code: #0b100e;
+        --code-ink: #e5f4ef;
+        --shadow: none;
+    }
+}
+
+[data-theme="light"] { color-scheme: light; }
+
 [data-theme="dark"] {
+    color-scheme: dark;
     --bg: #121715;
     --paper: #1a211e;
     --ink: #eef2ee;

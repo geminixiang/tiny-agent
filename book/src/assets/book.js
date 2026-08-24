@@ -7,17 +7,26 @@ const search = document.querySelector("[data-nav-search]");
 const sidebar = document.querySelector("[data-sidebar]");
 const mobile = matchMedia("(max-width: 860px)");
 
-function setTheme(theme) {
-    root.dataset.theme = theme;
-    localStorage.setItem("book-theme", theme);
-    if (themeButton) {
-        themeButton.textContent = theme === "dark" ? "☀" : "☾";
-        themeButton.setAttribute("aria-label", theme === "dark" ? "切換亮色主題" : "切換暗色主題");
-    }
+// theme.js（render-blocking）已在 first paint 前套用儲存的主題；這裡只同步按鈕狀態與處理切換。
+// 未曾手動切換過的讀者不寫 localStorage，讓他們繼續跟隨 OS 偏好。
+function effectiveTheme() {
+    return root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
 }
 
-setTheme(localStorage.getItem("book-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
-themeButton?.addEventListener("click", () => setTheme(root.dataset.theme === "dark" ? "light" : "dark"));
+function syncThemeButton() {
+    if (!themeButton) return;
+    const theme = effectiveTheme();
+    themeButton.textContent = theme === "dark" ? "☀" : "☾";
+    themeButton.setAttribute("aria-label", theme === "dark" ? "切換亮色主題" : "切換暗色主題");
+}
+
+syncThemeButton();
+themeButton?.addEventListener("click", () => {
+    const theme = effectiveTheme() === "dark" ? "light" : "dark";
+    root.dataset.theme = theme;
+    localStorage.setItem("book-theme", theme);
+    syncThemeButton();
+});
 
 function syncDrawer(open, restoreFocus = false) {
     const isMobile = mobile.matches;

@@ -38,6 +38,7 @@ function layout({ title, description, path, current = "", body, assets, type = "
 <meta property="og:title" content="${escape(title)}｜tiny-agent Book">
 <meta property="og:description" content="${escape(description)}">
 <meta property="og:url" content="${canonical}">
+<script src="/assets/${assets.theme}"></script>
 <link rel="stylesheet" href="/assets/${assets.css}">
 <script src="/assets/${assets.js}" defer></script>
 </head>
@@ -102,19 +103,22 @@ function homePage(assets) {
 async function main() {
     await rm(out, { recursive: true, force: true });
     await mkdir(join(out, "assets"), { recursive: true });
-    const [cssContent, jsContent, faviconContent] = await Promise.all([
+    const [cssContent, jsContent, themeContent, faviconContent] = await Promise.all([
         readFile(join(bookRoot, "src/assets/styles.css"), "utf8"),
         readFile(join(bookRoot, "src/assets/book.js"), "utf8"),
+        readFile(join(bookRoot, "src/assets/theme.js"), "utf8"),
         readFile(join(bookRoot, "src/assets/favicon.png")),
     ]);
     const assets = {
         css: `styles.${hash(cssContent)}.css`,
         js: `book.${hash(jsContent)}.js`,
+        theme: `theme.${hash(themeContent)}.js`,
         favicon: `favicon.${hash(faviconContent)}.png`,
     };
     await Promise.all([
         writeFile(join(out, "assets", assets.css), cssContent),
         writeFile(join(out, "assets", assets.js), jsContent),
+        writeFile(join(out, "assets", assets.theme), themeContent),
         writeFile(join(out, "assets", assets.favicon), faviconContent),
         writeFile(join(out, "index.html"), homePage(assets)),
     ]);
