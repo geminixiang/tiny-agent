@@ -150,10 +150,14 @@ figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem
 .step-flow .step-loop-back { width: 100%; text-align: left; color: var(--accent); font-weight: 700; }
 .step-flow .step-here { color: var(--accent-strong); border-color: var(--accent); }
 
-.decision-tree ol, .decision-tree ul { border-left: 2px solid var(--line); padding-left: 1.25rem; margin: .5rem 0; }
+.decision-tree { padding: 1.1rem 1.2rem 1.3rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--paper); }
+.decision-tree > ol { border-left: 0; padding-left: 0; margin: 0; }
+.decision-tree ol ol, .decision-tree ol ul { border-left: 2px solid var(--line); padding-left: 1.25rem; margin: .5rem 0 .5rem .5rem; }
 .decision-tree li { margin: .35rem 0; }
+.decision-tree > ol > li { padding-top: .9rem; border-top: 1px dashed var(--line); }
+.decision-tree > ol > li:first-child { padding-top: 0; border-top: 0; }
 .decision-tree .gate { font-weight: 700; }
-.decision-tree-legend { display: flex; flex-wrap: wrap; gap: .5rem .75rem; margin: 0 0 1rem; padding: .7rem .9rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--bg); font-size: .82rem; }
+.decision-tree-legend { display: flex; flex-wrap: wrap; gap: .5rem .75rem; margin: 0 0 1.1rem; padding: .7rem .9rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--bg); font-size: .82rem; }
 .decision-tree-legend .outcome { margin: 0; }
 .decision-tree .outcome {
     display: inline-block;
