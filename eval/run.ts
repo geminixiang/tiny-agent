@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const AGENTS = ["tiny-ts", "tiny-go", "tiny-py", "tiny-rs"];
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const tasksDir = join(root, "eval/tasks");
-const resultsPath = join(root, "eval/results.md");
+const resultsPath = join(root, "eval/README.md");
 
 type CommandResult = {
     code: number | null;
@@ -213,7 +213,7 @@ async function main() {
         if (result.detail) console.log(`  ${result.detail.split("\n").at(-1)}`);
     }
     await writeResultsMarkdown(results);
-    console.log(`\nWrote eval/results.md`);
+    console.log(`\nWrote eval/README.md`);
     if (results.some((result) => !result.passed)) process.exitCode = 1;
 }
 
