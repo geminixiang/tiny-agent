@@ -40,6 +40,48 @@ Only compare results with the same task Spec. Prompt or verifier changes create 
 
 <!-- EVAL_RUNS -->
 
+## 2026-08-24T19:19:48.867Z
+
+Commit: `4a71bcf6df31` · Platform: `darwin-arm64` · Node: `v24.14.1`
+
+### Summary
+
+| Agent | Model | Passed | Pass rate | Median time | Median tokens | Median tools |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| tiny-ts | deepseek/deepseek-v4-flash-0731 | 5/6 | 83.3% | 22.5s | 4590 | 6 |
+| tiny-go | deepseek/deepseek-v4-flash-0731 | 6/6 | 100.0% | 22.0s | 3693 | 6 |
+| tiny-py | deepseek/deepseek-v4-flash-0731 | 5/6 | 83.3% | 19.2s | 3498 | 5.5 |
+| tiny-rs | deepseek/deepseek-v4-flash-0731 | 5/6 | 83.3% | 19.1s | 4480 | 6 |
+
+### Tasks
+
+| Task | Spec | Agent | Model | Result | Time | Input | Output | Cache read | Cache write | Tools | Detail |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| add-feature | `433103f49f27` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 19.4s | 3307 | 1039 | 9216 | 0 | 6 |  |
+| add-feature | `433103f49f27` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 38.9s | 2769 | 1071 | 5888 | 0 | 6 |  |
+| add-feature | `433103f49f27` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 16.6s | 1829 | 741 | 3328 | 0 | 4 |  |
+| add-feature | `433103f49f27` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 21.3s | 4207 | 1193 | 9728 | 0 | 7 |  |
+| async-cache | `e8a6ec21d892` | tiny-ts | deepseek/deepseek-v4-flash-0731 | FAIL | 66.7s | 3101 | 3410 | 9472 | 0 | 7 | node:internal/modules/run_main:107     triggerUncaughtException(     ^  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: + actual - expected  + undefined - 'value:same:1'      at file:///private/tmp/tiny-agent-eval-prompt/eval/tasks/async-cache/verify.mjs:25:8 {   generatedMessage: true,   code: 'ERR_ASSERTION',   actual: undefined,   expected: 'value:same:1',   operator: 'strictEqual',   diff: 'simple' }  Node.js v24.14.1 |
+| async-cache | `e8a6ec21d892` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 34.1s | 2795 | 1826 | 5376 | 0 | 6 |  |
+| async-cache | `e8a6ec21d892` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 61.2s | 4732 | 3091 | 24832 | 0 | 12 |  |
+| async-cache | `e8a6ec21d892` | tiny-rs | deepseek/deepseek-v4-flash-0731 | FAIL | 33.6s | 5636 | 1110 | 5888 | 0 | 6 | node:internal/modules/run_main:107     triggerUncaughtException(     ^  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: + actual - expected  + undefined - 'value:same:1'      at file:///private/tmp/tiny-agent-eval-prompt/eval/tasks/async-cache/verify.mjs:25:8 {   generatedMessage: true,   code: 'ERR_ASSERTION',   actual: undefined,   expected: 'value:same:1',   operator: 'strictEqual',   diff: 'simple' }  Node.js v24.14.1 |
+| config-loader | `abc0206f5793` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 22.2s | 3467 | 1269 | 8960 | 0 | 5 |  |
+| config-loader | `abc0206f5793` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 21.3s | 2428 | 1117 | 5632 | 0 | 4 |  |
+| config-loader | `abc0206f5793` | tiny-py | deepseek/deepseek-v4-flash-0731 | FAIL | 14.0s | 2903 | 892 | 5632 | 0 | 6 | file:///private/var/folders/k9/v53bw9ds11ndmj3xt69knvn40000gn/T/tiny-eval-config-loader-tiny-py-s05pmT/src/config.js:18     throw new Error(`${field}: ${message}`);           ^  Error: port: must be an integer between 1 and 65535, got "4321"     at fail (file:///private/var/folders/k9/v53bw9ds11ndmj3xt69knvn40000gn/T/tiny-eval-config-loader-tiny-py-s05pmT/src/config.js:18:11)     at loadConfig (file:///private/var/folders/k9/v53bw9ds11ndmj3xt69knvn40000gn/T/tiny-eval-config-loader-tiny-py-s05pmT/src/config.js:34:9)     at async file:///private/tmp/tiny-agent-eval-prompt/eval/tasks/config-loader/verify.mjs:17:16  Node.js v24.14.1 |
+| config-loader | `abc0206f5793` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 17.4s | 3009 | 1248 | 6656 | 0 | 6 |  |
+| fix-bug | `14237efa45fb` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 22.8s | 3560 | 884 | 5888 | 0 | 6 |  |
+| fix-bug | `14237efa45fb` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 18.9s | 1575 | 832 | 5120 | 0 | 6 |  |
+| fix-bug | `14237efa45fb` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 21.5s | 2410 | 791 | 5120 | 0 | 5 |  |
+| fix-bug | `14237efa45fb` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 18.0s | 3379 | 650 | 4608 | 0 | 5 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 16.1s | 1802 | 526 | 4096 | 0 | 4 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 12.2s | 1306 | 589 | 4096 | 0 | 4 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 16.9s | 1788 | 724 | 4864 | 0 | 5 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 13.0s | 2377 | 715 | 6400 | 0 | 5 |  |
+| session-summary | `71a3943910cd` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 25.7s | 4106 | 1554 | 16640 | 0 | 10 |  |
+| session-summary | `71a3943910cd` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 22.7s | 4439 | 1213 | 6912 | 0 | 8 |  |
+| session-summary | `71a3943910cd` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 24.2s | 5332 | 1252 | 7424 | 0 | 7 |  |
+| session-summary | `71a3943910cd` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 20.2s | 3456 | 1247 | 11520 | 0 | 7 |  |
+
 ## 2026-08-24T18:48:02.159Z
 
 Commit: `36306c4cde10` · Platform: `darwin-arm64` · Node: `v24.14.1`
