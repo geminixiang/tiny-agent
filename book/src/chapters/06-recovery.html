@@ -64,14 +64,42 @@ planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
     Live 429、5xx 或 timeout 會寫 <code>stepFailed</code>，不會自動 retry。這份設計只允許 process crash 造成的 unknown
     attempt 多一次機會，避免無界重複計費。
 </p>
-<p class="four-outcomes">
-    其實有四種可能結局，不是兩種：<strong>retry</strong>（同一個 model attempt
-    再送一次）、<strong>replay</strong>（同一個 safe tool effect 再執行一次）、<strong>blocked</strong>（configuration
-    或 replay 宣告不符，需要人為介入，不寫終局）、<strong>failed</strong>（<code>stepFailed</code> 是 live request
-    已經記錄的失敗，runtime 選擇不自動 retry）。混淆 retry 與 replay 是最常見的誤解；混淆 blocked 與 failed
-    是第二常見——blocked 代表「recovery 在目前 configuration/environment 下無法安全自動繼續，必須停下來交給人」，failed
-    代表「這次 live request 已經寫入 <code>stepFailed</code>，runtime 選擇不自動 retry，避免無界重複計費」；timeout
-    之類的錯誤本來就無法證明 server 端到底有沒有處理完，failed 因此不等於「已經確定這次沒成功」。
+<p class="four-outcomes">其實有四種可能結局，不是兩種：</p>
+<table>
+    <thead>
+        <tr>
+            <th>結局</th>
+            <th>意思</th>
+            <th>誰接手</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>retry</strong></td>
+            <td>同一個 model attempt 再送一次（只限 crash-unknown，最多 attempt 2）</td>
+            <td>Runtime 自動繼續</td>
+        </tr>
+        <tr>
+            <td><strong>replay</strong></td>
+            <td>同一個 safe tool effect 再執行一次（只限 identity 完全一致的 safe read）</td>
+            <td>Runtime 自動繼續</td>
+        </tr>
+        <tr>
+            <td><strong>blocked</strong></td>
+            <td>configuration、environment 或 replay 宣告不符，無法安全自動繼續；不寫終局</td>
+            <td>人為介入</td>
+        </tr>
+        <tr>
+            <td><strong>failed</strong></td>
+            <td>live request 已寫入 <code>stepFailed</code>，runtime 選擇不自動 retry，避免無界重複計費</td>
+            <td>寫入 Failed 終局</td>
+        </tr>
+    </tbody>
+</table>
+<p>
+    混淆 retry 與 replay 是最常見的誤解：前者重送無外部副作用的 provider request，後者重跑碰外部世界的
+    effect。混淆 blocked 與 failed 是第二常見：blocked 是「現在不能自動做，停下來交給人」，failed 是「已經記錄的失敗」。
+    還有一個細節：timeout 之類的錯誤無法證明 server 端到底有沒有處理完，所以 failed 不等於「已確定這次沒成功」，它只代表「不再自動重試」。
 </p>
 
 <h2 id="planner-table">核心 Recovery 決策</h2>

@@ -38,11 +38,11 @@
         const answer = await callModel(messages, toolDefinitions);
         messages.push(answer);
 
-        if (!answer.toolCalls.length) return answer.text;
+        if (!answer.tool_calls?.length) return answer.content;
 
-        for (const call of answer.toolCalls) {
+        for (const call of answer.tool_calls) {
             const result = await tools[call.name].execute(call.arguments);
-            messages.push({ role: "tool", toolCallId: call.id, content: result });
+            messages.push({ role: "tool", tool_call_id: call.id, content: result });
         }
     }
 }</code></pre>
@@ -112,6 +112,11 @@
     tools；決策能力在 model；連續性在 messages。
 </p>
 
+<p>
+    這段是教學用的最小形狀：<code>tool_calls</code>、<code>tool_call_id</code> 這些欄位名直接沿用 provider wire
+    format，但真實的 wire format 還把 name 與 arguments 多包一層 <code>call.function</code>——第 2 章會攞開完整形狀。
+</p>
+
 <h2 id="why-coding-agent">Coding Agent 多了什麼</h2>
 <p>給 Agent 四個能力，就得到最小 coding agent：</p>
 <ol>
@@ -171,7 +176,12 @@
     是這個閉環的 reference implementation。
 </aside>
 
-<h2 id="hands-on">動手驗證</h2>
+<h2 id="hands-on">親手驗證</h2>
+<p>
+    本章與第 4 章的練習會真的呼叫模型，需要先安裝 tiny-agent 並設定
+    <code>OPENROUTER_API_KEY</code>（步驟見 <a href="https://github.com/geminixiang/tiny-agent#安裝">repo README</a>）；
+    其餘章節的練習都是離線測試，clone repository 就能執行，不花模型額度。
+</p>
 <pre data-lang="sh"><code>tiny-ts --plugin read "讀取 README.md，說明 agent loop"
 
 tiny-ts --plugin edit "讀取 README.md"

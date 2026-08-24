@@ -47,7 +47,7 @@
     這是刻意的設計：tiny-agent 的 file tools 不做 application-level path
     containment。字串層級的路徑檢查與實際開檔之間存在 TOCTOU race，擋不住惡意並行的 filesystem
     mutation，卻會給人「已經安全」的錯覺；coding agent 也經常有正當理由讀取工作區之外的檔案（例如全域設定或依賴原始碼）。
-    因此檔案工具直接解析路徑並跟隨 symlink，真正的隔離交給外層 execution capsule 在 OS 層提供（見第 08 章）。
+    因此檔案工具直接解析路徑並跟隨 symlink，真正的隔離交給外層 execution capsule 在 OS 層提供（見第 8 章）。
 </p>
 
 <h2 id="validation">JSON Schema 不等於 Runtime Validation</h2>
@@ -118,7 +118,7 @@ go -C go test ./cmd/tiny-go \
 <p>
     在 test 中追蹤四個步驟：model-facing schema、provider 產生的 call、runtime argument validation、tool result 回到
     transcript。Symlink 案例證明 file tools 會跟隨 symlink 離開 cwd——這正是「檔案工具不是安全邊界」的具體證據；隔離必須由
-    OS 層 execution capsule 提供。完整安全邊界見第 08 章。
+    OS 層 execution capsule 提供。完整安全邊界見第 8 章。
 </p>
 
 <p class="bridge">Tool 決定能力邊界，但要讓 Agent 一次只看到需要的能力與規則——這是下一章 Context 的工作。</p>
