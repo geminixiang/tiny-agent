@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { McpConfig } from "./mcp.js";
+import { validateNonemptyStringArray, type McpConfig } from "./mcp.js";
 
 const ROOT_KEYS = new Set(["servers"]),
     SERVER_KEYS = new Set(["url", "tokenEnv", "auth", "allowedTools", "callTimeoutMs"]),
@@ -78,17 +78,7 @@ function validateCatalog(value: unknown): McpServerCatalog {
             validateTokenEnv(value.tokenEnv, `MCP server ${alias} auth tokenEnv`);
             auth = { type: "metabaseApiKey", tokenEnv: value.tokenEnv as string };
         }
-        if (server.allowedTools !== undefined) {
-            if (
-                !Array.isArray(server.allowedTools) ||
-                server.allowedTools.some((tool) => typeof tool !== "string" || !tool)
-            ) {
-                throw Error(`MCP server ${alias} allowedTools must contain nonempty strings`);
-            }
-            if (new Set(server.allowedTools).size !== server.allowedTools.length) {
-                throw Error(`MCP server ${alias} allowedTools must not contain duplicates`);
-            }
-        }
+        validateNonemptyStringArray(server.allowedTools, `MCP server ${alias} allowedTools`);
         if (
             server.callTimeoutMs !== undefined &&
             (typeof server.callTimeoutMs !== "number" ||

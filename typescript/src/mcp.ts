@@ -108,12 +108,8 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
     }
 }
 
-function mcpAuthType(headers?: Record<string, string>) {
-    const normalized = new Headers(headers);
-    if (normalized.has("x-api-key")) return "metabaseApiKey";
-    if (normalized.has("authorization")) return "bearer";
-    return "none";
-}
+// prettier-ignore
+function mcpAuthType(headers?: Record<string, string>) { const h = new Headers(headers); return h.has("x-api-key") ? "metabaseApiKey" : h.has("authorization") ? "bearer" : "none"; }
 
 function validateConfig(config: McpConfig) {
     if (!config || typeof config !== "object" || Array.isArray(config)) throw Error("MCP config must be an object");
@@ -146,17 +142,7 @@ function validateConfig(config: McpConfig) {
             if (!name || typeof value !== "string") throw Error("MCP headers must contain string values");
         }
     }
-    if (config.allowedTools !== undefined) {
-        if (
-            !Array.isArray(config.allowedTools) ||
-            config.allowedTools.some((name) => typeof name !== "string" || !name)
-        ) {
-            throw Error("MCP allowedTools must contain nonempty strings");
-        }
-        if (new Set(config.allowedTools).size !== config.allowedTools.length) {
-            throw Error("MCP allowedTools must not contain duplicates");
-        }
-    }
+    validateNonemptyStringArray(config.allowedTools, "MCP allowedTools");
     return {
         alias: config.alias.trim(),
         url,
@@ -168,6 +154,13 @@ function validateConfig(config: McpConfig) {
 
 function isLoopback(hostname: string) {
     return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+}
+
+export function validateNonemptyStringArray(value: unknown, subject: string): asserts value is string[] | undefined {
+    if (value === undefined) return;
+    if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item))
+        throw Error(`${subject} must contain nonempty strings`);
+    if (new Set(value).size !== value.length) throw Error(`${subject} must not contain duplicates`);
 }
 
 function validateSchema(schema: unknown, toolName: string) {
@@ -205,14 +198,8 @@ function mapToolName(alias: string, remoteName: string) {
     return name;
 }
 
-function isInputRequired(result: unknown) {
-    return (
-        result !== null &&
-        typeof result === "object" &&
-        "resultType" in result &&
-        result.resultType === "input_required"
-    );
-}
+// prettier-ignore
+function isInputRequired(result: unknown) { return result !== null && typeof result === "object" && "resultType" in result && result.resultType === "input_required"; }
 
 function normalizeResult(result: {
     content?: Array<{

@@ -5,13 +5,13 @@ export type SessionMessage =
     | { role: "assistant"; content: string | null; tool_calls?: ToolCall[] }
     | { role: "tool"; content: string; tool_call_id: string };
 
-type ToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
+export type ToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
 export type SessionUsage = { input: number; output: number; cacheRead: number; cacheWrite: number };
-type ConfigurationTool = {
+export type ConfigurationTool = {
     name: string;
     definitionDigest: string;
 };
-type ConfigurationSnapshot = {
+export type ConfigurationSnapshot = {
     model: string;
     systemPromptDigest: string;
     tools: ConfigurationTool[];
@@ -414,14 +414,14 @@ function operation(state: InternalState, operationId: unknown, line: number, seq
     return { key, found };
 }
 
-const SYNTHETIC_CONTENT = {
+export const SYNTHETIC_CONTENT = {
     invalidArguments: "Error: Tool arguments were invalid; the tool was not executed.",
     unknownTool: "Error: Unknown tool; the tool was not executed.",
     truncated: "Error: Tool call arguments were truncated by the model token limit; the tool was not executed.",
     aborted: "Operation aborted before execution.",
     interrupted: "Operation interrupted after execution status became unknown; the tool was not replayed.",
 } as const;
-type SyntheticReason = keyof typeof SYNTHETIC_CONTENT;
+export type SyntheticReason = keyof typeof SYNTHETIC_CONTENT;
 
 function sourceDigest(entries: Map<string, EntryInfo>, inputThroughEntryId: string) {
     const source = [];
