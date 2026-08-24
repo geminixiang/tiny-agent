@@ -8,6 +8,11 @@
     --soft: #ece8dd;
     --accent: #176b5b;
     --accent-strong: #0e5044;
+    --warn: #9a5b0a;
+    --warn-strong: #7a4506;
+    --warn-bg: #f3e6d2;
+    --terminal-bg: #e4e1d6;
+    --terminal-ink: #40473f;
     --code: #17211e;
     --code-ink: #e9f3ef;
     --shadow: 0 20px 50px rgba(42, 51, 47, 0.08);
@@ -28,6 +33,11 @@
         --soft: #242d29;
         --accent: #79c7b5;
         --accent-strong: #9addce;
+        --warn: #f0b444;
+        --warn-strong: #ffd27a;
+        --warn-bg: #3a2f16;
+        --terminal-bg: #333d38;
+        --terminal-ink: #d8ded9;
         --code: #0b100e;
         --code-ink: #e5f4ef;
         --shadow: none;
@@ -46,6 +56,11 @@
     --soft: #242d29;
     --accent: #79c7b5;
     --accent-strong: #9addce;
+    --warn: #f0b444;
+    --warn-strong: #ffd27a;
+    --warn-bg: #3a2f16;
+    --terminal-bg: #333d38;
+    --terminal-ink: #d8ded9;
     --code: #0b100e;
     --code-ink: #e5f4ef;
     --shadow: none;
@@ -138,8 +153,22 @@ figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem
 .decision-tree ol, .decision-tree ul { border-left: 2px solid var(--line); padding-left: 1.25rem; margin: .5rem 0; }
 .decision-tree li { margin: .35rem 0; }
 .decision-tree .gate { font-weight: 700; }
-.decision-tree .outcome { font-weight: 700; }
-.decision-tree .outcome.blocked { color: var(--accent); }
+.decision-tree-legend { display: flex; flex-wrap: wrap; gap: .5rem .75rem; margin: 0 0 1rem; padding: .7rem .9rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--bg); font-size: .82rem; }
+.decision-tree-legend .outcome { margin: 0; }
+.decision-tree .outcome {
+    display: inline-block;
+    margin-top: .2rem;
+    padding: .1rem .55rem;
+    border-radius: .3rem;
+    font-weight: 700;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent-strong);
+}
+.decision-tree .outcome::before { content: "▶ "; }
+.decision-tree .outcome.blocked { background: var(--warn-bg); color: var(--warn-strong); }
+.decision-tree .outcome.blocked::before { content: "⏸ "; }
+.decision-tree .outcome.terminal { background: var(--terminal-bg); color: var(--terminal-ink); }
+.decision-tree .outcome.terminal::before { content: "■ "; }
 
 .chapter-toc { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 2.2rem; padding: 1rem 1.1rem; border: 1px solid var(--line); background: var(--bg); }
 .chapter-toc-label { flex-basis: 100%; margin: 0 0 .15rem; color: var(--muted); font-size: .72rem; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }

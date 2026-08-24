@@ -159,6 +159,11 @@ planRecovery(state, currentConfiguration) → RecoveryPlan</code></pre>
 </p>
 
 <figure class="decision-tree" id="fig-06-planner" aria-labelledby="fig-06-planner-caption">
+    <p class="decision-tree-legend">
+        <span class="outcome">自動繼續</span>
+        <span class="outcome blocked">Blocked：需人為介入</span>
+        <span class="outcome terminal">終局：不再繼續</span>
+    </p>
     <ol>
         <li>
             <span class="gate">曾寫入 abortRequested？</span>——最優先，略過以下所有檢查
