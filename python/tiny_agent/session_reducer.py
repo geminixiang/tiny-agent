@@ -20,38 +20,32 @@ def fail(code: str, line: int, seq: int | None = None, message: str | None = Non
 
 
 def obj(value: Any, code: str, line: int, seq: int | None = None) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        fail(code, line, seq)
+    if not isinstance(value, dict): fail(code, line, seq)
     return value
 
 
 def exact(value: dict[str, Any], keys: list[str], code: str, line: int, seq: int | None = None):
-    if any(key not in keys for key in value):
-        fail(code, line, seq)
+    if any(key not in keys for key in value): fail(code, line, seq)
 
 
 def text(value: Any, code: str, line: int, seq: int | None = None) -> str:
-    if not isinstance(value, str) or not value:
-        fail(code, line, seq)
+    if not isinstance(value, str) or not value: fail(code, line, seq)
     return value
 
 
 def safe_int(value: Any, code: str, line: int, seq: int | None = None, minimum: int = 0) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > MAX_SAFE_INTEGER:
-        fail(code, line, seq)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > MAX_SAFE_INTEGER: fail(code, line, seq)
     return value
 
 
 def uuid(value: Any, code: str, line: int, seq: int | None = None) -> str:
     result = text(value, code, line, seq)
-    if not UUID7.fullmatch(result):
-        fail(code, line, seq)
+    if not UUID7.fullmatch(result): fail(code, line, seq)
     return result
 
 
 def add_usage(total: int, amount: int, line: int, seq: int) -> int:
-    if total > MAX_SAFE_INTEGER - amount:
-        fail("INVALID_FACT", line, seq)
+    if total > MAX_SAFE_INTEGER - amount: fail("INVALID_FACT", line, seq)
     return total + amount
 
 
@@ -68,8 +62,7 @@ def has_lone_surrogate(value: Any) -> bool:
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
+        if key in result: raise ValueError("duplicate JSON key")
         result[key] = value
     return result
 
@@ -89,27 +82,21 @@ def parse_message(value: Any, line: int, seq: int) -> dict[str, Any]:
             "content": message["content"],
             "tool_call_id": text(message.get("tool_call_id"), "INVALID_FACT", line, seq),
         }
-    if role != "assistant":
-        fail("INVALID_FACT", line, seq)
+    if role != "assistant": fail("INVALID_FACT", line, seq)
     exact(message, ["role", "content", "tool_calls"], "INVALID_FACT", line, seq)
     content = message.get("content")
-    if content is not None and not isinstance(content, str):
-        fail("INVALID_FACT", line, seq)
-    if "tool_calls" not in message:
-        return {"role": role, "content": content}
+    if content is not None and not isinstance(content, str): fail("INVALID_FACT", line, seq)
+    if "tool_calls" not in message: return {"role": role, "content": content}
     raw_calls = message["tool_calls"]
-    if not isinstance(raw_calls, list) or not raw_calls:
-        fail("INVALID_FACT", line, seq)
+    if not isinstance(raw_calls, list) or not raw_calls: fail("INVALID_FACT", line, seq)
     calls = []
     for raw in raw_calls:
         call = obj(raw, "INVALID_FACT", line, seq)
         exact(call, ["id", "type", "function"], "INVALID_FACT", line, seq)
-        if call.get("type") != "function":
-            fail("INVALID_FACT", line, seq)
+        if call.get("type") != "function": fail("INVALID_FACT", line, seq)
         function = obj(call.get("function"), "INVALID_FACT", line, seq)
         exact(function, ["name", "arguments"], "INVALID_FACT", line, seq)
-        if not isinstance(function.get("arguments"), str):
-            fail("INVALID_FACT", line, seq)
+        if not isinstance(function.get("arguments"), str): fail("INVALID_FACT", line, seq)
         calls.append({
             "id": text(call.get("id"), "INVALID_FACT", line, seq),
             "type": "function",
@@ -118,8 +105,7 @@ def parse_message(value: Any, line: int, seq: int) -> dict[str, Any]:
                 "arguments": function["arguments"],
             },
         })
-    if len({call["id"] for call in calls}) != len(calls):
-        fail("INVALID_TRANSCRIPT", line, seq)
+    if len({call["id"] for call in calls}) != len(calls): fail("INVALID_TRANSCRIPT", line, seq)
     return {"role": role, "content": content, "tool_calls": calls}
 
 
@@ -181,10 +167,8 @@ def configuration_digest(snapshot: dict[str, Any]) -> str:
 def get_operation(state: dict[str, Any], value: Any, line: int, seq: int):
     key = uuid(value, "INVALID_FACT", line, seq)
     found = state["operations"].get(key)
-    if not found:
-        fail("INVALID_REFERENCE", line, seq)
-    if found["finished"]:
-        fail("INVALID_TRANSITION", line, seq)
+    if not found: fail("INVALID_REFERENCE", line, seq)
+    if found["finished"]: fail("INVALID_TRANSITION", line, seq)
     return key, found
 
 

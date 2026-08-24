@@ -25,16 +25,10 @@ class FramedHttpBody:
         content_length: int | None,
         header_bytes: int,
     ):
-        self.reader = reader
-        self.deadline = deadline
-        self.max_body_bytes = max_body_bytes
-        self.invalid_message = invalid_message
-        self.too_large_message = too_large_message
-        self.framing = framing
-        self.content_length = content_length
-        self.header_bytes = header_bytes
-        self.decoded_bytes = 0
-        self.finished = False
+        self.reader, self.deadline, self.max_body_bytes = reader, deadline, max_body_bytes
+        self.invalid_message, self.too_large_message = invalid_message, too_large_message
+        self.framing, self.content_length, self.header_bytes = framing, content_length, header_bytes
+        self.decoded_bytes, self.finished = 0, False
 
     def __aiter__(self):
         return self

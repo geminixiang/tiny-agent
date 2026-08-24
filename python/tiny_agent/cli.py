@@ -12,22 +12,12 @@ import unicodedata
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from .agent import Agent, DEFAULT_MODEL, TOOL_DEFINITIONS, format_tool_event, format_usage, load_project_instructions, load_skills
+from .agent import Agent, TOOL_DEFINITIONS, format_tool_event, format_usage, load_project_instructions, load_skills
 from .session import Session
-from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases
+from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases, split_names
+from .settings import Settings
 
 PLUGIN_NAMES = tuple(tool["function"]["name"] for tool in TOOL_DEFINITIONS)
-
-
-def split_plugin_names(values: list[str] | None) -> list[str]:
-    names: list[str] = []
-    for value in values or []:
-        for item in value.split(","):
-            name = item.strip()
-            if name and name not in names: names.append(name)
-    return names
-
-
 class Terminal:
     def __init__(self): self.fd = sys.stdin.fileno(); self.tty = sys.stdin.isatty(); self.old = termios.tcgetattr(self.fd) if self.tty else None
     def escape_sequence(self) -> bytes | None:
@@ -113,7 +103,7 @@ class Terminal:
 async def run_cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False); parser.add_argument("--session"); parser.add_argument("--skill", action="append", default=[]); parser.add_argument("--plugin", action="append", default=[]); parser.add_argument("--mcp", action="append", default=[]); parser.add_argument("prompt", nargs="*")
     args = parser.parse_args(argv)
-    selected_plugins = split_plugin_names(args.plugin) or list(PLUGIN_NAMES)
+    selected_plugins = split_names(args.plugin) or list(PLUGIN_NAMES)
     unknown = next((name for name in selected_plugins if name not in PLUGIN_NAMES), None)
     if unknown: raise ValueError(f"Unknown plugin: {unknown}. Available plugins: {', '.join(PLUGIN_NAMES)}")
     local_tools = [tool for name in selected_plugins for tool in TOOL_DEFINITIONS if tool["function"]["name"] == name]
@@ -135,7 +125,7 @@ async def run_cli(argv: list[str] | None = None) -> int:
             agent.on_tool = show_tool
             restored = "\nrestored: yes" if args.session else ""
             names = ", ".join(display_tool_name(tool["function"]["name"]) for tool in tools) or "(none)"
-            print(f"\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {os.getenv('TINY_MODEL') or DEFAULT_MODEL}\nsession: {session.id}\npath: {session.path}\ntools: {names}\nmcp: {', '.join(aliases) or '(none)'}{restored}")
+            print(f"\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {Settings().tiny_model}\nsession: {session.id}\npath: {session.path}\ntools: {names}\nmcp: {', '.join(aliases) or '(none)'}{restored}")
             resume = lambda: print(f"\nResume: tiny-py --session {session.id}")
             try:
                 with Terminal() as terminal:

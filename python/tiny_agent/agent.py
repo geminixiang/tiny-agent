@@ -15,15 +15,14 @@ from .http import close_writer, read_http_response, remaining, wait_owned
 from .session import Session, environment_identity, uuid7
 from .session_recovery import plan_recovery
 from .session_reducer import configuration_digest, source_digest
+from .settings import DEFAULT_MODEL, Settings
 
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MAX_BASH_OUTPUT = 10 * 1024 * 1024
 BASH_TIMEOUT_SECONDS = 120
 MAX_HTTP_RESPONSE = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT = 50 * 1024
 ROOT = Path.cwd().resolve()
-MODEL = os.getenv("TINY_MODEL") or DEFAULT_MODEL
 
 
 def format_tokens(n: int) -> str: return str(n) if n < 1_000 else f"{n / 1_000:.1f}k" if n < 10_000 else f"{n // 1_000}k" if n < 1_000_000 else f"{n / 1_000_000:.1f}M" if n < 10_000_000 else f"{n // 1_000_000}M"
@@ -107,21 +106,16 @@ async def _post_json(url: str, payload: dict, headers: dict[str, str], timeout: 
 
 
 def normalize_assistant_message(value: object) -> dict:
-    if not isinstance(value, dict) or value.get("role") != "assistant":
-        raise RuntimeError("invalid assistant message")
+    if not isinstance(value, dict) or value.get("role") != "assistant": raise RuntimeError("invalid assistant message")
     content = value.get("content")
-    if content is not None and not isinstance(content, str):
-        raise RuntimeError("invalid assistant content")
+    if content is not None and not isinstance(content, str): raise RuntimeError("invalid assistant content")
     normalized = {"role": "assistant", "content": content}
     raw_calls = value.get("tool_calls")
-    if raw_calls is None:
-        return normalized
-    if not isinstance(raw_calls, list) or not raw_calls:
-        raise RuntimeError("invalid assistant tool_calls")
+    if raw_calls is None: return normalized
+    if not isinstance(raw_calls, list) or not raw_calls: raise RuntimeError("invalid assistant tool_calls")
     calls = []
     for value_call in raw_calls:
-        if not isinstance(value_call, dict) or value_call.get("type") != "function":
-            raise RuntimeError("invalid assistant tool call")
+        if not isinstance(value_call, dict) or value_call.get("type") != "function": raise RuntimeError("invalid assistant tool call")
         function = value_call.get("function")
         if (
             not isinstance(value_call.get("id"), str) or not value_call["id"] or
@@ -139,16 +133,13 @@ def normalize_assistant_message(value: object) -> dict:
 
 
 def provider_stop_reason(finish: object, answer: dict) -> str:
-    if finish == "length":
-        return "length"
+    if finish == "length": return "length"
     if finish in ("tool_calls", "function_call"):
         if not answer.get("tool_calls"):
             raise RuntimeError(f"Provider finish_reason {finish} requires tool calls")
         return "toolUse"
-    if finish in ("content_filter", "network_error"):
-        raise RuntimeError(f"Provider finish_reason: {finish}")
-    if finish not in (None, "stop"):
-        raise RuntimeError(f"Unknown provider finish_reason: {finish}")
+    if finish in ("content_filter", "network_error"): raise RuntimeError(f"Provider finish_reason: {finish}")
+    if finish not in (None, "stop"): raise RuntimeError(f"Unknown provider finish_reason: {finish}")
     return "toolUse" if answer.get("tool_calls") else "stop"
 
 
@@ -305,7 +296,7 @@ class Agent:
             function = tool["function"]
             definition = json.dumps({key: function[key] for key in ("name", "description", "parameters")}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             declarations.append({"name": function["name"], "definitionDigest": digest(definition)})
-        model = os.getenv("TINY_MODEL") or DEFAULT_MODEL
+        model = Settings().tiny_model
         return {
             "model": model, "systemPromptDigest": digest(prompt), "tools": declarations,
             "adapterIdentity": "openrouter:chat-completions:v1", "routingIdentity": f"openrouter:{model}",
@@ -502,14 +493,14 @@ class Agent:
         return await self._run_operation(operation_id, action["contextThroughEntryId"], action)
 
     async def call_model(self, messages: list[dict], tools: list | None, cancelled: asyncio.Event) -> tuple[dict, dict, str]:
-        key = os.getenv("OPENROUTER_API_KEY")
+        settings = Settings(); key = settings.openrouter_api_key
         if not key: raise RuntimeError("Set OPENROUTER_API_KEY")
-        body = {"model": os.getenv("TINY_MODEL") or DEFAULT_MODEL, "messages": messages, **({"tools": tools} if tools else {})}
+        body = {"model": settings.tiny_model, "messages": messages, **({"tools": tools} if tools else {})}
         if self.requester:
             data = await self.requester(body, cancelled)
         else:
             data = await _post_json(OPENROUTER_URL, body, {
-                "Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                "Authorization": f"Bearer {key.get_secret_value()}", "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com/geminixiang/tiny-agent",
             }, 120, cancelled)
         raw_usage = data.get("usage", {}); details = raw_usage.get("prompt_tokens_details", {})
