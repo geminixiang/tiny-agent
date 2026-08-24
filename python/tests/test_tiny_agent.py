@@ -33,6 +33,26 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         self.env = patch.dict(os.environ, {"OPENROUTER_API_KEY": "test"})
         self.env.start(); self.addCleanup(self.env.stop)
 
+    async def test_file_tools_do_not_block_event_loop(self):
+        original = Path.read_text
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_read(path, *args, **kwargs):
+            started.set()
+            release.wait(1)
+            return original(path, *args, **kwargs)
+
+        path = tiny.ROOT / "slow.txt"
+        path.write_text("ready", encoding="utf-8")
+        with patch.object(Path, "read_text", slow_read):
+            task = asyncio.create_task(tiny.execute_tool("read", {"path": "slow.txt"}))
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            release.set()
+            self.assertEqual(await task, "ready")
+
     async def test_tools_paths_and_large_bash_output(self):
         self.assertEqual(await tiny.execute_tool("write", {"path": "a.txt", "content": "hello"}), "ok")
         self.assertEqual(await tiny.execute_tool("read", {"path": str(tiny.ROOT / "a.txt")}), "hello")

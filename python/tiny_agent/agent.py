@@ -247,8 +247,17 @@ async def execute_bash(command: str, cancelled: asyncio.Event) -> str:
     text = output.decode(errors="replace") or "(no output)"
     if process.returncode and text == "(no output)": raise RuntimeError(f"command exited with status {process.returncode}")
     if len(output) <= MAX_TOOL_OUTPUT: return text if not process.returncode else f"{text}\nError: command exited with status {process.returncode}"
-    directory = ROOT / ".tiny-agent/tool-output"; directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{uuid7()}.log"; path.write_bytes(output)
+
+    def store_output() -> Path:
+        directory = ROOT / ".tiny-agent/tool-output"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{uuid7()}.log"
+        path.write_bytes(output)
+        return path
+
+    if cancelled.is_set(): raise InterruptedError("Operation aborted")
+    path = await asyncio.to_thread(store_output)
+    if cancelled.is_set(): raise InterruptedError("Operation aborted")
     tail = output[-MAX_TOOL_OUTPUT:]
     while tail and tail[0] & 0xC0 == 0x80: tail = tail[1:]
     result = f"{tail.decode(errors='replace')}\n\n[Output truncated. Full output: {path}]"
@@ -259,23 +268,25 @@ async def execute_tool(name: str, args: dict[str, str], cancelled: asyncio.Event
     cancelled = cancelled or asyncio.Event()
     if cancelled.is_set(): raise InterruptedError("Operation aborted")
     if name == "bash": return await execute_bash(args["command"], cancelled)
-    path = path_in_root(args["path"])
-    if name == "read":
-        text = path.read_text(encoding="utf-8")
-        if cancelled.is_set(): raise InterruptedError("Operation aborted")
-        return text[:100_000]
-    if name == "write":
-        if cancelled.is_set(): raise InterruptedError("Operation aborted")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if cancelled.is_set(): raise InterruptedError("Operation aborted")
-        path.write_text(args["content"], encoding="utf-8"); return "ok"
-    if name == "edit":
-        text, old = path.read_text(encoding="utf-8"), args["oldText"]
-        count = text.count(old)
-        if count != 1: raise ValueError(f"oldText must occur exactly once (found {count})")
-        if cancelled.is_set(): raise InterruptedError("Operation aborted")
-        path.write_text(text.replace(old, args["newText"], 1), encoding="utf-8"); return "ok"
-    raise ValueError(f"unknown tool: {name}")
+
+    def execute_file_tool() -> str:
+        path = path_in_root(args["path"])
+        if name == "read": return path.read_text(encoding="utf-8")[:100_000]
+        if name == "write":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(args["content"], encoding="utf-8")
+            return "ok"
+        if name == "edit":
+            text, old = path.read_text(encoding="utf-8"), args["oldText"]
+            count = text.count(old)
+            if count != 1: raise ValueError(f"oldText must occur exactly once (found {count})")
+            path.write_text(text.replace(old, args["newText"], 1), encoding="utf-8")
+            return "ok"
+        raise ValueError(f"unknown tool: {name}")
+
+    result = await asyncio.to_thread(execute_file_tool)
+    if cancelled.is_set(): raise InterruptedError("Operation aborted")
+    return result
 
 
 
