@@ -58,6 +58,8 @@ def load_mcp_configs(aliases: list[str], env: Mapping[str, str] | None = None) -
     configured_path = settings.tiny_mcp_config if env is settings.environment else env.get("TINY_MCP_CONFIG")
     if not configured_path: raise ValueError("TINY_MCP_CONFIG must be set to use --mcp")
     path = Path(configured_path).resolve()
+    if not path.is_file():
+        raise ValueError("Failed to load MCP catalog: file is missing, unreadable, or invalid JSON")
     try: value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): raise ValueError("Failed to load MCP catalog: file is missing, unreadable, or invalid JSON") from None
     catalog = _validate_catalog(value)
@@ -511,10 +513,8 @@ def _map_tool_name(alias: str, remote_name: str) -> str:
 def display_tool_name(name: str) -> str:
     match = re.fullmatch(r"mcp__([A-Za-z0-9_-]+)__([A-Za-z0-9_-]+)", name)
     if not match: return name
-    try:
-        decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode()
-        return f"mcp:{decode(match.group(1))}/{decode(match.group(2))}"
-    except (ValueError, UnicodeDecodeError): return name
+    decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode(errors="replace")
+    return f"mcp:{decode(match.group(1))}/{decode(match.group(2))}"
 
 
 def _normalize_result(result: dict) -> str:

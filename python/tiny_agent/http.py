@@ -1,6 +1,7 @@
 import asyncio
 import re
 import time
+from contextlib import suppress
 
 MAX_HTTP_HEADER_BYTES = 64 * 1024
 
@@ -192,5 +193,5 @@ async def wait_owned(awaitable, cancelled: asyncio.Event | None):
 async def close_writer(writer: asyncio.StreamWriter, deadline: float | None = None) -> None:
     writer.close()
     timeout = 1.0 if deadline is None else max(0.01, min(1.0, deadline - time.monotonic()))
-    try: await asyncio.wait_for(writer.wait_closed(), timeout)
-    except (OSError, asyncio.TimeoutError): pass
+    with suppress(OSError, asyncio.TimeoutError):
+        await asyncio.wait_for(writer.wait_closed(), timeout)

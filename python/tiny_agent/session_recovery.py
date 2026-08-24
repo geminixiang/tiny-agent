@@ -22,6 +22,16 @@ def _assistant(state):
     return {"assistantEntryId": settled, "calls": message.get("tool_calls", [])} if message else None
 
 
+def _json_object(text: object) -> dict | None:
+    if not isinstance(text, str) or not text.strip().startswith("{"):
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def plan_recovery(state: dict, current: dict) -> dict:
     operation = state["operation"]
     if operation["kind"] == "idle": return {"type": "finish", "outcome": "completed", "completion": "normal"}
@@ -58,9 +68,8 @@ def plan_recovery(state: dict, current: dict) -> dict:
         if (assistant["assistantEntryId"], index) in processed: continue
         declaration = next((tool for tool in current["tools"] if tool["name"] == call["function"]["name"]), None)
         if not declaration: return {"type": "appendSynthetic", "results": [_synthetic(assistant["assistantEntryId"], index, call, "unknownTool")]}
-        try: args = json.loads(call["function"]["arguments"])
-        except (json.JSONDecodeError, TypeError): args = None
-        if not isinstance(args, dict): return {"type": "appendSynthetic", "results": [_synthetic(assistant["assistantEntryId"], index, call, "invalidArguments")]}
+        args = _json_object(call["function"].get("arguments"))
+        if args is None: return {"type": "appendSynthetic", "results": [_synthetic(assistant["assistantEntryId"], index, call, "invalidArguments")]}
         return {"type": "startTool", "mode": "start", "assistantEntryId": assistant["assistantEntryId"], "toolIndex": index, "toolName": call["function"]["name"], "arguments": args}
     if not pending:
         return {"type": "startStep", "stepKind": "assistant", "attempt": 1, "contextThroughEntryId": operation["toolCalls"][-1]["resultEntryId"]}

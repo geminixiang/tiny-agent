@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import select
+import shutil
 import sys
 import termios
 import tty
@@ -9,6 +10,17 @@ import unicodedata
 from typing import Awaitable, Callable
 
 from .agent import Agent
+
+
+def complete_utf8(data: bytearray) -> bool:
+    if not data: return False
+    first = data[0]
+    if first < 0x80: return True
+    if 0xC2 <= first <= 0xDF: needed = 2
+    elif 0xE0 <= first <= 0xEF: needed = 3
+    elif 0xF0 <= first <= 0xF4: needed = 4
+    else: return True
+    return len(data) >= needed and all(0x80 <= byte <= 0xBF for byte in data[1:needed])
 
 
 class Terminal:
@@ -32,8 +44,7 @@ class Terminal:
             offset += cell
         return divmod(offset, columns)
     def redraw(self, prompt: str, line: list[str], cursor: int, old_row: int) -> int:
-        try: columns = os.get_terminal_size(self.fd).columns
-        except OSError: columns = 80
+        columns = shutil.get_terminal_size((80, 24)).columns
         clean_prompt = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", prompt)
         if old_row: print(f"\x1b[{old_row}A", end="")
         print(f"\r\x1b[J{prompt}{''.join(line)}", end="")
@@ -76,8 +87,8 @@ class Terminal:
                 continue
             if char >= b" ":
                 pending += char
-                try: text = pending.decode()
-                except UnicodeDecodeError: continue
+                if not complete_utf8(pending): continue
+                text = pending.decode(errors="replace")
                 line[cursor:cursor] = text; cursor += len(text); pending.clear(); row = self.redraw(prompt, line, cursor, row)
     async def run(self, agent: Agent, operation: Callable[[], Awaitable[str]]) -> str:
         task = asyncio.create_task(operation())

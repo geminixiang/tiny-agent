@@ -1,11 +1,13 @@
 import asyncio
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import signal
 import ssl
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
@@ -46,8 +48,8 @@ def format_tool_event(event: dict) -> str:
 
 
 def load_project_instructions() -> str:
-    try: return (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    except FileNotFoundError: return ""
+    path = ROOT / "AGENTS.md"
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
 def load_skills(extra: list[str] | None = None) -> list[dict]:
@@ -76,11 +78,10 @@ for name, description, properties in [
 
 
 def _tls_context() -> ssl.SSLContext:
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
+    if importlib.util.find_spec("certifi") is None:
         return ssl.create_default_context()
+    import certifi
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 async def _post_json(url: str, payload: dict, headers: dict[str, str], timeout: float, cancelled: asyncio.Event | None = None) -> dict:
@@ -172,6 +173,16 @@ def step_failed_record(operation_id: str, step_id: str, attempt_id: str, code: s
     }
 
 
+def json_object(text: object) -> dict | None:
+    if not isinstance(text, str) or not text.strip().startswith("{"):
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 async def execute_bash(command: str, cancelled: asyncio.Event) -> str:
     deadline = time.monotonic() + BASH_TIMEOUT_SECONDS
     creation = asyncio.create_task(asyncio.create_subprocess_shell(
@@ -189,10 +200,14 @@ async def execute_bash(command: str, cancelled: asyncio.Event) -> str:
         for task in active: task.cancel()
         if active: await asyncio.gather(*active, return_exceptions=True)
 
+    async def kill_process_group() -> None:
+        assert process is not None
+        with suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
     async def kill_and_reap() -> None:
         assert process is not None
-        try: os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError): pass
+        await kill_process_group()
         if process.stdout:
             transport = getattr(process.stdout, "_transport", None)
             if transport: transport.close()
@@ -239,13 +254,11 @@ async def execute_bash(command: str, cancelled: asyncio.Event) -> str:
             if waited in done and not leader_exited:
                 await waited
                 leader_exited = True
-                try: os.killpg(process.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError): pass
+                await kill_process_group()
 
         # The shell may have exited after starting redirected descendants which no
         # longer hold stdout open. Its isolated process group must not outlive the tool.
-        try: os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError): pass
+        await kill_process_group()
     except asyncio.CancelledError:
         if process is not None: await kill_and_reap()
         if cancelled.is_set(): raise InterruptedError("Operation aborted") from None
@@ -621,11 +634,10 @@ class Agent:
             for index, call in enumerate(calls):
                 aborted = False
                 name = call["function"]["name"]
-                try: args = json.loads(call["function"]["arguments"])
-                except (json.JSONDecodeError, TypeError): args = None
+                args = json_object(call["function"].get("arguments"))
                 tool = next((item for item in self.tools if item["function"]["name"] == name), None)
-                if not isinstance(args, dict) or not tool:
-                    reason = "invalidArguments" if not isinstance(args, dict) else "unknownTool"
+                if args is None or not tool:
+                    reason = "invalidArguments" if args is None else "unknownTool"
                     content = "Error: Tool arguments were invalid; the tool was not executed." if reason == "invalidArguments" else "Error: Unknown tool; the tool was not executed."
                     result = {"role": "tool", "content": content, "tool_call_id": call["id"]}; result_id = uuid7()
                     entry = {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "message": result, "toolName": name, "result": {"type": "synthetic", "reason": reason}}
