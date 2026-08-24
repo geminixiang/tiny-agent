@@ -1,7 +1,7 @@
 import { exec, type ExecException } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 const run = promisify(exec),
@@ -80,50 +80,8 @@ export function formatToolEvent({ phase, name, args, result }: ToolEvent) {
     return `◆ ${name}${target ? ` ${target.length > 80 ? target.slice(0, 77) + "..." : target}` : ""}${suffix}`;
 }
 
-// Best-effort static path containment; hostile concurrent mutation still requires an OS sandbox.
-function requireInsideRoot(path: string, canonicalRoot: string) {
-    const rel = relative(canonicalRoot, path);
-    if (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) return path;
-    throw Error("path must resolve inside cwd");
-}
-
-function requestedPath(path: string) {
-    const full = resolve(root, path),
-        rel = relative(root, full);
-    if (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) return full;
-    throw Error("path must resolve inside cwd");
-}
-
-async function existingPathInRoot(path: string) {
-    const full = requestedPath(path),
-        canonicalRoot = await realpath(root),
-        canonical = await realpath(full);
-    return requireInsideRoot(canonical, canonicalRoot);
-}
-
-async function writePathInRoot(path: string) {
-    const full = requestedPath(path),
-        canonicalRoot = await realpath(root);
-    try {
-        await lstat(full);
-    } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        let ancestor = dirname(full);
-        while (true) {
-            try {
-                await lstat(ancestor);
-                break;
-            } catch (ancestorError) {
-                if ((ancestorError as NodeJS.ErrnoException).code !== "ENOENT") throw ancestorError;
-                const parent = dirname(ancestor);
-                if (parent === ancestor) throw ancestorError;
-                ancestor = parent;
-            }
-        }
-        const canonicalAncestor = requireInsideRoot(await realpath(ancestor), canonicalRoot);
-        return requireInsideRoot(resolve(canonicalAncestor, relative(ancestor, full)), canonicalRoot);
-    }
-    return requireInsideRoot(await realpath(full), canonicalRoot);
+function resolvePath(path: string) {
+    return isAbsolute(path) ? resolve(path) : resolve(root, path);
 }
 
 async function limitBashOutput(output: string, complete = true) {
@@ -229,7 +187,7 @@ const trustedReadExecute: Tool["execute"] = async (args, signal) => {
     const path = requiredString(args.path, "path"),
         offset = optionalPositiveInteger(args.offset, "offset"),
         limit = optionalPositiveInteger(args.limit, "limit");
-    const text = await readFile(await existingPathInRoot(path), { encoding: "utf8", signal });
+    const text = await readFile(resolvePath(path), { encoding: "utf8", signal });
     return readLines(text, offset, limit);
 };
 
@@ -269,7 +227,7 @@ const writeTool: Tool = {
         if (signal?.aborted) throw Error("Operation aborted");
         const requestedPath = requiredString(args.path, "path");
         if (typeof args.content !== "string") throw Error("content must be a string");
-        const path = await writePathInRoot(requestedPath);
+        const path = resolvePath(requestedPath);
         await mkdir(dirname(path), { recursive: true });
         if (signal?.aborted) throw Error("Operation aborted");
         await writeFile(path, args.content, { signal });
@@ -311,7 +269,7 @@ const editTool: Tool = {
         if (signal?.aborted) throw Error("Operation aborted");
         const requestedPath = requiredString(args.path, "path"),
             edits = requiredEdits(args.edits),
-            path = await existingPathInRoot(requestedPath);
+            path = resolvePath(requestedPath);
         const original = await readFile(path, { encoding: "utf8", signal }),
             bom = original.startsWith("\uFEFF"),
             text = bom ? original.slice(1) : original,

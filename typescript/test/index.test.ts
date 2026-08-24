@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -1871,46 +1871,38 @@ test("write reports UTF-8 bytes and edit applies atomic exact replacements", asy
         edits: [{ oldText: "first\nkeep", newText: "changed\nkeep" }],
     });
     assert.equal(await readFile("mixed.txt", "utf8"), "changed\r\nkeep\nlast\r\n");
-    await assert.rejects(() => executeTool("read", { path: "../secret" }), /inside cwd/);
+    await assert.rejects(() => executeTool("read", { path: "../secret" }), /ENOENT|not exist/);
+    const outside = join(resolve(dir, ".."), "tiny-agent-outside.txt");
+    try {
+        assert.equal(
+            await executeTool("write", { path: outside, content: "outside" }),
+            `Successfully wrote 7 bytes to ${outside}.`,
+        );
+        assert.equal(await executeTool("read", { path: outside }), "outside");
+    } finally {
+        await unlink(outside);
+    }
 });
 
-test("filesystem tools contain canonical paths while allowing symlinks within cwd", async () => {
+test("filesystem tools operate on paths outside cwd including symlinks", async () => {
     const outside = await mkdtemp(join(tmpdir(), "tiny-agent-outside-")),
         prefixSibling = `${dir}-sibling`;
     await mkdir(prefixSibling);
     await writeFile(join(outside, "secret.txt"), "outside");
     await writeFile(join(prefixSibling, "secret.txt"), "prefix");
-    await assert.rejects(() => executeTool("read", { path: join(prefixSibling, "secret.txt") }), /resolve inside cwd/);
+    assert.equal(await executeTool("read", { path: join(prefixSibling, "secret.txt") }), "prefix");
     await symlink(outside, "outside-link");
-    await assert.rejects(() => executeTool("read", { path: "outside-link/secret.txt" }), /resolve inside cwd/);
-    await assert.rejects(
-        () => executeTool("write", { path: "outside-link/new.txt", content: "escaped" }),
-        /resolve inside cwd/,
+    assert.equal(await executeTool("read", { path: "outside-link/secret.txt" }), "outside");
+    assert.equal(
+        await executeTool("write", { path: "outside-link/new.txt", content: "escaped" }),
+        "Successfully wrote 7 bytes to outside-link/new.txt.",
     );
-    await assert.rejects(
-        () =>
-            executeTool("edit", {
-                path: "outside-link/secret.txt",
-                edits: [{ oldText: "outside", newText: "escaped" }],
-            }),
-        /resolve inside cwd/,
-    );
-    assert.equal(await readFile(join(outside, "secret.txt"), "utf8"), "outside");
-    await assert.rejects(() => readFile(join(outside, "new.txt")), /ENOENT/);
-
-    await symlink("missing-target.txt", "dangling-inside-link");
-    await assert.rejects(
-        () => executeTool("write", { path: "dangling-inside-link", content: "must not replace link" }),
-        /ENOENT|ELOOP/,
-    );
-    await assert.rejects(() => readFile("missing-target.txt"), /ENOENT/);
-    const absentOutside = join(outside, "absent");
-    await symlink(absentOutside, "dangling-outside-link");
-    await assert.rejects(
-        () => executeTool("write", { path: "dangling-outside-link", content: "escaped" }),
-        /ENOENT|ELOOP/,
-    );
-    await assert.rejects(() => readFile(absentOutside), /ENOENT/);
+    assert.equal(await readFile(join(outside, "new.txt"), "utf8"), "escaped");
+    await executeTool("edit", {
+        path: "outside-link/secret.txt",
+        edits: [{ oldText: "outside", newText: "escaped" }],
+    });
+    assert.equal(await readFile(join(outside, "secret.txt"), "utf8"), "escaped");
 
     await mkdir("inside", { recursive: true });
     await writeFile("inside/file.txt", "inside");
