@@ -23,7 +23,6 @@ BASH_TIMEOUT_SECONDS = 120
 MAX_HTTP_RESPONSE = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT = 50 * 1024
 ROOT = Path.cwd().resolve()
-MODEL = os.getenv("TINY_MODEL") or DEFAULT_MODEL
 
 
 def format_tokens(n: int) -> str: return str(n) if n < 1_000 else f"{n / 1_000:.1f}k" if n < 10_000 else f"{n // 1_000}k" if n < 1_000_000 else f"{n / 1_000_000:.1f}M" if n < 10_000_000 else f"{n // 1_000_000}M"
@@ -114,21 +113,16 @@ async def _post_json(url: str, payload: dict, headers: dict[str, str], timeout: 
 
 
 def normalize_assistant_message(value: object) -> dict:
-    if not isinstance(value, dict) or value.get("role") != "assistant":
-        raise RuntimeError("invalid assistant message")
+    if not isinstance(value, dict) or value.get("role") != "assistant": raise RuntimeError("invalid assistant message")
     content = value.get("content")
-    if content is not None and not isinstance(content, str):
-        raise RuntimeError("invalid assistant content")
+    if content is not None and not isinstance(content, str): raise RuntimeError("invalid assistant content")
     normalized = {"role": "assistant", "content": content}
     raw_calls = value.get("tool_calls")
-    if raw_calls is None:
-        return normalized
-    if not isinstance(raw_calls, list) or not raw_calls:
-        raise RuntimeError("invalid assistant tool_calls")
+    if raw_calls is None: return normalized
+    if not isinstance(raw_calls, list) or not raw_calls: raise RuntimeError("invalid assistant tool_calls")
     calls = []
     for value_call in raw_calls:
-        if not isinstance(value_call, dict) or value_call.get("type") != "function":
-            raise RuntimeError("invalid assistant tool call")
+        if not isinstance(value_call, dict) or value_call.get("type") != "function": raise RuntimeError("invalid assistant tool call")
         function = value_call.get("function")
         if (
             not isinstance(value_call.get("id"), str) or not value_call["id"] or
@@ -146,16 +140,13 @@ def normalize_assistant_message(value: object) -> dict:
 
 
 def provider_stop_reason(finish: object, answer: dict) -> str:
-    if finish == "length":
-        return "length"
+    if finish == "length": return "length"
     if finish in ("tool_calls", "function_call"):
         if not answer.get("tool_calls"):
             raise RuntimeError(f"Provider finish_reason {finish} requires tool calls")
         return "toolUse"
-    if finish in ("content_filter", "network_error"):
-        raise RuntimeError(f"Provider finish_reason: {finish}")
-    if finish not in (None, "stop"):
-        raise RuntimeError(f"Unknown provider finish_reason: {finish}")
+    if finish in ("content_filter", "network_error"): raise RuntimeError(f"Provider finish_reason: {finish}")
+    if finish not in (None, "stop"): raise RuntimeError(f"Unknown provider finish_reason: {finish}")
     return "toolUse" if answer.get("tool_calls") else "stop"
 
 

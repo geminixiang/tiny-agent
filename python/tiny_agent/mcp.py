@@ -41,13 +41,16 @@ class LoadedMcpTools:
     close: Callable[[], Awaitable[None]]
 
 
-def split_mcp_aliases(values: list[str] | None) -> list[str]:
+def split_names(values: list[str] | None) -> list[str]:
     aliases: list[str] = []
     for value in values or []:
         for item in value.split(","):
             alias = item.strip()
             if alias and alias not in aliases: aliases.append(alias)
     return aliases
+
+
+split_mcp_aliases = split_names
 
 
 def load_mcp_configs(aliases: list[str], env: dict[str, str] | os._Environ[str] | None = None) -> list[McpConfig]:
