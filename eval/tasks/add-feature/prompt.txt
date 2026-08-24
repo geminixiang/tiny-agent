@@ -5,5 +5,6 @@
 - 指定 id 的 task 要改成 `completed: true`。
 - 找不到 id 時丟出 `Error("Unknown task: <id>")`。
 - 保持現有功能正常。
+- 只修改 `src/tasks.js`；不要修改測試、`package.json` 或建立其他檔案。
 
 完成後執行測試，並簡短說明結果。

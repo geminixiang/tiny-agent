@@ -7,7 +7,7 @@
 - `byType` 統計每個有效事件的 `event.type` 出現次數。
 - `durationMs` 是最小 `at` 到最大 `at` 的差；沒有有效 timestamp 時為 0。
 - `toolFailures` 統計 `type === "tool"` 且 `ok === false` 的事件數。
-- `lastError` 是最後一個有非空字串 `error` 的事件；沒有時為 `null`。
+- `lastError` 是最後一個具有非空字串 `error` 的有效事件之 `error` 字串；沒有時為 `null`。不要回傳 event object。
 - 不要修改測試或 `package.json`。
 
 完成後執行測試，並簡短說明結果。
