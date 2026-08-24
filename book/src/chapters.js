@@ -6,6 +6,11 @@ export const chapters = [
         description: "拆開 LLM、Agent 與 coding agent，親手建立不可再刪的 model → tool → result 閉環。",
         file: "01-first-principles.html",
         minutes: 14,
+        takeaways: [
+            "LLM 單次呼叫無狀態；連續性完全來自 host 重新送入的 messages。",
+            "不可再刪的閉環只有四步：呼叫 model → 檢查 tool_calls → 執行 tool → 寫回 messages。",
+            "read/write/edit/bash 四個 tool 就能組成最小 coding agent，其餘都是可靠性工程。",
+        ],
     },
     {
         slug: "02-messages-provider",
@@ -14,6 +19,11 @@ export const chapters = [
         description: "理解無狀態模型如何藉由 transcript 延續工作，以及 provider wire format 為何不能直接進入核心。",
         file: "02-messages-provider.html",
         minutes: 18,
+        takeaways: [
+            "Provider 回傳的原始資料不能直接當成 Message；type assertion 不會移除威險欄位。",
+            "Normalization seam 逐欄驗證後重建，不合法欄位一律丟棄。",
+            "finish_reason 比有沒有 tool_calls 更重要：length 截斷時 tool arguments 不可執行。",
+        ],
     },
     {
         slug: "03-tools",
@@ -22,6 +32,12 @@ export const chapters = [
         description: "設計小而深的 Tool 介面、runtime validation、錯誤語意與可安全擴充的 plugin bundle。",
         file: "03-tools.html",
         minutes: 20,
+        takeaways: [
+            "Tool 的 name、schema、guard、execute 應放在同一處，不要拆成別表 + dispatch if。",
+            "JSON Schema 只是介面說明，不是安全檢查；runtime 驗證必須別做。",
+            "tiny-agent 的 file tools 不做 cwd containment；真正隔離來自外層 execution capsule。",
+            "Replay policy 是 effect semantics，不是模型可以選的選項：只有 built-in read 是 safe。",
+        ],
     },
     {
         slug: "04-context-skills",
@@ -30,6 +46,11 @@ export const chapters = [
         description: "把專案規則與領域知識放入正確層級，使用 progressive loading 控制 context 成本。",
         file: "04-context-skills.html",
         minutes: 15,
+        takeaways: [
+            "Context 分四層：system prompt、AGENTS.md、skill metadata、conversation。",
+            "Skills 用 progressive loading：啟動只讀 metadata，味中才讀正文。",
+            "/skill:name 是 CLI 直接讀檔，不需要 read tool；模型自動判斷則需要。",
+        ],
     },
     {
         slug: "05-durable-session",
@@ -38,6 +59,12 @@ export const chapters = [
         description: "用 transactional JSONL 保存接受的工作、model attempt 與 tool intent，讓 crash 後仍可解釋。",
         file: "05-durable-session.html",
         minutes: 26,
+        takeaways: [
+            "核心規則只有一句：intent 必須早於 effect——先寫硬磜，才去執行。",
+            "tiny-agent 承諾 process-crash durability，不承諾 power-loss durability。",
+            "一行 JSONL 就是一筆原子交易；最後 LF 之後的 bytes 是 torn tail，會被舍棄。",
+            "commit/load 是小而深的 storage 介面，隱藏 seq、ID、framing 與 torn-tail repair。",
+        ],
     },
     {
         slug: "06-recovery",
@@ -46,6 +73,12 @@ export const chapters = [
         description: "以 pure reducer 重建狀態，再由 planner 區分 retry、replay、interrupted 與 blocked。",
         file: "06-recovery.html",
         minutes: 25,
+        takeaways: [
+            "Reducer 重建狀態，planner 決定下一步：兩個 pure function，不碰 I/O。",
+            "Retry（重送 model）與 replay（重執行 tool）完全不同，混淆是最常見的誤解。",
+            "Configuration/environment/replay declaration 三道閘門永遠先於 retry 或 failed 判斷。",
+            "真實案例：一個只有真的 kill -9 才能挖出來的 bug，unit test fixture 都是綠燈。",
+        ],
     },
     {
         slug: "07-cancel-compact",
@@ -54,6 +87,12 @@ export const chapters = [
         description: "處理 abort race、合法 transcript，以及 active-context cut 與 durable source partition 的差異。",
         file: "07-cancel-compact.html",
         minutes: 22,
+        takeaways: [
+            "Abort 順序不能反：先 durable 寫 abortRequested，再 signal 正在執行的 phase。",
+            "Abort race 只有兩種合法歷史：成功 settlement 先 durable，或 abortRequested 先 durable。",
+            "Compaction 有兩條分得清楚的切點：active-context cut 給模型看，durable source partition 給稽核看。",
+            "壓縮不是刪除歷史：原始 facts 仍留在 append-only Session 中。",
+        ],
     },
     {
         slug: "08-test-observe-secure",
@@ -62,6 +101,12 @@ export const chapters = [
         description: "用 deterministic fixtures 與 run events 提升成功率，同時劃清 MCP、sandbox 與多租戶責任。",
         file: "08-test-observe-secure.html",
         minutes: 24,
+        takeaways: [
+            "測試、observability、安全邊界是三件不同的事：結果對、過程對、沒越界。",
+            "CI 必須免費且 deterministic；只有 capability eval 才真的呼叫模型。",
+            "MCP 是 Tool adapter，不是 authorization 或 sandbox；--plugin 不是 tenant ACL。",
+            "多租戶需要專用 execution capsule；tiny-agent 本身不提供 tenant isolation。",
+        ],
     },
 ];
 

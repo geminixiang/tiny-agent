@@ -141,6 +141,28 @@ figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem
 .decision-tree .outcome { font-weight: 700; }
 .decision-tree .outcome.blocked { color: var(--accent); }
 
+.chapter-toc { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 2.2rem; padding: 1rem 1.1rem; border: 1px solid var(--line); background: var(--bg); }
+.chapter-toc-label { flex-basis: 100%; margin: 0 0 .15rem; color: var(--muted); font-size: .72rem; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+.chapter-toc a { padding: .3rem .6rem; border: 1px solid var(--line); border-radius: 999px; background: var(--paper); color: var(--ink); font-size: .82rem; text-decoration: none; }
+.chapter-toc a:hover { border-color: var(--accent); color: var(--accent-strong); }
+
+.takeaways { margin: 0 0 2.2rem; padding: 1.1rem 1.2rem; border: 1px solid var(--accent); border-radius: .4rem; background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
+.takeaways-label { margin: 0 0 .55rem; color: var(--accent-strong); font-size: .78rem; font-weight: 760; letter-spacing: .06em; text-transform: uppercase; }
+.takeaways ul { margin: 0; padding-left: 1.2rem; }
+.takeaways li { margin: 0; }
+.takeaways li + li { margin-top: .4rem; }
+
+.bridge, .closure { display: block; margin: 2.4rem 0 0; padding: 1.1rem 1.2rem; border-left: 3px solid var(--accent); background: var(--soft); font-size: 1.02rem; }
+.bridge::before { content: "下一章進度："; display: block; margin-bottom: .3rem; color: var(--accent-strong); font-size: .74rem; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+.closure { text-align: center; font-weight: 700; font-size: 1.1rem; border-left: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: transparent; }
+
+.deep-interface-callback, .three-interfaces-summary, .four-outcomes, .responsibility-backref, .transition { display: block; margin: 1.7rem 0; padding: .9rem 1.1rem; border: 1px dashed var(--line); border-radius: .4rem; background: var(--bg); color: var(--ink); font-size: .95rem; }
+.deep-interface-callback::before, .three-interfaces-summary::before { content: "🔁 重複出現的形狀"; display: block; margin-bottom: .35rem; color: var(--muted); font-size: .72rem; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+.four-outcomes::before { content: "先看結論"; display: block; margin-bottom: .35rem; color: var(--muted); font-size: .72rem; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+.responsibility-backref::before, .transition::before { content: "回頭看"; display: block; margin-bottom: .35rem; color: var(--muted); font-size: .72rem; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+
+.version-note { margin: 1.2rem 0 0; color: var(--muted); font-size: .8rem; font-style: italic; }
+
 .chapter-footer { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0 0; }
 .chapter-footer a { min-height: 5rem; padding: 1rem; border: 1px solid var(--line); background: var(--paper); color: var(--ink); text-decoration: none; }
 .chapter-footer a:last-child { text-align: right; }
@@ -245,7 +267,7 @@ figure.data-anim figcaption { margin-top: .65rem; color: var(--muted); font-size
 
 @media print {
     :root { color-scheme: light; --paper: white; --ink: black; --muted: #444; --line: #bbb; --bg: white; }
-    .topbar, .sidebar, .chapter-footer, .footer, .copy-button { display: none !important; }
+    .topbar, .sidebar, .chapter-footer, .footer, .copy-button, .chapter-toc { display: none !important; }
     .shell { padding: 0; }
     .reader { width: auto; }
     .article { padding: 0; border: 0; box-shadow: none; }

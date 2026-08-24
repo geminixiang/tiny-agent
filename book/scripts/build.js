@@ -64,6 +64,21 @@ function layout({ title, description, path, current = "", body, assets, type = "
 </html>`;
 }
 
+function extractToc(content) {
+    const headings = [...content.matchAll(/<h2 id="([^"]+)">([\s\S]*?)<\/h2>/g)];
+    if (!headings.length) return "";
+    const items = headings
+        .map(([, id, html]) => `<a href="#${id}">${html.replace(/<[^>]+>/g, "")}</a>`)
+        .join("");
+    return `<nav class="chapter-toc" aria-label="本章節點"><p class="chapter-toc-label">本章節點</p>${items}</nav>`;
+}
+
+function takeawaysBox(takeaways) {
+    if (!takeaways?.length) return "";
+    const items = takeaways.map((item) => `<li>${escape(item)}</li>`).join("");
+    return `<aside class="takeaways"><p class="takeaways-label">先看結論</p><ul>${items}</ul></aside>`;
+}
+
 function articlePage(chapter, index, content, assets) {
     const previous = chapters[index - 1];
     const next = chapters[index + 1];
@@ -77,7 +92,7 @@ ${next ? `<a href="/${next.slug}/"><small>下一章</small> ${escape(next.title)
         path: `/${chapter.slug}/`,
         current: chapter.slug,
         assets,
-        body: `<article class="article"><p class="eyebrow">${escape(chapter.part)} · 第 ${index + 1} 章</p><h1>${escape(chapter.title)}</h1><p class="deck">${escape(chapter.description)}</p><div class="meta"><span>約 ${chapter.minutes} 分鐘</span> <span>${index + 1} / ${chapters.length}</span></div>${content}</article>${navigation}`,
+        body: `<article class="article"><p class="eyebrow">${escape(chapter.part)} · 第 ${index + 1} 章</p><h1>${escape(chapter.title)}</h1><p class="deck">${escape(chapter.description)}</p><div class="meta"><span>約 ${chapter.minutes} 分鐘</span> <span>${index + 1} / ${chapters.length}</span></div>${takeawaysBox(chapter.takeaways)}${extractToc(content)}${content}</article>${navigation}`,
     });
 }
 
