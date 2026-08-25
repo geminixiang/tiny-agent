@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, realpath, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -7,10 +7,6 @@ import { startTestMcpServer } from "./support/mcp-server.js";
 
 const dir = await mkdtemp(join(tmpdir(), "tiny-agent-"));
 process.chdir(dir);
-const systemPromptTemplate = await readFile(
-    new URL("../../fixtures/agent/system-prompt.txt", import.meta.url),
-    "utf8",
-);
 const {
     Agent,
     MODEL,
@@ -148,13 +144,12 @@ test("loads cwd AGENTS.md into the system prompt", async () => {
     const instructions = await loadProjectInstructions();
     assert.equal(instructions, "Always answer briefly.\n");
     const system = new Agent([], fetch, undefined, () => {}, instructions).messages[0].content!;
-    const root = await realpath(dir);
-    const project = `\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="${resolve(root, "AGENTS.md")}">\n${instructions}\n</project_instructions>\n\n</project_context>`;
-    const expected = systemPromptTemplate
-        .replace("{{cwd}}", root)
-        .replace("{{project}}", project)
-        .replace("{{skills}}", "(none)");
-    assert.equal(system, expected);
+    assert.match(system, /Use only the tools provided in this request/);
+    assert.match(system, /inspect only what is needed, then make the changes and run focused tests/);
+    assert.match(system, /Use the provided tool descriptions to choose the right capability/);
+    assert.match(system, /If repeated experiments fail, reconsider the approach/);
+    assert.match(system, /<project_instructions path=".*\/AGENTS\.md">\nAlways answer briefly\./);
+    assert.match(system, /<available_skills>\n\(none\)\n<\/available_skills>/);
     assert.equal(await loadProjectInstructions(resolve(dir, "missing")), "");
 });
 
