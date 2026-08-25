@@ -1,6 +1,6 @@
 # tiny-agent Book
 
-繁體中文（臺灣）的靜態教學書網站。內容從最小 agent loop 開始，逐步說明 Tool、Context、durable Session、recovery、cancellation、compaction、測試、observability 與安全邊界。
+繁體中文（臺灣）的靜態教學書網站。內容先從模型、Token、Message 與 Context 等基礎知識建立共同語言，再進入最小 agent loop，逐步說明 Tool、Context engineering、durable Session、recovery、cancellation、compaction、測試、observability 與安全邊界。主要讀者是具備資料結構、作業系統與基本軟體工程背景的資訊工程大三以上學生。
 
 ## 致謝
 

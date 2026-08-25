@@ -137,6 +137,9 @@ details.reading-branch[open] > summary { margin-bottom: .75rem; }
 
 figure.step-flow, figure.decision-tree { margin: 1.6rem 0; }
 figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem; color: var(--muted); font-size: .85rem; }
+.video-embed { margin: 1.6rem 0; }
+.video-embed iframe { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; border: 0; background: var(--code); }
+.video-embed figcaption { margin-top: .6rem; color: var(--muted); font-size: .85rem; }
 
 .step-flow ol { display: flex; flex-wrap: wrap; align-items: stretch; gap: .5rem; list-style: none; margin: 0; padding: 0; }
 .step-flow li { display: grid; place-items: center; gap: .3rem; padding: .75rem 1rem; border: 1px solid var(--line); background: var(--bg); text-align: center; }

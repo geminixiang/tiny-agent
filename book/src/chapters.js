@@ -1,5 +1,19 @@
 export const chapters = [
     {
+        slug: "00-foundations",
+        part: "第零部｜基礎知識",
+        title: "模型、Token 與 Context",
+        description: "建立 Agent 工程的共同語言：模型如何產生輸出，以及 token、message、context、tool、session 與 memory 分別是什麼。",
+        file: "00-foundations.html",
+        minutes: 28,
+        takeaways: [
+            "模型只看得到本次 request 的 active context；磁碟、資料庫與上一次呼叫不會自動可見。",
+            "Context 不只是聊天記錄，還包括 instructions、tool definitions、檢索資料與選入的歷史。",
+            "Tool call 是模型產生的結構化提議；真正的驗證、授權與副作用都發生在 host。",
+            "Transcript、active context、Session 與 memory 是不同層次的狀態，不應混為一談。",
+        ],
+    },
+    {
         slug: "01-first-principles",
         part: "第一部｜最小閉環",
         title: "從 LLM 到 Agent",

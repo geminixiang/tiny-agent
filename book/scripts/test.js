@@ -193,6 +193,7 @@ test("security and cache headers are restrictive", async () => {
     assert.match(headers, /Content-Security-Policy:/);
     assert.match(headers, /script-src 'self';/);
     assert.match(headers, /connect-src 'none'/);
+    assert.match(headers, /frame-src https:\/\/www\.youtube\.com/);
     assert.match(headers, /frame-ancestors 'none'/);
     assert.doesNotMatch(headers, /unsafe-inline|unsafe-eval/);
     assert.match(headers, /\/assets\/\*\n  Cache-Control: public, max-age=31536000, immutable/);

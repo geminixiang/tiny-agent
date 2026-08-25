@@ -17,7 +17,7 @@ function chapterGroups(current) {
     return chapters
         .map((chapter, index) => {
             const heading = chapter.part === part ? "" : `<li class="nav-part">${escape((part = chapter.part))}</li>`;
-            return `${heading}<li data-search-item><a href="/${chapter.slug}/"${chapter.slug === current ? ' aria-current="page"' : ""}><span class="chapter-number">${String(index + 1).padStart(2, "0")}</span> <span>${escape(chapter.title)}</span></a></li>`;
+            return `${heading}<li data-search-item><a href="/${chapter.slug}/"${chapter.slug === current ? ' aria-current="page"' : ""}><span class="chapter-number">${String(index).padStart(2, "0")}</span> <span>${escape(chapter.title)}</span></a></li>`;
         })
         .join("");
 }
@@ -92,7 +92,7 @@ ${next ? `<a href="/${next.slug}/"><small>下一章</small> ${escape(next.title)
         path: `/${chapter.slug}/`,
         current: chapter.slug,
         assets,
-        body: `<article class="article"><p class="eyebrow">${escape(chapter.part)} · 第 ${index + 1} 章</p><h1>${escape(chapter.title)}</h1><p class="deck">${escape(chapter.description)}</p><div class="meta"><span>約 ${chapter.minutes} 分鐘</span> <span>${index + 1} / ${chapters.length}</span></div>${takeawaysBox(chapter.takeaways)}${extractToc(content)}${content}</article>${navigation}`,
+        body: `<article class="article"><p class="eyebrow">${escape(chapter.part)} · 第 ${index} 章</p><h1>${escape(chapter.title)}</h1><p class="deck">${escape(chapter.description)}</p><div class="meta"><span>約 ${chapter.minutes} 分鐘</span> <span>${index + 1} / ${chapters.length}</span></div>${takeawaysBox(chapter.takeaways)}${extractToc(content)}${content}</article>${navigation}`,
     });
 }
 
@@ -101,7 +101,7 @@ function homePage(assets) {
     const cards = chapters
         .map(
             (chapter, index) =>
-                `<a class="path-card" href="/${chapter.slug}/"><span class="index">${String(index + 1).padStart(2, "0")}</span> <span><h2>${escape(chapter.title)}</h2><p>${escape(chapter.description)}</p></span> <time>${chapter.minutes} 分鐘</time></a>`,
+                `<a class="path-card" href="/${chapter.slug}/"><span class="index">${String(index).padStart(2, "0")}</span> <span><h2>${escape(chapter.title)}</h2><p>${escape(chapter.description)}</p></span> <time>${chapter.minutes} 分鐘</time></a>`,
         )
         .join("");
     return layout({
@@ -111,7 +111,7 @@ function homePage(assets) {
         path: "/",
         type: "home",
         assets,
-        body: `<article class="article home-intro"><p class="eyebrow">繁體中文（臺灣）· 開源工程教材</p><h1>從第一性原理，打造能穩定執行的 AI Agent</h1><p class="deck">這不是功能清單，也不是 prompt 技巧合集。我們從不可再刪的 model → tool → result 閉環開始，逐步推導 context、durable intent、crash recovery 與 production 邊界。</p><div class="meta"><span>${chapters.length} 章</span> <span>約 ${total} 分鐘</span> <span>TypeScript / Go / Python / Rust</span></div><a href="/${chapters[0].slug}/">開始第一章 →</a><figure class="step-flow" id="fig-home-map" aria-labelledby="fig-home-map-caption"><ol><li><span class="step-label">第一部｜最小閉環</span><p>無壓力：迴圈本身</p></li><li class="step-arrow" aria-hidden="true">→</li><li><span class="step-label">第二部｜能力邊界</span><p>能力壓力：迴圈能做什麼</p></li><li class="step-arrow" aria-hidden="true">→</li><li><span class="step-label">第三部｜可靠執行</span><p>接下來登場</p></li></ol><figcaption id="fig-home-map-caption">圖 1：全書地圖（開場版）。後面還有第四部，讀到 08 章會看到完整版本。</figcaption></figure><section class="path" aria-labelledby="path-title"><h2 id="path-title">學習路徑</h2>${cards}</section><aside class="acknowledgement"><h2>感謝 Pi 帶來的啟發</h2><p>這本書與 tiny-agent 的許多設計思考受到 <a href="https://github.com/earendil-works/pi">Pi</a> 啟發，尤其是精簡的 agent loop、Tool 模型、skills 漸進載入、compaction，以及讓 coding agent 保持可理解與可操作的工程取向。感謝 Pi 及其貢獻者公開實作與文件。</p><p>Tiny-agent 不是 Pi 的 fork 或移植；它是獨立的四語言教學實作，並針對 transactional Session、crash recovery 與跨語言 conformance 發展自己的 contract。</p></aside><p class="version-note">本書內容對照 repository 目前狀態；四語言能力差異等細節請以 repo 原始碼為準。</p><section class="planned"><h2 id="planned-title">接下來會寫</h2><p>以下是已規劃的 polyglot 與企業實戰篇；先顯示路線，不建立空白頁面。</p><ul>${planned.map((item) => `<li>${escape(item)}</li>`).join("")}</ul></section></article>`,
+        body: `<article class="article home-intro"><p class="eyebrow">繁體中文（臺灣）· 開源工程教材</p><h1>從第一性原理，打造能穩定執行的 AI Agent</h1><p class="deck">這不是功能清單，也不是 prompt 技巧合集。我們先建立 model、token、message 與 context 的共同語言，再從不可再刪的 model → tool → result 閉環，逐步推導 durable intent、crash recovery 與 production 邊界。</p><div class="meta"><span>${chapters.length} 章</span> <span>約 ${total} 分鐘</span> <span>TypeScript / Go / Python / Rust</span></div><a href="/${chapters[0].slug}/">開始第零章 →</a><figure class="step-flow" id="fig-home-map" aria-labelledby="fig-home-map-caption"><ol><li><span class="step-label">第零部｜基礎知識</span><p>共同語言：模型實際看見什麼</p></li><li class="step-arrow" aria-hidden="true">→</li><li><span class="step-label">第一部｜最小閉環</span><p>控制流程：Agent 如何持續行動</p></li><li class="step-arrow" aria-hidden="true">→</li><li><span class="step-label">第二、三部｜能力與可靠性</span><p>從能做事走向能恢復</p></li></ol><figcaption id="fig-home-map-caption">圖 1：全書地圖（開場版）。第四部會進一步處理測試、observability 與安全邊界。</figcaption></figure><section class="path" aria-labelledby="path-title"><h2 id="path-title">學習路徑</h2>${cards}</section><aside class="acknowledgement"><h2>感謝 Pi 帶來的啟發</h2><p>這本書與 tiny-agent 的許多設計思考受到 <a href="https://github.com/earendil-works/pi">Pi</a> 啟發，尤其是精簡的 agent loop、Tool 模型、skills 漸進載入、compaction，以及讓 coding agent 保持可理解與可操作的工程取向。感謝 Pi 及其貢獻者公開實作與文件。</p><p>Tiny-agent 不是 Pi 的 fork 或移植；它是獨立的四語言教學實作，並針對 transactional Session、crash recovery 與跨語言 conformance 發展自己的 contract。</p></aside><p class="version-note">本書內容對照 repository 目前狀態；四語言能力差異等細節請以 repo 原始碼為準。</p><section class="planned"><h2 id="planned-title">接下來會寫</h2><p>以下是已規劃的 polyglot 與企業實戰篇；先顯示路線，不建立空白頁面。</p><ul>${planned.map((item) => `<li>${escape(item)}</li>`).join("")}</ul></section></article>`,
     });
 }
 
@@ -161,7 +161,7 @@ async function main() {
     );
     await writeFile(
         join(out, "_headers"),
-        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
+        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-src https://www.youtube.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
     );
     await writeFile(join(out, "_redirects"), `/index.html / 301\n`);
     await writeFile(
