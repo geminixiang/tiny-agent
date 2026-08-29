@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chapters, planned } from "../src/chapters.js";
 
@@ -118,44 +118,40 @@ function homePage(assets) {
 async function main() {
     await rm(out, { recursive: true, force: true });
     await mkdir(join(out, "assets"), { recursive: true });
-    const [cssContent, jsContent, themeContent, faviconContent, img00Sys, img00Ctx, img01Vs, img01Flow] = await Promise.all([
-        readFile(join(bookRoot, "src/assets/styles.css"), "utf8"),
-        readFile(join(bookRoot, "src/assets/book.js"), "utf8"),
-        readFile(join(bookRoot, "src/assets/theme.js"), "utf8"),
-        readFile(join(bookRoot, "src/assets/favicon.png")),
-        readFile(join(bookRoot, "src/assets/00-system-boundary.png")),
-        readFile(join(bookRoot, "src/assets/00-context-boundary.png")),
-        readFile(join(bookRoot, "src/assets/01-llm-vs-agent.png")),
-        readFile(join(bookRoot, "src/assets/01-agent-loop-flow.png")),
-    ]);
-    const assets = {
-        css: `styles.${hash(cssContent)}.css`,
-        js: `book.${hash(jsContent)}.js`,
-        theme: `theme.${hash(themeContent)}.js`,
-        favicon: `favicon.${hash(faviconContent)}.png`,
-        img00Sys: `00-system-boundary.${hash(img00Sys)}.png`,
-        img00Ctx: `00-context-boundary.${hash(img00Ctx)}.png`,
-        img01Vs: `01-llm-vs-agent.${hash(img01Vs)}.png`,
-        img01Flow: `01-agent-loop-flow.${hash(img01Flow)}.png`,
-    };
-    await Promise.all([
-        writeFile(join(out, "assets", assets.css), cssContent),
-        writeFile(join(out, "assets", assets.js), jsContent),
-        writeFile(join(out, "assets", assets.theme), themeContent),
-        writeFile(join(out, "assets", assets.favicon), faviconContent),
-        writeFile(join(out, "assets", assets.img00Sys), img00Sys),
-        writeFile(join(out, "assets", assets.img00Ctx), img00Ctx),
-        writeFile(join(out, "assets", assets.img01Vs), img01Vs),
-        writeFile(join(out, "assets", assets.img01Flow), img01Flow),
-        writeFile(join(out, "index.html"), homePage(assets)),
-    ]);
+
+    // 自動掃描並打包所有 src/assets 檔案（自動進行 content hashing）
+    const assetsDir = join(bookRoot, "src/assets");
+    const assetFiles = await readdir(assetsDir);
+    const assetMap = new Map(); // originalFileName -> hashedFileName
+    const assets = {};
+
+    for (const fileName of assetFiles) {
+        const filePath = join(assetsDir, fileName);
+        const content = await readFile(filePath);
+        const ext = extname(fileName);
+        const baseName = fileName.slice(0, -ext.length);
+        const hashedName = `${baseName}.${hash(content)}${ext}`;
+        assetMap.set(fileName, hashedName);
+        await writeFile(join(out, "assets", hashedName), content);
+    }
+
+    assets.css = assetMap.get("styles.css");
+    assets.js = assetMap.get("book.js");
+    assets.theme = assetMap.get("theme.js");
+    assets.favicon = assetMap.get("favicon.png");
+
+    await writeFile(join(out, "index.html"), homePage(assets));
+
     for (const [index, chapter] of chapters.entries()) {
         let content = await readFile(join(bookRoot, "src/chapters", chapter.file), "utf8");
-        content = content
-            .replaceAll("<!-- ASSET:00-system-boundary.png -->", `/assets/${assets.img00Sys}`)
-            .replaceAll("<!-- ASSET:00-context-boundary.png -->", `/assets/${assets.img00Ctx}`)
-            .replaceAll("<!-- ASSET:01-llm-vs-agent.png -->", `/assets/${assets.img01Vs}`)
-            .replaceAll("<!-- ASSET:01-agent-loop-flow.png -->", `/assets/${assets.img01Flow}`);
+        // 動態替換所有 <!-- ASSET:xxx.png --> 佔位符
+        content = content.replaceAll(/<!-- ASSET:([a-zA-Z0-9._-]+) -->/g, (match, rawName) => {
+            const hashed = assetMap.get(rawName);
+            if (!hashed) {
+                throw new Error(`Chapter ${chapter.file} references missing asset: ${rawName}`);
+            }
+            return `/assets/${hashed}`;
+        });
         const directory = join(out, chapter.slug);
         await mkdir(directory, { recursive: true });
         await writeFile(join(directory, "index.html"), articlePage(chapter, index, content, assets));
@@ -189,7 +185,7 @@ async function main() {
             2,
         ),
     );
-    console.log(`Built ${chapters.length + 1} pages in ${out}`);
+    console.log(`Built ${chapters.length + 1} pages with ${assetMap.size} assets in ${out}`);
 }
 
 await main();
