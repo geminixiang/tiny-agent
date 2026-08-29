@@ -50,6 +50,7 @@ export const chapters = [
             "Tool 的 name、schema、guard、execute 應放在同一處，不要拆成別表 + dispatch if。",
             "JSON Schema 只是介面說明，不是安全檢查；runtime 驗證必須別做。",
             "tiny-agent 的 file tools 不做 cwd containment；真正隔離來自外層 execution capsule。",
+            "bg 把長時間執行的 server 變成可 list、logs、status、stop 的背景 process。",
             "Replay policy 是 effect semantics，不是模型可以選的選項：只有 built-in read 是 safe。",
         ],
     },

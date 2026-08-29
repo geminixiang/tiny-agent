@@ -83,6 +83,92 @@ tiny-ts --plugin read,edit "閱讀並修改 README"
     };
 }</code></pre>
 
+<h2 id="background-processes">Background Process：為什麼需要 <code>bg</code></h2>
+<p>
+    初學者很容易以為「要啟動 server，就讓模型呼叫 <code>bash</code> 跑 <code>npm run dev</code>」。問題是
+    <code>bash</code> tool 的語意是：執行一個命令，等它結束，再把 stdout/stderr 回傳。HTTP server、watch mode、dev
+    server 則剛好相反：它們正常情況下不會結束。
+</p>
+<pre data-lang="sh"><code># 這對人類 terminal 很自然，對 agent tool loop 卻很麻煩
+npm run dev</code></pre>
+<p>
+    如果硬用 <code>bash</code> 做背景行程，agent 會開始學 shell 技巧：<code>&amp;</code>、<code>nohup</code>、redirect log、
+    <code>lsof</code> 查 port、<code>kill</code> 停 process。這些不是 app 的重點，卻會佔掉很多 tool call，也很容易留下沒有關掉的
+    server。<code>bg</code> tool 就是把這件事變成一個小而明確的能力。
+</p>
+
+<pre data-lang="json"><code>{"action":"start","command":"node backend/server.mjs"}
+{"action":"list"}
+{"action":"status","id":"12345"}
+{"action":"logs","id":"12345","tail":80}
+{"action":"stop","id":"12345"}</code></pre>
+
+<p>
+    <code>bg start</code> 會在目前工作目錄啟動一個背景 process，回傳的 <code>id</code> 就是 OS pid。它不假裝 server
+    已經健康，只表示 process 已經啟動且短暫觀察後還活著；真正的健康檢查仍應由 agent 用 <code>curl</code> 或測試命令驗證。
+</p>
+
+<h3 id="bg-files">看得見的狀態：metadata 與 log</h3>
+<p>每個背景 process 都有兩個檔案，固定放在目前 cwd：</p>
+<pre><code>.tiny-agent/bg/&lt;pid&gt;.json
+.tiny-agent/bg/&lt;pid&gt;.log</code></pre>
+<p>
+    JSON 檔保存 command、cwd、pid、ownerPid、startedAt、log path 與 status。Log 檔保存 stdout/stderr，以及 process
+    結束時的 exit marker。這有兩個好處：第一，agent 不需要記住所有事情；第二，如果 tiny-agent 沒正常關掉，下次在同一個 cwd
+    啟動時，<code>bg list</code> 仍可以掃這些 metadata，知道哪些舊 process 可能還在跑。
+</p>
+
+<pre data-lang="json"><code>{
+  "id": "12345",
+  "command": "node backend/server.mjs",
+  "cwd": "/tmp/demo-app",
+  "pid": 12345,
+  "ownerPid": 67890,
+  "startedAt": "2026-08-29T09:00:00Z",
+  "log": ".tiny-agent/bg/12345.log",
+  "status": "running"
+}</code></pre>
+
+<h3 id="bg-lifecycle">生命週期跟著 tiny-agent，但可被同 cwd 接手</h3>
+<p>
+    正常情況下，tiny-agent 結束時會停止自己啟動的 <code>bg</code> process。這避免每次測試後都留下 server。可是現實中
+    process 可能 crash，或使用者可能強制關掉 tiny-agent；因此 <code>bg</code> 不只把狀態放在記憶體，也寫到
+    <code>.tiny-agent/bg</code>。同一個 cwd 的下一個 tiny-agent 可以 <code>list</code>、<code>logs</code>、<code>status</code>，必要時
+    <code>stop</code>。
+</p>
+<p>
+    這不是完整 supervisor：它不會 restart，不會做 health check，不會管理沒有 metadata 的外部 process，也不跨 cwd
+    掃描。它只補上 coding agent 最常遇到的缺口：啟動一個 server、看 log、打 API、停掉 server。
+</p>
+
+<h3 id="bg-when-to-use">什麼時候用 <code>bash</code>，什麼時候用 <code>bg</code></h3>
+<table>
+    <thead>
+        <tr>
+            <th>任務</th>
+            <th>適合的 tool</th>
+            <th>原因</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>跑一次測試、build、grep、curl</td>
+            <td><code>bash</code></td>
+            <td>命令會結束，直接看輸出即可。</td>
+        </tr>
+        <tr>
+            <td>啟動 API server、frontend dev server、watch mode</td>
+            <td><code>bg</code></td>
+            <td>命令會長時間存在，需要後續查狀態與停止。</td>
+        </tr>
+        <tr>
+            <td>檢查 server 是否真的可用</td>
+            <td><code>bash</code> 跑 <code>curl</code> 或測試</td>
+            <td><code>bg</code> 管 process，不代表 app health。</td>
+        </tr>
+    </tbody>
+</table>
+
 <h2 id="mcp">MCP 只是另一個 Tool Adapter</h2>
 <pre><code>MCP tools/list → tiny-agent Tool[]
 Tool.execute()  → MCP tools/call</code></pre>
