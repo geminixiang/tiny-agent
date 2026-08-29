@@ -1,74 +1,120 @@
 <p class="lead">
-    想像模型是個每次通話都會失憶的人。你每次打電話給它，都要把「我是誰、我們講到哪、剛剛工具回傳了什麼」從頭讀一遍給它聽，它才能接著往下講。
-    Agent 能表現得像「記得上次對話」，唯一原因是 host 把整段對話錄下來（transcript），每次都重播一次給模型聽。
+    <strong>一句話掌握本章核心</strong>：模型每次通話都是「失憶」的，連續性完全仰賴 Host 忠實重播 <strong>Transcript</strong>。但 Provider API 回傳的資料充滿了未規範的專屬雜訊，Host 必須建立一道 <strong>正規化防線（Normalization Seam）</strong>，只保留標準 Canonical 欄位，徹底隔離不可信任的外部 Wire Format。
 </p>
 
+<h2 id="mental-model">記憶體的本質：失憶的模型與忠實的錄音帶</h2>
 <p>
-    問題來了：OpenRouter 回傳的東西不是乾淨的錄音——它夾雜了 <code>reasoning</code>、<code>refusal</code>
-    這類 provider 專屬的雜訊。tiny-agent 曾經直接把 provider 回應當作系統內部的
-    <code>Message</code> 硬轉型（<code>choice.message as Message</code>），結果 strict reducer 直接拒收，因為那不是它認得的格式。這一章要講的就是：錄音帶進來之前，要先過一次「翻譯與檢查」。
+    想像模型是個每次通話都會瞬間失憶的專家。你每次撥電話給它，都必須把「我是誰、專案目標是什麼、我們剛才討論到哪、工具回傳了什麼結果」從頭到尾念一遍給它聽，它才能接著推論。
+</p>
+<p>
+    在系統架構中，這個「從頭到尾念一遍的錄音帶」就是 <strong>Transcript</strong>。
 </p>
 
-<h2 id="message-roles">四種角色</h2>
+<!-- [IMAGE_PROMPT_START]
+【圖片位置】：02-messages-provider / Normalization 防線架構圖
+【圖片形式】：結構化管線架構圖 (Data Pipeline & Invariant Boundary Diagram)
+【核心概念】：Provider Wire Shape 經過 Normalization Seam 轉化為 Canonical Message，阻絕雜訊進入 Durable Session
+【視覺元素】：
+  1. 左側：Provider Wire Shape（外部污染區，包含 role, content, tool_calls, 以及 reasoning, refusal, logprobs, annotations 等雜訊）
+  2. 中央：Normalization Seam（隔離閥門，包含 Schema 驗證、嚴格逐欄比對、淘汰多餘屬性、Type Safety）
+  3. 右側：Canonical Message（純淨區，僅保留 role: "assistant", content, 合法的 tool_calls 結構）
+  4. 下游：進入 Agent In-memory Transcript 與 Durable JSONL WAL 儲存。
+【AI 繪圖/SVG Prompt】：
+"Data pipeline architecture diagram for software engineering book. Left side shows raw 'Provider Wire Format' with messy JSON payload containing extra fields ('reasoning', 'refusal', 'vendor_id'). Middle shows a protective 'Normalization Seam' filter box with checkmarks for runtime validation. Right side shows clean, standardized 'Canonical Message' JSON flowing into 'Durable Session WAL'. High contrast, clean technical illustration, charcoal and emerald green accents on white."
+[IMAGE_PROMPT_END] -->
+
+<h2 id="message-roles">四種訊息角色的嚴格語意</h2>
+<p>
+    Transcript 絕不是隨意的自然語言文字串，而是具有嚴格型別定義與角色約束（Role Invariants）的時序陣列：
+</p>
+
 <table>
     <thead>
         <tr>
-            <th>Role</th>
-            <th>用途</th>
-            <th>關鍵限制</th>
+            <th>Role (角色)</th>
+            <th>系統語意與職責</th>
+            <th>信任邊界</th>
+            <th>核心約束條件 (Invariants)</th>
         </tr>
     </thead>
     <tbody>
         <tr>
             <td><code>system</code></td>
-            <td>Agent 身分、規則、skills metadata</td>
-            <td>由 trusted host 組裝</td>
+            <td>宣告 Agent 身分、行為準則、專案規則與 Skill 定義</td>
+            <td>受信任（Trusted Host 注入）</td>
+            <td>通常置於 Transcript 頂端，不可被使用者隨意竄改</td>
         </tr>
         <tr>
             <td><code>user</code></td>
-            <td>目標、後續指令、compact summary</td>
-            <td>不可假裝成 tool result</td>
+            <td>使用者指令、外部事件或歷史壓縮摘要 (Summary)</td>
+            <td>不受信任（外部輸入）</td>
+            <td>不可偽造成 <code>tool</code> 或 <code>system</code> 語意</td>
         </tr>
         <tr>
             <td><code>assistant</code></td>
-            <td>final text 或 tool calls</td>
-            <td>每個 tool call 必須有對應 result</td>
+            <td>模型產出的推理文字或發起的 Tool Call 請求</td>
+            <td>待驗證（模型生成）</td>
+            <td>包含 <code>tool_calls</code> 時，後續必須有嚴格對應的 <code>tool</code> 訊息</td>
         </tr>
         <tr>
             <td><code>tool</code></td>
-            <td>外部能力的觀察結果</td>
-            <td><code>tool_call_id</code> 必須精確配對</td>
+            <td>外部能力執行後的真實觀測結果 (Observation)</td>
+            <td>受保護（Host Tool Adapter 產出）</td>
+            <td><code>tool_call_id</code> 必須與前一則 assistant 中的 ID 精準吻合</td>
         </tr>
     </tbody>
 </table>
 
-<h2 id="legal-transcript">合法 Transcript 是硬限制</h2>
+<h2 id="legal-transcript">合法 Transcript 是硬限制 (Strict Invariants)</h2>
+<p>
+    主流 LLM Provider 對 Message 序列的合法性有極為嚴格的校驗機制：
+</p>
+
 <pre data-lang="json"><code>{"role":"assistant","content":null,"tool_calls":[
   {"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"README.md\"}"}}
 ]}
-{"role":"tool","tool_call_id":"call_1","content":"..."}</code></pre>
+{"role":"tool","tool_call_id":"call_1","content":"# tiny-agent project..."}</code></pre>
+
+<table>
+    <thead>
+        <tr><th>常見錯誤序列 (Illegal Transcripts)</th><th>引發後果</th><th>tiny-agent 防禦機制</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>孤立的 Tool Call</strong><br>發出 <code>call_1</code> 後行程崩潰，未寫入 <code>tool</code> 回傳即重啟</td><td>Provider API 直接回報 400 Bad Request，工作永久中斷</td><td>崩潰復原時自動為未完成的 Call 補上固定的 <strong>Synthetic Interrupted Result</strong></td></tr>
+        <tr><td><strong>ID 不吻合</strong><br><code>tool_call_id</code> 與前項 <code>assistant</code> 的 ID 拼寫不同</td><td>模型推論上下文斷裂，拒絕繼續運算</td><td>Runtime 強制驗證 ID 配對完整性</td></tr>
+        <tr><td><strong>無故插入 Tool 訊息</strong><br>在非 <code>assistant</code> 發起請求時自行注入 <code>role: "tool"</code></td><td>破壞注意力分佈，違反 API 通訊協議</td><td>嚴格由 Agent Loop 控制狀態流轉，不允許外部亂入</td></tr>
+    </tbody>
+</table>
+
+<h2 id="provider-adapter">Provider Adapter 必須正規化（Normalization Seam）</h2>
 <p>
-    如果只保存 assistant tool call，卻在 crash 或取消時遺失 result，下一次 provider request 可能直接拒絕整段
-    transcript。這也是 tiny-agent 在 tool 中斷時，會替尚未開始或結果未知的 calls 補上固定 synthetic result 的原因。
+    <strong>核心踩坑警示</strong>：TypeScript 的 Type Assertion（如 <code>response.message as Message</code>）<strong>只存在於編譯時期，在 JavaScript Runtime 階段完全不會刪除任何欄位</strong>！
+</p>
+<p>
+    若直接將 OpenRouter / OpenAI 回傳的原始物件存入 Session，諸如 <code>reasoning</code>、<code>refusal</code>、<code>annotations</code> 等供應商專屬欄位會直接污染持久化日誌，導致 Strict Reducer 解析崩潰。
 </p>
 
-<h2 id="provider-adapter">Provider Adapter 必須正規化</h2>
-<p>
-    前面提到的翻譯步驟，實際上長這樣：<code>normalizeAssistantMessage</code> 會逐欄檢查
-    provider 回來的東西——角色是不是 <code>assistant</code>、內容是不是字串、每個 tool call
-    有沒有合法的 <code>id</code>/<code>function.name</code>/<code>arguments</code>——只有通過檢查的欄位才會被放進乾淨的
-    <code>Message</code>，其他 provider 專屬欄位（<code>reasoning</code>、<code>refusal</code> 等）一律丟棄，不會流進 Session。
-</p>
-<pre data-lang="ts"><code>function normalizeAssistantMessage(value: unknown): Message {
-    // 驗證 role、content 與每個 tool call
-    // 只建立 canonical fields，不回傳 provider object
+<pre data-lang="ts"><code>// tiny-agent 的安全正規化實作：顯式白名單重建物件
+function normalizeAssistantMessage(value: unknown): Message {
+    const raw = value as Record&lt;string, unknown&gt;;
+    
+    // 1. 嚴格驗證角色
+    if (raw.role !== "assistant") {
+        throw new Error("Invalid role in assistant message");
+    }
+
+    // 2. 逐欄校驗 Tool Calls 結構完整性
+    const toolCalls = Array.isArray(raw.tool_calls) 
+        ? raw.tool_calls.map(validateToolCall) 
+        : undefined;
+
+    // 3. 僅挑選合法欄位建立全新 Canonical 物件（淘汰 reasoning / refusal 等雜訊）
     return {
         role: "assistant",
-        content,
-        ...(toolCalls ? { tool_calls: toolCalls } : {}),
+        content: typeof raw.content === "string" ? raw.content : null,
+        ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
     };
 }</code></pre>
-<p>Type assertion 只影響編譯器，不會移除 runtime 欄位。正確 seam 是：</p>
 
 <figure class="data-anim" id="fig-02-normalize" aria-labelledby="fig-02-normalize-caption">
     <ol class="anim-track">
@@ -93,68 +139,68 @@
         </li>
     </ol>
     <figcaption id="fig-02-normalize-caption">
-        動圖 2：provider 回應通過 normalization seam 時，哪些欄位存活、哪些被丟棄（划線肌漸淡的 chip）。
+        動圖 2：Provider 回應通過 Normalization 防線時的欄位過濾流程（劃線淡出的標籤即為被剔除的專屬欄位）。
     </figcaption>
 </figure>
 
-<h2 id="stop-reason">Stop Reason 也是狀態</h2>
-<p>不能只看「有沒有 tool calls」。Provider 的 <code>finish_reason</code> 至少要映射成：</p>
-<ul>
-    <li><code>stop</code>：正常 final answer。</li>
-    <li><code>toolUse</code>：tool calls 已完整產生，可進入 dispatch。</li>
-    <li><code>length</code>：輸出被截斷；其中 tool arguments 不可執行。</li>
-    <li>provider error：保存 failure，不偽造 assistant completion。</li>
-</ul>
+<h2 id="stop-reason">Finish Reason 狀態映射</h2>
 <p>
-    若 <code>length</code> 伴隨 tool calls，Agent 會寫入固定的 <code>truncated</code> synthetic results；這保護
-    transcript，也避免執行不完整 JSON arguments。
+    <strong>TL;DR</strong>：判斷是否執行 Tool，不能只看物件中有沒有 <code>tool_calls</code> 欄位，必須嚴格檢查 Provider 的 <code>finish_reason</code>。
 </p>
 
-<h2 id="usage">Usage 是每次 Physical Request 的帳</h2>
+<table>
+    <thead>
+        <tr><th>Finish Reason</th><th>模型生成狀態</th><th>Host 正確處置</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>stop</code></td><td>正常推理完畢，回傳 Final Answer</td><td>結束 Agent Loop，將結果呈現給使用者</td></tr>
+        <tr><td><code>tool_calls</code> / <code>toolUse</code></td><td>完整產生 Tool 調用名稱與參數</td><td>進入派發流程，依序執行 Tool</td></tr>
+        <tr><td><code>length</code></td><td><strong>Token 上限觸發截斷</strong><br>（Tool JSON 參數可能殘缺不全）</td><td><strong>嚴格禁止執行該 Tool</strong>！寫入 <code>truncated</code> synthetic result，防止語法錯誤引發未知災難</td></tr>
+        <tr><td><code>content_filter</code> / error</td><td>觸發安全過濾或網路中斷</td><td>保存失敗事件，不偽造 Assistant Completion</td></tr>
+    </tbody>
+</table>
+
+<h2 id="usage">Token Usage 的精確計量</h2>
+<p>
+    在多輪對話中，精確記錄每一次物理 Request 的 Token 消耗是成本控制與除錯的關鍵：
+</p>
+
 <pre data-lang="ts"><code>type Usage = {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
+    input: number;      // 扣除快取後的純淨輸入 Token
+    output: number;     // 本次生成的輸出 Token
+    cacheRead: number;  // 命中 Provider Prompt Cache 的 Token 數
+    cacheWrite: number; // 寫入 Provider Prompt Cache 的 Token 數
 };</code></pre>
-<p>OpenRouter 的 prompt tokens 可能已包含 cache tokens，因此 tiny-agent 正規化為：</p>
-<pre><code>input = prompt_tokens - cacheRead - cacheWrite
+
+<p>
+    部分 Provider（如 OpenRouter）的 <code>prompt_tokens</code> 可能已將 Cache Tokens 混入計算，因此 tiny-agent 採用以下標準化公式：
+</p>
+
+<pre data-lang="text"><code>input = prompt_tokens - cacheRead - cacheWrite
 cacheHitRate = cacheRead / (input + cacheRead + cacheWrite)</code></pre>
+
+<aside class="note">
+    <strong>觀念辨析：單次 Request 命中率 vs. 累積總量</strong>　<code>model.completed.cacheHitRate</code> 代表「單次 API Request」的快取效益，能精準抓出哪一輪對話導致 Prompt Cache 破功；而整個 Run / Session 的命中率則必須透過累加器（Counters）重新計算，切勿將兩者混為一談。
+</aside>
+
+<h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
 <p>
-    <code>model.completed.cacheHitRate</code> 表示單次 request，可找出某一輪 cache 崩潰；run/session 的 rate 則由累積
-    counters 重算。不要把「最後一輪 rate」和「整段累積 tokens」混在一起。
+    請執行既有的離線回歸測試，觀察 Provider 原始髒資料如何被精準清洗：
 </p>
 
-<h2 id="hands-on">親手驗證</h2>
-<p>
-    用既有的 offline regression test 重播真實 provider wire shape；它會加入 <code>reasoning</code>、<code>refusal</code>
-    與額外 tool-call 欄位，然後確認 Session 只留下 canonical message：
-</p>
 <pre data-lang="sh"><code>cd typescript
-node --import tsx --test \
-  --test-name-pattern="normalizes provider-only" tests/index.test.ts
+# 1. 驗證 Provider 專屬欄位被清洗，Session 僅保留 Canonical Message
+node --import tsx --test --test-name-pattern="normalizes provider-only" tests/index.test.ts
 
-node --import tsx --test \
-  --test-name-pattern="rejects malformed provider assistant" tests/index.test.ts</code></pre>
-<p>
-    <code>--test-name-pattern</code> 必須放在檔案路徑之前，Node.js 的 test runner 才會實際過濾；接在
-    <code>npm test --</code> 後面會被接到 glob 尾端而完全不生效，會跑完整個 test suite。
-</p>
-<p>
-    第一組應成功完成且可重新開啟 Session；第二組應保存一次 usage 與 failed outcome，而不是讓
-    <code>INVALID_FACT</code> 洩漏到 CLI。接著閱讀 test 中的 mock response，逐欄標出哪些屬於 provider wire、哪些能進入
-    canonical transcript。
-</p>
+# 2. 驗證畸形 Assistant Message 會被安全拒絕，不會引發未捕獲例外
+node --import tsx --test --test-name-pattern="rejects malformed provider assistant" tests/index.test.ts</code></pre>
 
 <p class="bridge">
-    合法 transcript 保證了資料「長什麼樣」，但沒保證「誰能把它變成真正的檔案讀寫或指令執行」——這是下一章的問題。
+    嚴格的 Transcript 與正規化防線，確保了記憶體與磁碟中的資料「結構永遠合法」。然而，光有資料結構還不夠——究竟是誰來將這些 JSON 轉化為真實的檔案讀寫、Shell 執行與背景行程？下一章我們將深入探討 <strong>Tool 的設計哲學與執行守衛</strong>。
 </p>
 
 <aside class="note">
-    <strong>閱讀原始碼</strong
-    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L188"
-        >Provider message normalization：<code>normalizeAssistantMessage</code></a
-    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L675"
-        >OpenRouter call adapter：<code>callModel</code></a
-    >。
+    <strong>閱讀原始碼</strong>　
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L188">TypeScript <code>normalizeAssistantMessage()</code></a> 與
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L675">OpenRouter API 呼叫配接器 <code>callModel()</code></a>。
 </aside>
