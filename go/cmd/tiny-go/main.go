@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	defaultModel    = "deepseek/deepseek-v4-flash-0731"
+	defaultModel    = "openai/gpt-5.6-luna"
 	maxBashOutput   = 10 * 1024 * 1024
 	maxToolOutput   = 50 * 1024
 	bashTimeout     = 120 * time.Second

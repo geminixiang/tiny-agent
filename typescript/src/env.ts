@@ -4,7 +4,7 @@
 
 export const systemEnv: NodeJS.ProcessEnv = process.env;
 
-export const MODEL = systemEnv.TINY_MODEL || "deepseek/deepseek-v4-flash-0731";
+export const MODEL = systemEnv.TINY_MODEL || "openai/gpt-5.6-luna";
 export const ENDPOINT = systemEnv.TINY_ENDPOINT || "https://openrouter.ai/api/v1";
 
 export function chatCompletionsUrl(endpoint = ENDPOINT) {

@@ -4,7 +4,7 @@ from pathlib import Path
 from pydantic import PrivateAttr, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
+DEFAULT_MODEL = "openai/gpt-5.6-luna"
 DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1"
 
 

@@ -55,7 +55,7 @@ tiny-py "讀取 README 並摘要"
 tiny-rs "讀取 README 並摘要"
 ```
 
-預設模型是 `deepseek/deepseek-v4-flash-0731`。使用 `TINY_MODEL` 選擇其他 OpenRouter 模型：
+預設模型是 `openai/gpt-5.6-luna`。這個選擇來自跨 runtime 完整 eval 與重複的速度、穩定性、收斂和 token 效率比較；完整依據記錄在 [`eval/README.md`](eval/README.md)。使用 `TINY_MODEL` 選擇其他 OpenRouter 模型：
 
 ```bash
 TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts "修正測試"

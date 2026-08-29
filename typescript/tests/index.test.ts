@@ -1804,8 +1804,7 @@ test("formats pi-style token usage and cache ratio", () => {
     assert.equal(formatUsage({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), "↑0 ↓0");
 });
 
-test("uses the default OpenRouter model", () =>
-    assert.equal(MODEL, process.env.TINY_MODEL || "deepseek/deepseek-v4-flash-0731"));
+test("uses the default OpenRouter model", () => assert.equal(MODEL, process.env.TINY_MODEL || "openai/gpt-5.6-luna"));
 
 test("read paginates complete UTF-8 lines with actionable errors", async () => {
     await writeFile("read.txt", "one\ntwo\nthree\nfour\n");

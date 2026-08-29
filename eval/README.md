@@ -36,9 +36,66 @@ Only compare results with the same task Spec. Prompt or verifier changes create 
 - One attempt is useful for smoke testing; repeated full-suite runs are preferred before drawing conclusions about stochastic model behavior.
 - Pass rate is the outcome metric. Time, tokens, cache usage, and tools explain efficiency and behavior but must not compensate for a failure.
 
+## Default model decision
+
+On 2026-08-29 the default changed from `deepseek/deepseek-v4-flash-0731` to `openai/gpt-5.6-luna`. The decision was based on the complete 24-attempt suite below and ten repeated `async-cache × tiny-go` diagnostic runs per usable candidate. The repeated task used the same fixture, prompt, verifier, 120-second deadline, agent binary, and OpenRouter account.
+
+| Model | Agent pass | Verifier pass | Median time | Time range | First correct | Correct → final | Median tokens | Operational finding |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `openai/gpt-5.6-luna` | 10/10 | 10/10 | **21.0s** | **17.5–25.1s** | 15.3s | **5.5s** | **2,712** | No timeout or provider error |
+| `deepseek/deepseek-v4-flash-0731` | 10/10 | 10/10 | 29.5s | 11.6–83.1s | **11.3s** | 20.1s | 8,395 | Fast first solution, but high variance and a separate reproduced timeout |
+| `z-ai/glm-5.3-flash` | 10/10 | 10/10 | 60.6s | 46.3–117.7s | 30.6s | 27.9s | 3,754 | Two runs exceeded 110 seconds |
+| `qwen/qwen3.8-flash` | 7/10 | 10/10 | 67.0s | 49.2–99.0s | 31.7s | 40.5s | 6,958 | Three Alibaba shared-pool 429 failures; a separate smoke run timed out |
+
+Luna also passed the complete suite across TypeScript, Go, Python, and Rust: 24/24, with every task finishing within 25.7 seconds. It was selected because it combined correctness with the lowest median latency and tokens, the narrowest latency range, and the shortest delay between a verified-correct implementation and the final answer. DeepSeek remains the recommended fallback through `TINY_MODEL` because its raw coding quality was strong despite less predictable completion time.
+
+These measurements compare observed agent outcomes, not general model intelligence or price. Provider routing and model behavior can change, so future decisions should use a new append-only run rather than rewriting this record. The complete Luna run below is marked `+dirty` because unrelated Book work entered the repository during execution; task Specs were unchanged.
+
 ## Runs
 
 <!-- EVAL_RUNS -->
+
+## 2026-08-29T15:03:45.279Z
+
+Commit: `c735b4e43e3e+dirty` · Platform: `darwin-arm64` · Node: `v24.14.1`
+
+### Summary
+
+| Agent | Model | Passed | Pass rate | Median time | Median tokens | Median tools |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| tiny-ts | openai/gpt-5.6-luna | 6/6 | 100.0% | 12.6s | 2204 | 6 |
+| tiny-go | openai/gpt-5.6-luna | 6/6 | 100.0% | 17.9s | 3026 | 5.5 |
+| tiny-py | openai/gpt-5.6-luna | 6/6 | 100.0% | 15.5s | 1948 | 6 |
+| tiny-rs | openai/gpt-5.6-luna | 6/6 | 100.0% | 14.0s | 2217 | 5.5 |
+
+### Tasks
+
+| Task | Spec | Agent | Model | Result | Time | Input | Output | Cache read | Cache write | Tools | Detail |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| add-feature | `e93464a71b8a` | tiny-ts | openai/gpt-5.6-luna | PASS | 9.5s | 1849 | 470 | 1141 | 1305 | 3 |  |
+| add-feature | `e93464a71b8a` | tiny-go | openai/gpt-5.6-luna | PASS | 13.0s | 2185 | 467 | 2546 | 1466 | 5 |  |
+| add-feature | `e93464a71b8a` | tiny-py | openai/gpt-5.6-luna | PASS | 11.1s | 1160 | 496 | 2231 | 1322 | 4 |  |
+| add-feature | `e93464a71b8a` | tiny-rs | openai/gpt-5.6-luna | PASS | 7.8s | 1853 | 445 | 1143 | 1265 | 3 |  |
+| async-cache | `db7ca3acc745` | tiny-ts | openai/gpt-5.6-luna | PASS | 18.3s | 910 | 1249 | 6299 | 2255 | 6 |  |
+| async-cache | `db7ca3acc745` | tiny-go | openai/gpt-5.6-luna | PASS | 25.7s | 1449 | 1951 | 3072 | 1865 | 5 |  |
+| async-cache | `db7ca3acc745` | tiny-py | openai/gpt-5.6-luna | PASS | 24.0s | 923 | 1302 | 4510 | 2003 | 6 |  |
+| async-cache | `db7ca3acc745` | tiny-rs | openai/gpt-5.6-luna | PASS | 24.5s | 910 | 1336 | 5205 | 2178 | 4 |  |
+| config-loader | `b11eefa2367a` | tiny-ts | openai/gpt-5.6-luna | PASS | 15.7s | 980 | 1268 | 5354 | 2377 | 7 |  |
+| config-loader | `b11eefa2367a` | tiny-go | openai/gpt-5.6-luna | PASS | 25.3s | 1477 | 2049 | 6332 | 2756 | 6 |  |
+| config-loader | `b11eefa2367a` | tiny-py | openai/gpt-5.6-luna | PASS | 18.4s | 454 | 1217 | 4447 | 2066 | 6 |  |
+| config-loader | `b11eefa2367a` | tiny-rs | openai/gpt-5.6-luna | PASS | 16.3s | 985 | 1107 | 6732 | 2413 | 6 |  |
+| fix-bug | `14237efa45fb` | tiny-ts | openai/gpt-5.6-luna | PASS | 10.1s | 1681 | 438 | 8812 | 3237 | 7 |  |
+| fix-bug | `14237efa45fb` | tiny-go | openai/gpt-5.6-luna | PASS | 10.3s | 2137 | 400 | 1066 | 1195 | 4 |  |
+| fix-bug | `14237efa45fb` | tiny-py | openai/gpt-5.6-luna | PASS | 8.5s | 1202 | 351 | 1041 | 1170 | 3 |  |
+| fix-bug | `14237efa45fb` | tiny-rs | openai/gpt-5.6-luna | PASS | 14.3s | 1688 | 499 | 16745 | 4508 | 7 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-ts | openai/gpt-5.6-luna | PASS | 10.4s | 1924 | 425 | 2791 | 3219 | 6 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-go | openai/gpt-5.6-luna | PASS | 19.8s | 3964 | 585 | 4926 | 1830 | 9 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-py | openai/gpt-5.6-luna | PASS | 12.7s | 2180 | 614 | 1161 | 1263 | 7 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-rs | openai/gpt-5.6-luna | PASS | 9.7s | 1934 | 400 | 3711 | 1451 | 5 |  |
+| session-summary | `71a3943910cd` | tiny-ts | openai/gpt-5.6-luna | PASS | 14.8s | 998 | 991 | 4563 | 1976 | 6 |  |
+| session-summary | `71a3943910cd` | tiny-go | openai/gpt-5.6-luna | PASS | 15.9s | 1532 | 946 | 2570 | 1584 | 6 |  |
+| session-summary | `71a3943910cd` | tiny-py | openai/gpt-5.6-luna | PASS | 19.9s | 1973 | 1026 | 2772 | 1707 | 6 |  |
+| session-summary | `71a3943910cd` | tiny-rs | openai/gpt-5.6-luna | PASS | 13.7s | 999 | 833 | 4559 | 1958 | 6 |  |
 
 ## 2026-08-29T13:50:39.147Z
 

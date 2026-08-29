@@ -33,7 +33,7 @@ pub mod session_reducer;
 pub mod session_runtime;
 pub mod terminal;
 
-pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+pub const DEFAULT_MODEL: &str = "openai/gpt-5.6-luna";
 pub const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api/v1";
 pub const MAX_TOOL_OUTPUT: usize = 50 * 1024;
 pub const MAX_BASH_OUTPUT: usize = 10 * 1024 * 1024;
