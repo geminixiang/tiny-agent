@@ -9,6 +9,7 @@ use tiny_agent_rust::{
 
 struct CliArgs {
     session_id: String,
+    cwd: String,
     extras: Vec<String>,
     mcp: Vec<String>,
     plugins: Vec<String>,
@@ -17,6 +18,7 @@ struct CliArgs {
 
 fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
     let mut session_id = String::new();
+    let mut cwd = String::new();
     let mut extras = Vec::new();
     let mut mcp = Vec::new();
     let mut plugins: Option<Vec<String>> = None;
@@ -24,6 +26,7 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--session"
+            || args[i] == "--cwd"
             || args[i] == "--skill"
             || args[i] == "--mcp"
             || args[i] == "--plugin"
@@ -33,6 +36,8 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
             }
             if args[i] == "--session" {
                 session_id = args[i + 1].clone();
+            } else if args[i] == "--cwd" {
+                cwd = args[i + 1].clone();
             } else if args[i] == "--skill" {
                 extras.push(args[i + 1].clone());
             } else if args[i] == "--mcp" {
@@ -71,6 +76,7 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
     }
     Ok(CliArgs {
         session_id,
+        cwd,
         extras,
         mcp,
         plugins: plugins
@@ -118,6 +124,13 @@ impl Drop for ActiveBg {
 
 fn run_cli(args: Vec<String>) -> Result<i32, String> {
     let parsed = parse_args(args)?;
+    if !parsed.cwd.is_empty() {
+        let path = std::path::Path::new(&parsed.cwd);
+        if !path.is_dir() {
+            return Err(format!("--cwd must be a directory: {}", parsed.cwd));
+        }
+        std::env::set_current_dir(path).map_err(|error| error.to_string())?;
+    }
     let configs = load_mcp_configs(&parsed.mcp)?;
     let mut loaded_mcp = ActiveMcp(Vec::new());
     for config in configs {
@@ -311,12 +324,15 @@ mod tests {
     #[test]
     fn plugins_repeat_split_trim_and_stable_dedupe() {
         let parsed = parse_args(vec![
+            "--cwd".into(),
+            "/tmp/project".into(),
             "--plugin".into(),
             " read, bash ".into(),
             "--plugin".into(),
             "read,edit".into(),
         ])
         .unwrap();
+        assert_eq!(parsed.cwd, "/tmp/project");
         assert_eq!(parsed.plugins, ["read", "bash", "edit"]);
     }
 

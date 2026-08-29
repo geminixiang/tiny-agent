@@ -1,12 +1,13 @@
 import argparse
 import asyncio
+import os
 import sys
 import termios
 import tty
 from contextlib import suppress
 from pathlib import Path
 
-from .agent import Agent, TOOL_DEFINITIONS, close_background_processes, format_tool_event, format_usage, load_project_instructions, load_skills
+from .agent import Agent, TOOL_DEFINITIONS, close_background_processes, format_tool_event, format_usage, load_project_instructions, load_skills, set_root
 from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases, split_names
 from .session import Session
 from .settings import Settings
@@ -18,6 +19,7 @@ PLUGIN_NAMES = tuple(tool["function"]["name"] for tool in TOOL_DEFINITIONS)
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--session")
+    parser.add_argument("--cwd")
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument("--plugin", action="append", default=[])
     parser.add_argument("--mcp", action="append", default=[])
@@ -129,7 +131,8 @@ async def run_terminal(args: argparse.Namespace, agent: Agent, skills: list[dict
 
 
 async def run_session(args: argparse.Namespace, aliases: list[str], local_tools: list[dict], loaded_mcp: list) -> int:
-    session = Session.open(args.session) if args.session else Session.create()
+    cwd = Path.cwd().resolve()
+    session = Session.open(args.session, cwd) if args.session else Session.create(cwd)
     try:
         skills = load_skills(args.skill)
         tools = [*local_tools, *(tool for loaded in loaded_mcp for tool in loaded.tools)]
@@ -146,6 +149,11 @@ async def run_session(args: argparse.Namespace, aliases: list[str], local_tools:
 
 async def run_cli(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.cwd:
+        path = Path(args.cwd).resolve()
+        if not path.is_dir(): raise ValueError(f"--cwd must be a directory: {args.cwd}")
+        os.chdir(path)
+        set_root(path)
     local_tools = selected_local_tools(args.plugin)
     aliases = split_mcp_aliases(args.mcp)
     loaded_mcp = await connect_mcp(aliases)

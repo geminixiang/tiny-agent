@@ -61,7 +61,13 @@ tiny-rs "讀取 README 並摘要"
 TINY_MODEL=anthropic/claude-sonnet-4.5 tiny-ts "修正測試"
 ```
 
-Session 保存在目前 workspace 的 `.tiny-agent/sessions/`。使用 Session ID 繼續工作：
+預設使用目前 shell 的工作目錄。也可以用 `--cwd` 指定 workspace；AGENTS.md、skills、tools、sessions 與背景 process 都會以該目錄為準：
+
+```bash
+tiny-ts --cwd /path/to/project "讀取 README 並摘要"
+```
+
+Session 保存在 workspace 的 `.tiny-agent/sessions/`。使用 Session ID 繼續工作：
 
 ```bash
 tiny-ts --session <session-id>

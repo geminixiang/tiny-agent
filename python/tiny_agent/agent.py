@@ -28,6 +28,11 @@ MAX_TOOL_OUTPUT = 50 * 1024
 ROOT = Path.cwd().resolve()
 
 
+def set_root(path: Path) -> None:
+    global ROOT
+    ROOT = path.resolve()
+
+
 def format_tokens(n: int) -> str: return str(n) if n < 1_000 else f"{n / 1_000:.1f}k" if n < 10_000 else f"{n // 1_000}k" if n < 1_000_000 else f"{n / 1_000_000:.1f}M" if n < 10_000_000 else f"{n // 1_000_000}M"
 
 def format_usage(usage: dict) -> str:

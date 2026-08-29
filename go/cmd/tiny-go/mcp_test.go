@@ -22,9 +22,9 @@ func TestSplitListsPluginSelectionAndDisplayName(t *testing.T) {
 	if strings.Join(got, ",") != "first,second,third" {
 		t.Fatalf("split: %#v", got)
 	}
-	_, _, plugins, aliases, prompt, err := parseArgs([]string{"--plugin", "read, edit", "--plugin", "read", "--mcp", "one, two", "--mcp", "one", "hello"})
-	if err != nil || strings.Join(plugins, ",") != "read,edit" || strings.Join(aliases, ",") != "one,two" || prompt != "hello" {
-		t.Fatalf("plugins=%v aliases=%v prompt=%q err=%v", plugins, aliases, prompt, err)
+	_, workingDirectory, _, plugins, aliases, prompt, err := parseArgs([]string{"--cwd", "/tmp/project", "--plugin", "read, edit", "--plugin", "read", "--mcp", "one, two", "--mcp", "one", "hello"})
+	if err != nil || workingDirectory != "/tmp/project" || strings.Join(plugins, ",") != "read,edit" || strings.Join(aliases, ",") != "one,two" || prompt != "hello" {
+		t.Fatalf("cwd=%q plugins=%v aliases=%v prompt=%q err=%v", workingDirectory, plugins, aliases, prompt, err)
 	}
 	tools := localTools(plugins...)
 	if len(tools) != 2 || tools[0].Name != "read" || tools[1].Name != "edit" {

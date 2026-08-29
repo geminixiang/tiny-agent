@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import { createInterface, emitKeypressEvents } from "node:readline";
 import { parseArgs } from "node:util";
 import {
@@ -30,6 +31,7 @@ function parseCLIArgs(args = process.argv.slice(2)) {
         args,
         options: {
             session: { type: "string" },
+            cwd: { type: "string" },
             skill: { type: "string", multiple: true },
             json: { type: "boolean" },
             plugin: { type: "string", multiple: true },
@@ -39,6 +41,7 @@ function parseCLIArgs(args = process.argv.slice(2)) {
     });
     return {
         sessionId: values.session,
+        cwd: values.cwd,
         extras: values.skill ?? [],
         json: values.json ?? false,
         plugins: splitList(values.plugin),
@@ -58,8 +61,17 @@ function splitList(values?: string[]) {
     ];
 }
 
+async function changeCwd(cwd: string | undefined) {
+    if (!cwd) return;
+    const path = resolve(cwd);
+    const info = await stat(path);
+    if (!info.isDirectory()) throw Error(`--cwd must be a directory: ${cwd}`);
+    process.chdir(path);
+}
+
 async function main() {
-    const { sessionId, extras, json, plugins, mcp, oneShot } = parseCLIArgs();
+    const { sessionId, cwd, extras, json, plugins, mcp, oneShot } = parseCLIArgs();
+    await changeCwd(cwd);
     if (json && !oneShot) throw Error("--json requires a one-shot prompt.");
     const emit = (event: RunEvent | Record<string, unknown>) => {
         if (json) process.stdout.write(`${JSON.stringify(event)}\n`);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -30,7 +30,7 @@ test("--json emits a structured failed result without TUI output", async () => {
         .map((line) => JSON.parse(line));
     assert.equal(events.length, 2);
     assert.equal(events[0].type, "run.started");
-    assert.deepEqual(events[0].plugins, ["bash", "read", "write", "edit"]);
+    assert.deepEqual(events[0].plugins, ["bash", "read", "write", "edit", "bg"]);
     assert.equal(events[1].type, "run.completed");
     assert.deepEqual(
         {
@@ -41,6 +41,19 @@ test("--json emits a structured failed result without TUI output", async () => {
         { status: "failed", cause: "agent_error", message: "Set OPENROUTER_API_KEY" },
     );
     assert.doesNotMatch(result.stdout, /tiny-agent|Resume:|\\u001b/);
+});
+
+test("--cwd uses the selected workspace for sessions", async () => {
+    const launcher = await mkdtemp(join(tmpdir(), "tiny-agent-launcher-"));
+    const workspace = await mkdtemp(join(tmpdir(), "tiny-agent-workspace-"));
+    const result = spawnSync(process.execPath, ["--import", loader, cli, "--cwd", workspace, "--json", "hello"], {
+        cwd: launcher,
+        env: envWithoutKey(),
+        encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.equal((await readdir(join(workspace, ".tiny-agent/sessions"))).length, 1);
+    await assert.rejects(readdir(join(launcher, ".tiny-agent/sessions")));
 });
 
 test("prints selected tools and MCP servers at startup", async () => {

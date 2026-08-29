@@ -939,18 +939,20 @@ func digestSourceFacts(source []sessionMessageFact) string {
 	return digestValue(values)
 }
 
-func parseArgs(args []string) (sessionID string, extras, plugins, mcp []string, prompt string, err error) {
+func parseArgs(args []string) (sessionID, workingDirectory string, extras, plugins, mcp []string, prompt string, err error) {
 	words := []string{}
 	for i := 0; i < len(args); i++ {
-		if args[i] != "--session" && args[i] != "--skill" && args[i] != "--plugin" && args[i] != "--mcp" {
+		if args[i] != "--session" && args[i] != "--cwd" && args[i] != "--skill" && args[i] != "--plugin" && args[i] != "--mcp" {
 			words = append(words, args[i])
 			continue
 		}
 		if i+1 == len(args) {
-			return "", nil, nil, nil, "", fmt.Errorf("%s requires a value", args[i])
+			return "", "", nil, nil, nil, "", fmt.Errorf("%s requires a value", args[i])
 		}
 		if args[i] == "--session" {
 			sessionID = args[i+1]
+		} else if args[i] == "--cwd" {
+			workingDirectory = args[i+1]
 		} else if args[i] == "--skill" {
 			extras = append(extras, args[i+1])
 		} else if args[i] == "--plugin" {
@@ -960,21 +962,38 @@ func parseArgs(args []string) (sessionID string, extras, plugins, mcp []string, 
 		}
 		i++
 	}
-	return sessionID, extras, splitList(plugins), splitList(mcp), strings.Join(words, " "), nil
+	return sessionID, workingDirectory, extras, splitList(plugins), splitList(mcp), strings.Join(words, " "), nil
 }
 
 func runCLI(args []string) error {
-	sessionID, extras, plugins, mcpAliases, oneShot, err := parseArgs(args)
+	sessionID, workingDirectory, extras, plugins, mcpAliases, oneShot, err := parseArgs(args)
 	if err != nil {
 		return err
 	}
+	if workingDirectory != "" {
+		path, resolveErr := filepath.Abs(workingDirectory)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			return statErr
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("--cwd must be a directory: %s", workingDirectory)
+		}
+		if chdirErr := os.Chdir(path); chdirErr != nil {
+			return chdirErr
+		}
+		cwd = path
+	}
 	selectedPlugins := plugins
 	if len(selectedPlugins) == 0 {
-		selectedPlugins = []string{"bash", "read", "write", "edit"}
+		selectedPlugins = []string{"bash", "read", "write", "edit", "bg"}
 	}
 	for _, plugin := range selectedPlugins {
-		if !slices.Contains([]string{"bash", "read", "write", "edit"}, plugin) {
-			return fmt.Errorf("Unknown plugin: %s. Available plugins: bash, read, write, edit", plugin)
+		if !slices.Contains([]string{"bash", "read", "write", "edit", "bg"}, plugin) {
+			return fmt.Errorf("Unknown plugin: %s. Available plugins: bash, read, write, edit, bg", plugin)
 		}
 	}
 	configs, err := loadMCPConfigs(mcpAliases, currentEnvironment())

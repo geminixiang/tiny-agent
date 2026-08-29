@@ -6,7 +6,9 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 const run = promisify(exec);
-const root = process.cwd();
+function root() {
+    return process.cwd();
+}
 const MAX_TOOL_OUTPUT = 50 * 1024;
 
 type ToolEdit = { oldText: string; newText: string };
@@ -85,7 +87,7 @@ export function formatToolEvent({ phase, name, args, result }: ToolEvent) {
 }
 
 function resolvePath(path: string) {
-    return isAbsolute(path) ? resolve(path) : resolve(root, path);
+    return isAbsolute(path) ? resolve(path) : resolve(root(), path);
 }
 
 async function limitBashOutput(output: string, complete = true) {
@@ -99,7 +101,7 @@ async function limitBashOutput(output: string, complete = true) {
     if (tailLines.length > 2_000) tailLines = tailLines.slice(-2_000);
     const tail = tailLines.join("\n");
     const start = Math.max(1, lines.length - tailLines.length + 1);
-    const path = resolve(root, ".tiny-agent/tool-output", `${randomUUID()}.log`);
+    const path = resolve(root(), ".tiny-agent/tool-output", `${randomUUID()}.log`);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, output);
     const label = complete ? "Full output" : "Captured output; command exceeded the 10MB safety cap";
@@ -134,7 +136,7 @@ const bashTool: Tool = {
         let stderr = "";
         try {
             ({ stdout, stderr } = await run(command, {
-                cwd: root,
+                cwd: root(),
                 timeout: timeout * 1_000,
                 maxBuffer: 10_000_000,
                 signal,
@@ -342,7 +344,7 @@ const bgProcesses = new Map<string, BgProcess>();
 const bgStopping = new Set<string>();
 
 function bgDir() {
-    return resolve(root, ".tiny-agent/bg");
+    return resolve(root(), ".tiny-agent/bg");
 }
 
 function bgPaths(id: string) {
@@ -362,7 +364,7 @@ function isProcessRunning(pid: number) {
 
 async function readBgMeta(id: string): Promise<BgMeta> {
     const data = JSON.parse(await readFile(bgPaths(id).meta, "utf8")) as BgMeta;
-    if (data.cwd !== root) throw Error(`bg ${id} belongs to a different cwd`);
+    if (data.cwd !== root()) throw Error(`bg ${id} belongs to a different cwd`);
     return data;
 }
 
@@ -414,18 +416,18 @@ async function stopBg(meta: BgMeta) {
 async function startBg(command: string) {
     await mkdir(bgDir(), { recursive: true });
     const startedAt = new Date().toISOString();
-    const child = spawn(command, { cwd: root, shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, { cwd: root(), shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     if (!child.pid) throw Error("failed to start background process");
     const id = String(child.pid);
     const paths = bgPaths(id);
     const log = createWriteStream(paths.log, { flags: "a" });
-    log.write(`$ ${command}\ncwd: ${root}\npid: ${child.pid}\nstarted: ${startedAt}\n\n`);
+    log.write(`$ ${command}\ncwd: ${root()}\npid: ${child.pid}\nstarted: ${startedAt}\n\n`);
     child.stdout.pipe(log, { end: false });
     child.stderr.pipe(log, { end: false });
     const meta: BgMeta = {
         id,
         command,
-        cwd: root,
+        cwd: root(),
         pid: child.pid,
         pgid: child.pid,
         ownerPid: process.pid,

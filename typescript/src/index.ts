@@ -40,7 +40,9 @@ export {
 } from "./tools.js";
 
 export { ENDPOINT, MODEL };
-const root = process.cwd();
+function root() {
+    return process.cwd();
+}
 type Message = {
     role: "system" | "user" | "assistant" | "tool";
     content: string | null;
@@ -159,14 +161,14 @@ async function findSkillFiles(dir: string): Promise<string[]> {
     return out;
 }
 
-export async function loadProjectInstructions(cwd = root) {
+export async function loadProjectInstructions(cwd = root()) {
     return readFile(resolve(cwd, "AGENTS.md"), "utf8").catch(() => "");
 }
 
 export async function loadSkills(extra: string[] = []) {
     const files = [
         ...new Set([
-            ...(await findSkillFiles(resolve(root, ".tiny-agent/skills"))),
+            ...(await findSkillFiles(resolve(root(), ".tiny-agent/skills"))),
             ...extra.map((path) => resolve(path)),
         ]),
     ];
@@ -282,9 +284,9 @@ export class Agent {
                 )
                 .join("\n") || "(none)";
         const project = instructions
-            ? `\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="${resolve(root, "AGENTS.md")}">\n${instructions}\n</project_instructions>\n\n</project_context>`
+            ? `\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="${resolve(root(), "AGENTS.md")}">\n${instructions}\n</project_instructions>\n\n</project_context>`
             : "";
-        this.systemPrompt = `You are tiny-agent, a concise coding agent in ${root}. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.
+        this.systemPrompt = `You are tiny-agent, a concise coding agent in ${root()}. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.
 
 For implementation tasks, inspect only what is needed, then make the changes and run focused tests. Do not keep researching the same uncertainty when a mature dependency or direct implementation is available.
 Use the provided tool descriptions to choose the right capability. Not every run enables file access, shell access, or file modification.
