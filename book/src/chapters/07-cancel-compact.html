@@ -1,82 +1,84 @@
 <p class="lead">
-    換個情境：這次不是 process 被強制關掉，是你自己在 <code>bash deploy.sh</code> 跑到一半按下 <code>Esc</code>。跟上一章的
-    crash 不一樣，這是「使用者主動要求停」，系統理論上有機會好好收尾——但如果收尾的順序錯了，結果一樣糟：如果先取消掉正在跑的 Promise，卻還沒把「使用者要求取消」這件事寫進硬碟，中途再 crash 一次，重開後系統完全不知道使用者曾經要求停止，可能會誤判成「還在跑」而去 retry 或 replay。
+    <strong>一句話掌握本章核心</strong>：取消（Cancellation）不是單純「把 Promise 拋棄」，而是必須遵循嚴格的 <strong>先記 Abort 意圖再發送中斷信號</strong> 順序；歷史壓縮（Compaction）則是一次具備 <strong>雙切點（Two-Cut）</strong> 的正規交易，在縮減模型 Active Context 的同時，完整保留磁碟 WAL 供審計與復原。
 </p>
 
+<h2 id="abort-order">中斷的正確順序：先持久化意圖，再發送信號</h2>
 <p>
-    所以可靠的 Agent 不能只是「把 Promise 取消掉」。它必須先留下 durable 的 abort intent，再通知目前
-    phase 停下來，並在退出前補齊合法 transcript 與 operation outcome。
+    設想情境：工程師在 <code>bash deploy.sh</code> 執行時按下了 <code>Esc</code>。如果系統直接調用 <code>abortController.abort()</code> 卻未先寫入磁碟，一旦行程在此刻崩潰，重啟後系統完全不知道使用者曾要求中斷，可能會誤判為未知錯誤而發起重試。
 </p>
 
-<h2 id="abort-order">Abort 的正確順序</h2>
-<pre><code>persist abortRequested
-→ signal active model / tool / compaction
-→ reconcile open attempt 與 tool calls
-→ persist operationFinished(aborted)
-→ release resources</code></pre>
-<p>
-    順序不能反過來。若先 signal 後 crash，Session 可能完全不知道使用者曾要求 abort；恢復程式可能錯誤地 retry model 或
-    replay safe tool。
-</p>
+<!-- [IMAGE_PROMPT_START]
+【圖片位置】：07-cancel-compact / Abort 循序寫入與 Phase 分流架構圖
+【圖片形式】：循序狀態與競爭分流圖 (Sequence & Race Resolution Diagram)
+【核心概念】：Abort 正確順序（先落盤 abortRequested 再發送信號）與 Abort Race 序列化
+【視覺元素】：
+  1. 步驟 1 (最優先): 寫入 `abortRequested` 至 JSONL WAL 落盤。
+  2. 步驟 2: 發送 AbortSignal 給當前 Phase (Model / Tool / Compaction)。
+  3. 步驟 3: 補齊未完成的 Synthetic 狀態（Open Attempt 寫 `stepFailed(aborted)`，未完成 Tool 寫 `interrupted`）。
+  4. 步驟 4: 寫入 `operationFinished(aborted)` 終局。
+  5. 側邊標示 [Abort Race 裁決]：若 Settlement 先落盤，則 Abort 不改寫成功結果；若 Abort 先落盤，遲到的成功回應一律作廢。
+【AI 繪圖/SVG Prompt】：
+"High-contrast technical sequence diagram of AI Agent cancellation and Abort Race handling. Step 1: Append 'abortRequested' fact to durable JSONL WAL on disk. Step 2: Propagate AbortSignal to active workers (Model API, Child Process, Compaction). Step 3: Reconcile synthetic entries (mark tool as interrupted). Step 4: Finalize operation as 'aborted'. High-contrast modern vector art on white background."
+[IMAGE_PROMPT_END] -->
 
-<h2 id="phase-routing">Cancellation 依 Phase 分流</h2>
+<pre data-lang="text"><code>1. 持久化中斷意圖 ──→ commit(abortRequested) 落盤
+                           ↓
+2. 發送中斷信號   ──→ 向當前 Model API / Bash Child Process 傳遞 AbortSignal
+                           ↓
+3. 補齊結構化狀態 ──→ 將未完成的 Tool 標記為 interrupted，保持 Transcript 合法
+                           ↓
+4. 寫入終局記錄   ──→ commit(operationFinished: aborted)
+                           ↓
+5. 釋放系統資源   ──→ 關閉檔案描述子、終止背景 Process Tree</code></pre>
+
+<h2 id="phase-routing">Cancellation 依 Phase 精準分流</h2>
 <table>
     <thead>
-        <tr>
-            <th>Phase</th>
-            <th>動作</th>
-            <th>Durable reconciliation</th>
-        </tr>
+        <tr><th>當前運行階段 (Phase)</th><th>具體中斷動作 (Signal Action)</th><th>Durable WAL 狀態修復 (Reconciliation)</th></tr>
     </thead>
     <tbody>
-        <tr>
-            <td>model</td>
-            <td>取消 HTTP request 或停止前景等待</td>
-            <td>open attempt 寫 <code>stepFailed(aborted)</code></td>
-        </tr>
-        <tr>
-            <td>tool</td>
-            <td>signal tool；bash 盡力終止 process tree</td>
-            <td>started call 寫 interrupted；未 started 寫 aborted</td>
-        </tr>
-        <tr>
-            <td>compaction</td>
-            <td>取消 summary request</td>
-            <td>關閉 attempt，再結束 compaction operation</td>
-        </tr>
+        <tr><td><strong>Model Phase</strong></td><td>中斷 HTTP 網路連線，終止串流接收</td><td>將未結算的 Attempt 標記為 <code>stepFailed(aborted)</code></td></tr>
+        <tr><td><strong>Tool Phase</strong></td><td>向子程序發送 <code>SIGTERM/SIGKILL</code> 終止 Process Tree</td><td>已啟動的 Tool 補寫 <code>interrupted</code>；未啟動的補寫 <code>aborted</code></td></tr>
+        <tr><td><strong>Compaction Phase</strong></td><td>中斷摘要生成請求</td><td>關閉當前 Compaction Attempt，結束該 Operation</td></tr>
     </tbody>
 </table>
+
+<h2 id="race">Abort Race 競爭條件的裁決鐵律</h2>
 <p>
-    三條路徑互斥，不是依序執行。<code>Esc</code> 只 abort 目前 operation；<code>Ctrl+C</code> 在必要時 abort
-    後，還會關閉 MCP clients、Session writer 並恢復 terminal。
+    當「使用者按下中斷」與「模型/工具成功回傳」在同一毫秒發生時，系統必須將其嚴格序列化為兩種確定性歷史：
 </p>
 
-<h2 id="race">Abort Race 的核心規則</h2>
-<p>Abort 可能與 model response 或 tool completion 同一時間發生。系統必須把競爭序列化成兩種合法歷史：</p>
-<ol>
-    <li>成功 settlement 先 durable：abort 看到 operation 已結束，不改寫結果。</li>
-    <li><code>abortRequested</code> 先 durable：晚到的成功 response 不能再把 operation 寫成 completed。</li>
-</ol>
+<table>
+    <thead>
+        <tr><th>競爭勝出方</th><th>判決條件</th><th>最終歷史呈現</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>成功結算先落盤</strong></td><td><code>toolResult</code> 或 <code>assistantMessage</code> 已成功寫入 WAL</td><td>Abort 操作判定該步驟已完成，<strong>不改寫已成功的結果</strong>，正常推進下一步。</td></tr>
+        <tr><td><strong><code>abortRequested</code> 先落盤</strong></td><td>中斷意圖已成功寫入 WAL</td><td><strong>遲到的成功回應一律作廢丟棄</strong>，該操作嚴格記錄為 <code>aborted</code>。</td></tr>
+    </tbody>
+</table>
+
+<h2 id="compaction">Compaction 歷史壓縮：雙切點（Two-Cut）架構</h2>
 <p>
-    這也是為什麼 durable Session 不只靠 <code>AbortController.signal.aborted</code>：memory flag 無法解釋 crash
-    後的先後順序。
+    <strong>重要觀念</strong>：Compaction 絕非從磁碟中「刪除」舊資料！它是建立一個新的摘要節點（Checkpoint），在縮減 Active Context 的同時，將所有歷史原始事實完整保存在 Append-only WAL 中。
 </p>
 
-<p class="transition">
-    你剛才看到的 abort race，其實是「系統要主動改變狀態，且必須先 durable 才能改」這類問題的一種——這裡改的是 operation
-    本身進行到哪一步。compaction 是同一類問題的另一種：它自己也是一個獨立的 durable operation（跟 run 一樣有
-    <code>compactionStarted</code>/<code>operationFinished</code>），但它要多處理一層——active context 該怎麼跟著變。
-</p>
-
-<h2 id="compaction">Compaction 不是刪除歷史</h2>
-<p>
-    <code>/compact</code> 呼叫目前 model 產生 summary，然後重建 active context。原始 facts 仍留在 append-only Session
-    中，因此可以 audit 與 recovery。
-</p>
-<pre><code>完整 durable facts
-→ reducer materialized active context
-→ summary + retained message tail
-→ 後續 model requests</code></pre>
+<!-- [IMAGE_PROMPT_START]
+【圖片位置】：07-cancel-compact / 雙切點 (Two-Cut) 歷史壓縮示意圖
+【圖片形式】：雙軌對齊切點架構圖 (Two-Track Partition Diagram)
+【核心概念】：Active-Context Cut（模型視角）與 Durable Source Partition（審計視角）的精確對齊
+【視覺元素】：
+  1. 原始事件流：Entry 1, Entry 2 ... Entry N-6 (User boundary) ... Entry N。
+  2. 上軌 [Track 1: Active-Context Cut (模型視角)]：
+     - 切點前：送入模型生成 Summary 文字。
+     - 壓縮後：Active Context 僅包含 [New Summary] + [Retained Messages N-5..N]。
+  3. 下軌 [Track 2: Durable Source Partition (審計/復原視角)]：
+     - 切點前：記錄為 compactedEntryIds + 計算 sourceDigest 雜湊。
+     - 切點後：記錄為 retainedEntryIds。
+     - 原始 Facts 完整留存在磁碟 JSONL 中。
+【AI 繪圖/SVG Prompt】：
+"Two-track technical partitioning diagram for LLM context compaction. Top track labeled 'Track 1: Active-Context Cut (Model Visibility)' showing messages 1 to N-6 summarized into a single 'Summary Block' followed by 'Retained Tail N-5..N'. Bottom track labeled 'Track 2: Durable Source Partition (Audit & Recovery)' showing exact UUID lists and sourceDigest. High-contrast engineering textbook style."
+[IMAGE_PROMPT_END] -->
 
 <figure class="data-anim" id="fig-07-compact-flow" aria-labelledby="fig-07-compact-flow-caption">
     <ol class="anim-track">
@@ -106,115 +108,40 @@
         </li>
     </ol>
     <figcaption id="fig-07-compact-flow-caption">
-        動圖 4：一次 <code>/compact</code> 的資料流。淡出的 chips 只是離開 active context，不是被刪除——它們永遠留在 durable log 中供稽核與 recovery。
+        動圖 4：一次 <code>/compact</code> 的資料流。淡出的標籤僅是移出推論視窗，原始紀錄永存於磁碟日誌中。
     </figcaption>
 </figure>
 
-<h2 id="two-boundaries">兩個容易混淆的邊界</h2>
-<figure id="fig-07-compaction" aria-labelledby="fig-07-compaction-caption">
-    <table>
-        <thead>
-            <tr>
-                <th scope="col">Track</th>
-                <th scope="col">entry 1</th>
-                <th scope="col">entry 2</th>
-                <th scope="col">...</th>
-                <th scope="col">entry N-6</th>
-                <th scope="col">...</th>
-                <th scope="col">entry N</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <th scope="row">Track1：Active-context cut（給模型看）</th>
-                <td>entry 1 → 送摘要</td>
-                <td>entry 2 → 送摘要</td>
-                <td>... → 送摘要</td>
-                <td>entry N-6 → 送摘要</td>
-                <td>... → 原樣保留</td>
-                <td>entry N → 原樣保留</td>
-            </tr>
-            <tr>
-                <th scope="row">Track2：Durable source partition（給稽核／recovery 看）</th>
-                <td>entry 1 → compactedEntryIds</td>
-                <td>entry 2 → compactedEntryIds</td>
-                <td>... → compactedEntryIds</td>
-                <td>entry N-6 → compactedEntryIds</td>
-                <td>... → retainedEntryIds</td>
-                <td>entry N → retainedEntryIds</td>
-            </tr>
-        </tbody>
-    </table>
-    <figcaption id="fig-07-compaction-caption">
-        圖 6：兩軌共用同一個切點。即使連續進行第二次以上的 compaction，這兩個切點仍然對齊——四語言實作都有一道「找不到
-        user 邊界就放棄本次 compact」的防護，這道防護同時保證了合成的「上次摘要」訊息不會被算進這次的 retained
-        tail。prior summary 會參與 Track1 的摘要輸入，但不是 Track2 的 source entry。
-    </figcaption>
-</figure>
-<h3>1. Active-context cut</h3>
+<h2 id="two-boundaries">雙切點（Two-Cut）的嚴格定義</h2>
+<table>
+    <thead>
+        <tr><th>切點維度</th><th>主要服務對象</th><th>運作機制與邊界保證</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>Track 1: Active-Context Cut</strong></td><td><strong>LLM 大腦（推論視窗）</strong></td><td>保留最近至少 6 則訊息，並自動向前尋找 <code>user</code> 邊界（避免拆散單次完整問答）。前次產生的舊 Summary 會參與本次新摘要的計算。</td></tr>
+        <tr><td><strong>Track 2: Durable Source Partition</strong></td><td><strong>審計人員與 Crash Recovery</strong></td><td>嚴格記錄被壓縮的所有 <code>compactedEntryIds</code>、保留的 <code>retainedEntryIds</code>，並計算 <code>sourceDigest</code> 數位指紋，確保歷史不可篡改。</td></tr>
+    </tbody>
+</table>
+
+<h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
 <p>
-    用於決定本次摘要輸入：保留至少最近 6 則 <strong>message</strong>，再把 cut 向前移動到 user boundary，避免拆散完整
-    turn。Repeated compaction 時，prior summary 會參與新的摘要輸入。
-</p>
-<h3>2. Durable source partition</h3>
-<p>
-    用於稽核與 recovery：保存截至 <code>inputThroughEntryId</code> 的所有 durable source message-entry IDs，並分成
-    <code>compactedEntryIds</code> 與 <code>retainedEntryIds</code>，再計算 <code>sourceDigest</code>。
-</p>
-<p>
-    Prior summary 不是 source message entry，所以不會放進 source partition；但它仍會參與 active-context
-    summarization。兩者解決不同問題。
+    執行決定性的中斷與壓縮回歸測試：
 </p>
 
-<h2 id="durable-compact">Compaction 也是正式 Operation</h2>
-<pre><code>compactionStarted
-→ stepAttempt(stepKind=compaction)
-→ usage
-→ compaction entry
-→ operationFinished(completed)</code></pre>
-<p>
-    Compaction entry 保存 materialized retained tail 與 source IDs。若 crash 發生在 summary 已經落盤、finish
-    尚未落盤，recovery 只補 <code>operationFinished</code>，不會再次呼叫 model。若 open attempt 未知，則遵循相同 attempt
-    cap。
-</p>
+<pre data-lang="sh"><code># 1. 執行 TypeScript 的中斷與壓縮整合測試
+cd typescript
+node --import tsx --test --test-name-pattern="abort|compaction" tests/index.test.ts
 
-<h2 id="output-limits">Tool Output 也是 Context 控制</h2>
-<p>
-    TypeScript 與 Rust 會保留最後 2,000 行或 50 KB（先達到者）；Go 與 Python 則以約 50 KB 的 byte-oriented tail
-    為主，不承諾相同的行數語意。四種實作都有約 10 MB 的 capture safety limit，但超限行為不同：有的回傳 capped-output
-    診斷，有的將它視為 tool error。只有在實作確實捕獲完整輸出時，才會另存
-    <code>.tiny-agent/tool-output/</code> 並回傳路徑。
-</p>
-
-<h2 id="hands-on">親手驗證</h2>
-<p>
-    以下練習完全使用 repository 的 deterministic tests，不需要 OpenRouter key。先觀察 cancellation 與 compaction 的
-    production regression tests，再閱讀固定的 durable facts：
-</p>
-<pre data-lang="sh"><code>cd typescript
-node --import tsx --test \
-  --test-name-pattern="abort|compaction" tests/index.test.ts
+# 2. 檢視官方持久化 Fixtures 中的 abort 與 compaction 事實
 cd ..
-
-grep -R 'abortRequested\|compactionStarted\|sourceDigest' \
-  schemas/session/fixtures schemas/session/planner-fixtures | head -40</code></pre>
-<p>
-    檢查順序：先找到 <code>abortRequested</code>，再確認對應的 attempt/tool reconciliation 與
-    <code>operationFinished</code>；compaction 則比對 source partition、<code>sourceDigest</code> 與 materialized
-    retained tail。最後重跑同一個 recovery test，確認第二次 resume 不會再次呼叫模型或重複寫入 outcome。
-</p>
+grep -R 'abortRequested\|compactionStarted\|sourceDigest' schemas/session/fixtures | head -20</code></pre>
 
 <p class="bridge">
-    到此為止，你已經有一個能正確處理失敗的迴圈——下一章要問的是，你怎麼知道它平常做得好不好、做得對不對。
+    至此，我們已經構建出一個在錯誤、崩潰、中斷與無限上下文下均能穩定運行的 Agent 核心。但我們該如何建立<strong>自動化測試體系</strong>？如何監控<strong>生產環境指標</strong>？又該如何劃定 <strong>MCP 與多租戶的最高安全防線</strong>？最後一章我們將全面走向 <strong>Production 實戰</strong>。
 </p>
 
 <aside class="note">
-    <strong>閱讀原始碼</strong
-    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L942"
-        >durable <code>compact()</code></a
-    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/compaction-comparison.md"
-        >主流 compaction 比較</a
-    >、<a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/lang-behavior-matrix.md"
-        >四語言 bash output 行為完整矩陣</a
-    >。
+    <strong>閱讀原始碼</strong>　
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L942">TypeScript Durable <code>compact()</code> 實作</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/compaction-comparison.md">主流 Agent 壓縮機制深度對比</a>。
 </aside>
