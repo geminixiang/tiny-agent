@@ -16,9 +16,11 @@ from .http import close_writer, read_http_response, remaining, wait_owned
 from .session import Session, environment_identity, uuid7
 from .session_recovery import plan_recovery
 from .session_reducer import configuration_digest, source_digest
-from .settings import DEFAULT_MODEL, Settings
+from .settings import DEFAULT_ENDPOINT, DEFAULT_MODEL, Settings
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+def chat_completions_url(endpoint: str | None = None) -> str:
+    trimmed = (endpoint or Settings().tiny_endpoint or DEFAULT_ENDPOINT).rstrip("/")
+    return trimmed if trimmed.endswith("/chat/completions") else f"{trimmed}/chat/completions"
 MAX_BASH_OUTPUT = 10 * 1024 * 1024
 BASH_TIMEOUT_SECONDS = 120
 MAX_HTTP_RESPONSE = 10 * 1024 * 1024
@@ -41,7 +43,7 @@ def format_tool_event(event: dict) -> str:
         result = event.get("result", "")
         return f"  └ {result}" if result in ("ok", "(no output)") else f"  └ {len(result)} chars"
     name, args = event["name"], event["args"]
-    target = args.get("command" if name == "bash" else "path", "")
+    target = args.get("command" if name in ("bash", "bg") else "path", "") or args.get("id", "")
     target = target if len(target) <= 80 else target[:77] + "..."
     suffix = f" ({len(args.get('content', ''))} chars)" if name == "write" else f" ({len(args.get('oldText', ''))}→{len(args.get('newText', ''))} chars)" if name == "edit" else ""
     return f"◆ {name}{f' {target}' if target else ''}{suffix}"
@@ -73,8 +75,10 @@ for name, description, properties in [
     ("read", "Read a UTF-8 text file", {"path": {"type": "string"}}),
     ("write", "Create or overwrite a UTF-8 text file", {"path": {"type": "string"}, "content": {"type": "string"}}),
     ("edit", "Replace one unique exact string in a UTF-8 text file", {"path": {"type": "string"}, "oldText": {"type": "string"}, "newText": {"type": "string"}}),
+    ("bg", "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands; list/status/logs can see bg processes left by tiny-agent runs in the same cwd.", {"action": {"type": "string", "enum": ["start", "list", "status", "logs", "stop"]}, "command": {"type": "string"}, "id": {"type": "string"}, "tail": {"type": "integer", "minimum": 1}}),
 ]:
-    TOOL_DEFINITIONS.append({"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": list(properties)}}})
+    required = ["action"] if name == "bg" else list(properties)
+    TOOL_DEFINITIONS.append({"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required}}})
 
 
 def _tls_context() -> ssl.SSLContext:
@@ -290,10 +294,108 @@ async def execute_bash(command: str, cancelled: asyncio.Event) -> str:
     return result if not process.returncode else f"{result}\nError: command exited with status {process.returncode}"
 
 
+BG_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
+
+
+def bg_dir() -> Path: return ROOT / ".tiny-agent/bg"
+
+def bg_paths(pid: str) -> tuple[Path, Path]:
+    if not pid.isdigit(): raise ValueError("id must be a pid")
+    return bg_dir() / f"{pid}.json", bg_dir() / f"{pid}.log"
+
+def process_running(pid: int) -> bool:
+    with suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, 0)
+        return True
+    return False
+
+def read_bg_meta(pid: str) -> dict:
+    meta_path, _ = bg_paths(pid)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if meta.get("cwd") != str(ROOT): raise ValueError(f"bg {pid} belongs to a different cwd")
+    return meta
+
+def write_bg_meta(meta: dict) -> None:
+    meta_path, _ = bg_paths(str(meta["id"]))
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+def current_bg_status(meta: dict) -> str:
+    if meta.get("status") == "stopped": return "stopped"
+    if process_running(int(meta["pid"])): return "running"
+    return "exited" if meta.get("status") == "running" else meta.get("status", "exited")
+
+def log_tail(path: Path, lines: int = 80) -> str:
+    if not path.exists(): return ""
+    return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-min(lines, 2_000):])
+
+async def wait_bg_exit(process: asyncio.subprocess.Process, meta: dict, log) -> None:
+    code = await process.wait()
+    status = "stopped" if meta["id"] not in BG_PROCESSES else "exited"
+    BG_PROCESSES.pop(meta["id"], None)
+    log.write(f"\nexited: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\nexitCode: {code}\nsignal: \n")
+    log.close()
+    meta.update({"status": status, "exitCode": code, "signal": None, "exitedAt": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})
+    with suppress(Exception): write_bg_meta(meta)
+
+async def execute_bg(args: dict[str, str], cancelled: asyncio.Event) -> str:
+    action = args.get("action", "")
+    if action == "start":
+        command = args.get("command", "")
+        if not command: raise ValueError("command must be a nonempty string")
+        bg_dir().mkdir(parents=True, exist_ok=True)
+        process = await asyncio.create_subprocess_shell(command, cwd=ROOT, executable="/bin/sh", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        pid = str(process.pid)
+        _, log_path = bg_paths(pid)
+        log = log_path.open("a", encoding="utf-8")
+        started = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        log.write(f"$ {command}\ncwd: {ROOT}\npid: {pid}\nstarted: {started}\n\n"); log.flush()
+        async def pump() -> None:
+            assert process.stdout
+            while chunk := await process.stdout.readline():
+                log.write(chunk.decode(errors="replace")); log.flush()
+        asyncio.create_task(pump())
+        meta = {"id": pid, "command": command, "cwd": str(ROOT), "pid": process.pid, "pgid": process.pid, "ownerPid": os.getpid(), "startedAt": started, "log": f".tiny-agent/bg/{pid}.log", "status": "running"}
+        BG_PROCESSES[pid] = process
+        write_bg_meta(meta)
+        asyncio.create_task(wait_bg_exit(process, meta, log))
+        await asyncio.sleep(0.5)
+        status = current_bg_status(meta)
+        return json.dumps({**meta, "status": status}) + (f"\n{log_tail(log_path)}" if status != "running" else "")
+    if action == "list":
+        metas = []
+        for path in bg_dir().glob("*.json"):
+            with suppress(Exception):
+                meta = read_bg_meta(path.stem)
+                metas.append({**meta, "status": current_bg_status(meta)})
+        return json.dumps(metas)
+    pid = args.get("id", "")
+    meta = read_bg_meta(pid)
+    meta_path, log_path = bg_paths(pid)
+    if action == "status": return json.dumps({**meta, "status": current_bg_status(meta)}) + "\n" + log_tail(log_path, int(args.get("tail", 40)))
+    if action == "logs": return log_tail(log_path, int(args.get("tail", 80))) or "(no output)"
+    if action == "stop":
+        if current_bg_status(meta) == "running":
+            BG_PROCESSES.pop(pid, None)
+            with suppress(ProcessLookupError, PermissionError): os.killpg(int(meta.get("pgid") or meta["pid"]), signal.SIGTERM)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and process_running(int(meta["pid"])): await asyncio.sleep(0.05)
+            if process_running(int(meta["pid"])):
+                with suppress(ProcessLookupError, PermissionError): os.killpg(int(meta.get("pgid") or meta["pid"]), signal.SIGKILL)
+            meta.update({"status": "stopped", "exitedAt": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})
+            write_bg_meta(meta)
+        return json.dumps({**meta, "status": current_bg_status(meta)})
+    raise ValueError(f"unknown bg action: {action}")
+
+async def close_background_processes() -> None:
+    for pid in list(BG_PROCESSES):
+        with suppress(Exception): await execute_bg({"action": "stop", "id": pid}, asyncio.Event())
+
+
 async def execute_tool(name: str, args: dict[str, str], cancelled: asyncio.Event | None = None) -> str:
     cancelled = cancelled or asyncio.Event()
     if cancelled.is_set(): raise InterruptedError("Operation aborted")
     if name == "bash": return await execute_bash(args["command"], cancelled)
+    if name == "bg": return await execute_bg(args, cancelled)
 
     def execute_file_tool() -> str:
         path = Path(args["path"])
@@ -545,7 +647,7 @@ class Agent:
         if self.requester:
             data = await self.requester(body, cancelled)
         else:
-            data = await _post_json(OPENROUTER_URL, body, {
+            data = await _post_json(chat_completions_url(settings.tiny_endpoint), body, {
                 "Authorization": f"Bearer {key.get_secret_value()}", "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com/geminixiang/tiny-agent",
             }, 120, cancelled)

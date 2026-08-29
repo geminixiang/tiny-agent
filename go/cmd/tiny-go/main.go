@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -201,10 +202,14 @@ var toolDefinitions = []map[string]any{
 	toolDefinition("read", "Read a UTF-8 text file", map[string]any{"path": map[string]string{"type": "string"}}),
 	toolDefinition("write", "Create or overwrite a UTF-8 text file", map[string]any{"path": map[string]string{"type": "string"}, "content": map[string]string{"type": "string"}}),
 	toolDefinition("edit", "Replace one unique exact string in a UTF-8 text file", map[string]any{"path": map[string]string{"type": "string"}, "oldText": map[string]string{"type": "string"}, "newText": map[string]string{"type": "string"}}),
+	toolDefinition("bg", "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands; list/status/logs can see bg processes left by tiny-agent runs in the same cwd.", map[string]any{"action": map[string]any{"type": "string", "enum": []string{"start", "list", "status", "logs", "stop"}}, "command": map[string]string{"type": "string"}, "id": map[string]string{"type": "string"}, "tail": map[string]any{"type": "integer", "minimum": 1}}),
 }
 
 func toolDefinition(name, description string, properties map[string]any) map[string]any {
 	required := slices.Sorted(maps.Keys(properties))
+	if name == "bg" {
+		required = []string{"action"}
+	}
 	return map[string]any{"type": "function", "function": map[string]any{"name": name, "description": description, "parameters": map[string]any{"type": "object", "properties": properties, "required": required}}}
 }
 
@@ -216,12 +221,256 @@ func resolveToolPath(path string) (string, error) {
 	return filepath.Abs(full)
 }
 
+type bgMeta struct {
+	ID       string `json:"id"`
+	Command  string `json:"command"`
+	CWD      string `json:"cwd"`
+	PID      int    `json:"pid"`
+	PGID     int    `json:"pgid"`
+	OwnerPID int    `json:"ownerPid"`
+	Started  string `json:"startedAt"`
+	Log      string `json:"log"`
+	Status   string `json:"status"`
+	ExitCode *int   `json:"exitCode,omitempty"`
+	Signal   string `json:"signal,omitempty"`
+	Exited   string `json:"exitedAt,omitempty"`
+}
+
+var (
+	bgMu        sync.Mutex
+	bgProcesses = map[string]*exec.Cmd{}
+)
+
+func bgDir() string { return filepath.Join(cwd, ".tiny-agent", "bg") }
+
+func bgPaths(id string) (string, string, string, error) {
+	if _, err := strconv.Atoi(id); err != nil {
+		return "", "", "", errors.New("id must be a pid")
+	}
+	dir := bgDir()
+	return filepath.Join(dir, id+".json"), filepath.Join(dir, id+".log"), filepath.Join(".tiny-agent", "bg", id+".log"), nil
+}
+
+func processRunning(pid int) bool { return syscall.Kill(pid, 0) == nil }
+
+func readBGMeta(id string) (bgMeta, error) {
+	path, _, _, err := bgPaths(id)
+	if err != nil {
+		return bgMeta{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return bgMeta{}, err
+	}
+	var meta bgMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return bgMeta{}, err
+	}
+	if meta.CWD != cwd {
+		return bgMeta{}, fmt.Errorf("bg %s belongs to a different cwd", id)
+	}
+	return meta, nil
+}
+
+func writeBGMeta(meta bgMeta) error {
+	path, _, _, err := bgPaths(meta.ID)
+	if err != nil {
+		return err
+	}
+	data, _ := json.MarshalIndent(meta, "", "  ")
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func currentBGStatus(meta bgMeta) string {
+	if meta.Status == "stopped" {
+		return "stopped"
+	}
+	if processRunning(meta.PID) {
+		return "running"
+	}
+	if meta.Status == "running" {
+		return "exited"
+	}
+	return meta.Status
+}
+
+func bgJSON(meta bgMeta) string {
+	meta.Status = currentBGStatus(meta)
+	data, _ := json.Marshal(meta)
+	return string(data)
+}
+
+func tailFile(path string, lines int) string {
+	if lines < 1 {
+		lines = 80
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	start := max(0, len(parts)-min(lines, 2000))
+	return strings.Join(parts[start:], "\n")
+}
+
+func startBG(command string) (string, error) {
+	if command == "" {
+		return "", errors.New("command must be a nonempty string")
+	}
+	if err := os.MkdirAll(bgDir(), 0o755); err != nil {
+		return "", err
+	}
+	tempLog := filepath.Join(bgDir(), uuid7(time.Now())+".log")
+	log, err := os.OpenFile(tempLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Dir = cwd
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout, cmd.Stderr = log, log
+	if err := cmd.Start(); err != nil {
+		_ = log.Close()
+		return "", err
+	}
+	id := strconv.Itoa(cmd.Process.Pid)
+	_, logPath, relativeLog, err := bgPaths(id)
+	if err != nil {
+		return "", err
+	}
+	_ = os.Rename(tempLog, logPath)
+	started := time.Now().UTC().Format(time.RFC3339Nano)
+	fmt.Fprintf(log, "$ %s\ncwd: %s\npid: %s\nstarted: %s\n\n", command, cwd, id, started)
+	meta := bgMeta{ID: id, Command: command, CWD: cwd, PID: cmd.Process.Pid, PGID: cmd.Process.Pid, OwnerPID: os.Getpid(), Started: started, Log: relativeLog, Status: "running"}
+	bgMu.Lock()
+	bgProcesses[id] = cmd
+	bgMu.Unlock()
+	if err := writeBGMeta(meta); err != nil {
+		return "", err
+	}
+	go func() {
+		err := cmd.Wait()
+		code := 0
+		if err != nil {
+			if exit, ok := err.(*exec.ExitError); ok {
+				code = exit.ExitCode()
+			}
+		}
+		bgMu.Lock()
+		_, owned := bgProcesses[id]
+		delete(bgProcesses, id)
+		bgMu.Unlock()
+		status := "exited"
+		if !owned {
+			status = "stopped"
+		}
+		exited := time.Now().UTC().Format(time.RFC3339Nano)
+		fmt.Fprintf(log, "\nexited: %s\nexitCode: %d\nsignal: \n", exited, code)
+		_ = log.Close()
+		meta.Status, meta.ExitCode, meta.Exited = status, &code, exited
+		_ = writeBGMeta(meta)
+	}()
+	time.Sleep(500 * time.Millisecond)
+	if currentBGStatus(meta) != "running" {
+		meta.Status = "exited"
+		return bgJSON(meta) + "\n" + tailFile(logPath, 80), nil
+	}
+	return bgJSON(meta), nil
+}
+
+func stopBG(meta bgMeta) (bgMeta, error) {
+	if currentBGStatus(meta) != "running" {
+		meta.Status = currentBGStatus(meta)
+		return meta, nil
+	}
+	bgMu.Lock()
+	delete(bgProcesses, meta.ID)
+	bgMu.Unlock()
+	_ = syscall.Kill(-meta.PGID, syscall.SIGTERM)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && processRunning(meta.PID) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if processRunning(meta.PID) {
+		_ = syscall.Kill(-meta.PGID, syscall.SIGKILL)
+	}
+	meta.Status, meta.Exited = "stopped", time.Now().UTC().Format(time.RFC3339Nano)
+	return meta, writeBGMeta(meta)
+}
+
+func executeBG(ctx context.Context, args map[string]string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	switch args["action"] {
+	case "start":
+		return startBG(args["command"])
+	case "list":
+		entries, _ := os.ReadDir(bgDir())
+		metas := []bgMeta{}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			meta, err := readBGMeta(strings.TrimSuffix(entry.Name(), ".json"))
+			if err == nil {
+				meta.Status = currentBGStatus(meta)
+				metas = append(metas, meta)
+			}
+		}
+		data, _ := json.Marshal(metas)
+		return string(data), nil
+	case "status", "logs", "stop":
+		meta, err := readBGMeta(args["id"])
+		if err != nil {
+			return "", err
+		}
+		_, logPath, _, _ := bgPaths(args["id"])
+		if args["action"] == "status" {
+			lines, _ := strconv.Atoi(args["tail"])
+			return bgJSON(meta) + "\n" + tailFile(logPath, cmp.Or(lines, 40)), nil
+		}
+		if args["action"] == "logs" {
+			lines, _ := strconv.Atoi(args["tail"])
+			text := tailFile(logPath, cmp.Or(lines, 80))
+			if text == "" {
+				return "(no output)", nil
+			}
+			return text, nil
+		}
+		stopped, err := stopBG(meta)
+		if err != nil {
+			return "", err
+		}
+		return bgJSON(stopped), nil
+	default:
+		return "", fmt.Errorf("unknown bg action: %s", args["action"])
+	}
+}
+
+func closeBackgroundProcesses() {
+	bgMu.Lock()
+	ids := slices.Collect(maps.Keys(bgProcesses))
+	bgMu.Unlock()
+	for _, id := range ids {
+		if meta, err := readBGMeta(id); err == nil {
+			_, _ = stopBG(meta)
+		}
+	}
+}
+
 func executeTool(ctx context.Context, name string, args map[string]string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	if name == "bash" {
 		return executeBash(ctx, args["command"])
+	}
+	if name == "bg" {
+		return executeBG(ctx, args)
 	}
 	path, err := resolveToolPath(args["path"])
 	if err != nil {
@@ -423,7 +672,7 @@ func localTools(names ...string) []Tool {
 			for key, value := range args {
 				text, ok := value.(string)
 				if !ok {
-					return "", fmt.Errorf("tool argument %s must be a string", key)
+					text = fmt.Sprint(value)
 				}
 				stringsOnly[key] = text
 			}
@@ -746,6 +995,7 @@ func runCLI(args []string) error {
 		return err
 	}
 	defer session.Close()
+	defer closeBackgroundProcesses()
 	agent := newAgent(skills, session, loadProjectInstructions())
 	agent.Tools = localTools(selectedPlugins...)
 	loadedMCP := []*MCPClient{}
@@ -779,7 +1029,7 @@ func runCLI(args []string) error {
 		}
 	}
 	resume := func() { fmt.Fprintf(out, "\nResume: tiny-go --session %s\n", session.ID) }
-	fmt.Printf("\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: %s\nsession: %s\npath: %s\ntools: %s\nmcp: %s", model(), session.ID, session.Path, displayToolList(agent.Tools), emptyList(mcpAliases))
+	fmt.Printf("\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nendpoint: %s\nmodel: %s\nsession: %s\npath: %s\ntools: %s\nmcp: %s", endpoint(), model(), session.ID, session.Path, displayToolList(agent.Tools), emptyList(mcpAliases))
 	if sessionID != "" {
 		fmt.Print("\nrestored: yes")
 	}

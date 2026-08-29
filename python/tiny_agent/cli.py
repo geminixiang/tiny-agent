@@ -6,7 +6,7 @@ import tty
 from contextlib import suppress
 from pathlib import Path
 
-from .agent import Agent, TOOL_DEFINITIONS, format_tool_event, format_usage, load_project_instructions, load_skills
+from .agent import Agent, TOOL_DEFINITIONS, close_background_processes, format_tool_event, format_usage, load_project_instructions, load_skills
 from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases, split_names
 from .session import Session
 from .settings import Settings
@@ -66,6 +66,7 @@ def print_banner(session: Session, tools: list[dict], aliases: list[str], restor
     print(
         f"\x1b[36mtiny-agent\x1b[0m\n"
         f"provider: openrouter\n"
+        f"endpoint: {Settings().tiny_endpoint}\n"
         f"model: {Settings().tiny_model}\n"
         f"session: {session.id}\n"
         f"path: {session.path}\n"
@@ -151,6 +152,7 @@ async def run_cli(argv: list[str] | None = None) -> int:
     try:
         return await run_session(args, aliases, local_tools, loaded_mcp)
     finally:
+        await close_background_processes()
         await close_mcp(loaded_mcp)
 
 

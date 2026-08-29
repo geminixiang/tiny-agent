@@ -594,6 +594,9 @@ fn formats_tui_tool_events() {
             offset: 1,
             limit: 2000,
             edits: Vec::new(),
+            action: String::new(),
+            id: String::new(),
+            tail: 0,
         },
         result: String::new(),
     };
@@ -610,6 +613,9 @@ fn formats_tui_tool_events() {
             offset: 1,
             limit: 2000,
             edits: Vec::new(),
+            action: String::new(),
+            id: String::new(),
+            tail: 0,
         },
         result: String::new(),
     };
@@ -626,6 +632,9 @@ fn formats_tui_tool_events() {
             offset: 1,
             limit: 2000,
             edits: Vec::new(),
+            action: String::new(),
+            id: String::new(),
+            tail: 0,
         },
         result: "hello".into(),
     };
@@ -1651,7 +1660,7 @@ fn runs_tool_loop_and_compacts_through_mock() {
         edit["function"]["parameters"]["required"],
         serde_json::json!(["path", "edits"])
     );
-    assert_eq!(defs.as_array().unwrap().len(), 4);
+    assert_eq!(defs.as_array().unwrap().len(), 5);
 }
 
 // ---------------------------------------------------------------------------
@@ -1667,6 +1676,9 @@ fn args() -> ToolArgs {
         offset: 1,
         limit: 2_000,
         edits: Vec::new(),
+        action: String::new(),
+        id: String::new(),
+        tail: 0,
     }
 }
 

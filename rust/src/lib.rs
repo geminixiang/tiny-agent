@@ -2,12 +2,14 @@
 //! Mirrors the TypeScript (`tiny-ts`), Go (`tiny-go`), and Python (`tiny-py`)
 //! implementations of tiny-agent.
 
-use std::io::Read;
+use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path as FsPath;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -32,7 +34,7 @@ pub mod session_runtime;
 pub mod terminal;
 
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
-pub const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+pub const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api/v1";
 pub const MAX_TOOL_OUTPUT: usize = 50 * 1024;
 pub const MAX_BASH_OUTPUT: usize = 10 * 1024 * 1024;
 pub const BASH_TIMEOUT: u64 = 120;
@@ -42,6 +44,21 @@ pub fn model_name() -> String {
         Ok(v) if !v.is_empty() => v,
         _ => DEFAULT_MODEL.to_string(),
     }
+}
+
+pub fn endpoint() -> String {
+    match std::env::var("TINY_ENDPOINT") {
+        Ok(v) if !v.is_empty() => v,
+        _ => DEFAULT_ENDPOINT.to_string(),
+    }
+}
+
+pub fn chat_completions_url(endpoint: &str) -> String {
+    let trimmed = endpoint.trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        return trimmed.to_string();
+    }
+    format!("{trimmed}/chat/completions")
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +130,12 @@ pub struct ToolArgs {
     pub limit: i64,
     #[serde(default)]
     pub edits: Vec<ToolEdit>,
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub tail: i64,
 }
 
 impl ToolArgs {
@@ -132,6 +155,9 @@ impl ToolArgs {
             offset: 1,
             limit: 2_000,
             edits: Vec::new(),
+            action: String::new(),
+            id: String::new(),
+            tail: 0,
         }
     }
 }
@@ -224,8 +250,12 @@ pub fn format_tool_event(event: ToolEvent) -> String {
             format!("  └ {} chars", event.result.len())
         };
     }
-    let mut target = if event.name == "bash" {
-        event.args.command
+    let mut target = if event.name == "bash" || event.name == "bg" {
+        if event.args.command.is_empty() {
+            event.args.id
+        } else {
+            event.args.command
+        }
     } else {
         event.args.path
     };
@@ -457,7 +487,7 @@ pub fn new_agent(
         skills,
         session,
         cancel: Arc::new(AtomicBool::new(false)),
-        endpoint: OPENROUTER_URL.to_string(),
+        endpoint: chat_completions_url(&endpoint()),
         client: Arc::new(open_router_agent()),
         on_tool: Arc::new(|_| {}),
         cwd: cwd.to_string(),
@@ -1883,6 +1913,9 @@ impl Agent {
             }
             return Ok(result);
         }
+        if name == "bg" {
+            return execute_bg(&self.cwd, args);
+        }
         if args.path.is_empty() {
             return Err("path is required".to_string());
         }
@@ -2061,7 +2094,7 @@ fn stop_reason_name(reason: StopReason) -> &'static str {
 }
 
 pub const fn local_tool_names() -> &'static [&'static str] {
-    &["bash", "read", "write", "edit"]
+    &["bash", "read", "write", "edit", "bg"]
 }
 
 pub fn tool_definitions_json() -> &'static str {
@@ -2138,6 +2171,23 @@ pub fn tool_definitions_json() -> &'static str {
             "required": ["path", "edits"]
           }
         }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "bg",
+          "description": "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands; list/status/logs can see bg processes left by tiny-agent runs in the same cwd.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "action": { "type": "string", "enum": ["start", "list", "status", "logs", "stop"] },
+              "command": { "type": "string", "description": "Shell command to start. Required for action=start." },
+              "id": { "type": "string", "description": "Background process pid. Required for status/logs/stop." },
+              "tail": { "type": "integer", "minimum": 1, "description": "Number of log lines for logs, status, or failed start." }
+            },
+            "required": ["action"]
+          }
+        }
       }
     ]"#
 }
@@ -2145,6 +2195,269 @@ pub fn tool_definitions_json() -> &'static str {
 // ---------------------------------------------------------------------------
 // tools
 // ---------------------------------------------------------------------------
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BgMeta {
+    id: String,
+    command: String,
+    cwd: String,
+    pid: u32,
+    pgid: u32,
+    owner_pid: u32,
+    started_at: String,
+    log: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exited_at: Option<String>,
+}
+
+static BG_PROCESSES: OnceLock<Mutex<HashMap<String, Child>>> = OnceLock::new();
+fn bg_processes() -> &'static Mutex<HashMap<String, Child>> {
+    BG_PROCESSES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn bg_dir(cwd: &str) -> String {
+    join_path(&join_path(cwd, ".tiny-agent"), "bg")
+}
+fn bg_paths(cwd: &str, id: &str) -> Result<(String, String, String), String> {
+    if id.parse::<u32>().is_err() {
+        return Err("id must be a pid".to_string());
+    }
+    let dir = bg_dir(cwd);
+    Ok((
+        join_path(&dir, &format!("{id}.json")),
+        join_path(&dir, &format!("{id}.log")),
+        format!(".tiny-agent/bg/{id}.log"),
+    ))
+}
+fn process_running(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+fn read_bg_meta(cwd: &str, id: &str) -> Result<BgMeta, String> {
+    let (path, _, _) = bg_paths(cwd, id)?;
+    let meta: BgMeta =
+        serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    if meta.cwd != cwd {
+        return Err(format!("bg {id} belongs to a different cwd"));
+    }
+    Ok(meta)
+}
+fn write_bg_meta(cwd: &str, meta: &BgMeta) -> Result<(), String> {
+    let (path, _, _) = bg_paths(cwd, &meta.id)?;
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(meta).map_err(|e| e.to_string())? + "\n",
+    )
+    .map_err(|e| e.to_string())
+}
+fn current_bg_status(meta: &BgMeta) -> String {
+    if meta.status == "stopped" {
+        return "stopped".to_string();
+    }
+    if process_running(meta.pid) {
+        return "running".to_string();
+    }
+    if meta.status == "running" {
+        "exited".to_string()
+    } else {
+        meta.status.clone()
+    }
+}
+fn refresh_bg_meta(cwd: &str, meta: &mut BgMeta) {
+    let exited = {
+        let mut processes = bg_processes().lock().unwrap();
+        processes
+            .get_mut(&meta.id)
+            .and_then(|child| child.try_wait().ok().flatten())
+    };
+    if let Some(status) = exited {
+        bg_processes().lock().unwrap().remove(&meta.id);
+        meta.status = "exited".to_string();
+        meta.exit_code = status.code();
+        meta.exited_at = Some(chrono_like_now());
+        let _ = write_bg_meta(cwd, meta);
+    }
+}
+fn bg_json(meta: &BgMeta) -> String {
+    let mut value = meta.clone();
+    value.status = current_bg_status(meta);
+    serde_json::to_string(&value).unwrap_or_default()
+}
+fn tail_file(path: &str, lines: i64) -> String {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
+    let mut parts = text
+        .lines()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    let count = (if lines < 1 { 80 } else { lines }).min(2_000) as usize;
+    if parts.len() > count {
+        parts = parts.split_off(parts.len() - count);
+    }
+    parts.join("\n")
+}
+fn start_bg(cwd: &str, command: &str) -> Result<String, String> {
+    if command.is_empty() {
+        return Err("command must be a nonempty string".to_string());
+    }
+    std::fs::create_dir_all(bg_dir(cwd)).map_err(|e| e.to_string())?;
+    let temp_log = join_path(&bg_dir(cwd), &(uuid7() + ".log"));
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&temp_log)
+        .map_err(|e| e.to_string())?;
+    let err_log = log.try_clone().map_err(|e| e.to_string())?;
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err_log))
+        .process_group(0)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let id = child.id().to_string();
+    let (_, log_path, relative_log) = bg_paths(cwd, &id)?;
+    let _ = std::fs::rename(&temp_log, &log_path);
+    let started = chrono_like_now();
+    OpenOptions::new()
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| e.to_string())?
+        .write_all(format!("$ {command}\ncwd: {cwd}\npid: {id}\nstarted: {started}\n\n").as_bytes())
+        .map_err(|e| e.to_string())?;
+    let meta = BgMeta {
+        id: id.clone(),
+        command: command.to_string(),
+        cwd: cwd.to_string(),
+        pid: child.id(),
+        pgid: child.id(),
+        owner_pid: std::process::id(),
+        started_at: started,
+        log: relative_log,
+        status: "running".to_string(),
+        exit_code: None,
+        signal: None,
+        exited_at: None,
+    };
+    write_bg_meta(cwd, &meta)?;
+    bg_processes().lock().unwrap().insert(id.clone(), child);
+    thread::sleep(Duration::from_millis(500));
+    let mut meta = meta;
+    refresh_bg_meta(cwd, &mut meta);
+    if current_bg_status(&meta) != "running" {
+        return Ok(bg_json(&meta) + "\n" + &tail_file(&log_path, 80));
+    }
+    Ok(bg_json(&meta))
+}
+fn stop_bg(cwd: &str, mut meta: BgMeta) -> Result<BgMeta, String> {
+    if current_bg_status(&meta) != "running" {
+        meta.status = current_bg_status(&meta);
+        return Ok(meta);
+    }
+    let mut child = bg_processes().lock().unwrap().remove(&meta.id);
+    unsafe {
+        libc::kill(-(meta.pgid as i32), libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if let Some(process) = child.as_mut() {
+            if process.try_wait().map_err(|e| e.to_string())?.is_some() {
+                break;
+            }
+        } else if !process_running(meta.pid) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if child
+        .as_mut()
+        .is_some_and(|process| process.try_wait().ok().flatten().is_none())
+        || (child.is_none() && process_running(meta.pid))
+    {
+        unsafe {
+            libc::kill(-(meta.pgid as i32), libc::SIGKILL);
+        }
+        if let Some(process) = child.as_mut() {
+            let _ = process.wait();
+        }
+    }
+    meta.status = "stopped".to_string();
+    meta.exited_at = Some(chrono_like_now());
+    write_bg_meta(cwd, &meta)?;
+    Ok(meta)
+}
+fn execute_bg(cwd: &str, args: &ToolArgs) -> Result<String, String> {
+    match args.action.as_str() {
+        "start" => start_bg(cwd, &args.command),
+        "list" => {
+            let mut metas = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(bg_dir(cwd)) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                        continue;
+                    }
+                    if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                        if let Ok(mut meta) = read_bg_meta(cwd, id) {
+                            refresh_bg_meta(cwd, &mut meta);
+                            meta.status = current_bg_status(&meta);
+                            metas.push(meta);
+                        }
+                    }
+                }
+            }
+            serde_json::to_string(&metas).map_err(|e| e.to_string())
+        }
+        "status" | "logs" | "stop" => {
+            let mut meta = read_bg_meta(cwd, &args.id)?;
+            refresh_bg_meta(cwd, &mut meta);
+            let (_, log_path, _) = bg_paths(cwd, &args.id)?;
+            if args.action == "status" {
+                return Ok(bg_json(&meta)
+                    + "\n"
+                    + &tail_file(&log_path, if args.tail > 0 { args.tail } else { 40 }));
+            }
+            if args.action == "logs" {
+                let text = tail_file(&log_path, if args.tail > 0 { args.tail } else { 80 });
+                return Ok(if text.is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    text
+                });
+            }
+            Ok(bg_json(&stop_bg(cwd, meta)?))
+        }
+        _ => Err(format!("unknown bg action: {}", args.action)),
+    }
+}
+pub fn close_background_processes(cwd: &str) {
+    let ids = bg_processes()
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for id in ids {
+        if let Ok(meta) = read_bg_meta(cwd, &id) {
+            let _ = stop_bg(cwd, meta);
+        }
+    }
+}
+fn chrono_like_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
+}
+
 fn resolve_path(cwd: &str, path: &str, new_file: bool) -> Result<String, String> {
     let candidate = if FsPath::new(path).is_absolute() {
         FsPath::new(path).to_path_buf()

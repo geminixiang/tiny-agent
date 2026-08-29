@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use tiny_agent_rust::mcp::{LoadedMcp, display_tool_name, load_mcp_configs, load_mcp_tools};
 use tiny_agent_rust::terminal::{TermError, Terminal};
 use tiny_agent_rust::{
-    Session, format_tool_event, format_usage, load_project_instructions, load_skills,
-    local_tool_names, model_name, new_agent,
+    Session, close_background_processes, endpoint, format_tool_event, format_usage,
+    load_project_instructions, load_skills, local_tool_names, model_name, new_agent,
 };
 
 struct CliArgs {
@@ -106,6 +106,16 @@ impl Drop for ActiveMcp {
     }
 }
 
+struct ActiveBg {
+    cwd: String,
+}
+
+impl Drop for ActiveBg {
+    fn drop(&mut self) {
+        close_background_processes(&self.cwd);
+    }
+}
+
 fn run_cli(args: Vec<String>) -> Result<i32, String> {
     let parsed = parse_args(args)?;
     let configs = load_mcp_configs(&parsed.mcp)?;
@@ -118,6 +128,7 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let cwd = cwd.to_string_lossy().to_string();
+    let _active_bg = ActiveBg { cwd: cwd.clone() };
     let skills = load_skills(parsed.extras.clone(), &cwd)?;
     let instructions = load_project_instructions(&cwd);
 
@@ -172,7 +183,8 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
         ));
     }
     out.print(&format!(
-        "\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: {}\nsession: {}\npath: {}\ntools: {}\nmcp: {}{}\n",
+        "\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nendpoint: {}\nmodel: {}\nsession: {}\npath: {}\ntools: {}\nmcp: {}{}\n",
+        endpoint(),
         model_name(),
         session_id,
         session_path,
@@ -312,19 +324,19 @@ mod tests {
     fn plugins_default_all_and_reject_unknown() {
         assert_eq!(
             parse_args(Vec::new()).unwrap().plugins,
-            ["bash", "read", "write", "edit"]
+            ["bash", "read", "write", "edit", "bg"]
         );
         assert_eq!(
             parse_args(vec!["--plugin".into(), ",  ,".into()])
                 .unwrap()
                 .plugins,
-            ["bash", "read", "write", "edit"]
+            ["bash", "read", "write", "edit", "bg"]
         );
         assert_eq!(
             parse_args(vec!["--plugin".into(), "read,remote".into()])
                 .err()
                 .unwrap(),
-            "Unknown plugin: remote. Available plugins: bash, read, write, edit"
+            "Unknown plugin: remote. Available plugins: bash, read, write, edit, bg"
         );
     }
 }

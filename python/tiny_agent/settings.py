@@ -5,6 +5,7 @@ from pydantic import PrivateAttr, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
+DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1"
 
 
 class Settings(BaseSettings):
@@ -12,6 +13,7 @@ class Settings(BaseSettings):
 
     openrouter_api_key: SecretStr | None = None
     tiny_model: str = DEFAULT_MODEL
+    tiny_endpoint: str = DEFAULT_ENDPOINT
     tiny_mcp_config: Path | None = None
     tiny_agent_environment_identity: str = ""
     _environment: dict[str, str] = PrivateAttr(default_factory=lambda: dict(os.environ))
