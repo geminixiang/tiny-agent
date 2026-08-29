@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import ssl
+import subprocess
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -314,6 +315,14 @@ def process_running(pid: int) -> bool:
         return True
     return False
 
+def process_started_at(pid: int) -> str:
+    if not process_running(pid): return ""
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"}, check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
 def read_bg_meta(pid: str) -> dict:
     meta_path, _ = bg_paths(pid)
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -325,9 +334,10 @@ def write_bg_meta(meta: dict) -> None:
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
 def current_bg_status(meta: dict) -> str:
-    if meta.get("status") == "stopped": return "stopped"
-    if process_running(int(meta["pid"])): return "running"
-    return "exited" if meta.get("status") == "running" else meta.get("status", "exited")
+    if meta.get("status") != "running": return meta.get("status", "exited")
+    started = process_started_at(int(meta["pid"]))
+    if not started: return "exited"
+    return "running" if started == meta.get("processStartedAt") else "stale"
 
 def log_tail(path: Path, lines: int = 80) -> str:
     if not path.exists(): return ""
@@ -351,7 +361,7 @@ async def execute_bg(args: dict[str, str], cancelled: asyncio.Event) -> str:
         process = await asyncio.create_subprocess_shell(command, cwd=ROOT, executable="/bin/sh", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         pid = str(process.pid)
         _, log_path = bg_paths(pid)
-        log = log_path.open("a", encoding="utf-8")
+        log = log_path.open("w", encoding="utf-8")
         started = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         log.write(f"$ {command}\ncwd: {ROOT}\npid: {pid}\nstarted: {started}\n\n"); log.flush()
         async def pump() -> None:
@@ -359,12 +369,15 @@ async def execute_bg(args: dict[str, str], cancelled: asyncio.Event) -> str:
             while chunk := await process.stdout.readline():
                 log.write(chunk.decode(errors="replace")); log.flush()
         asyncio.create_task(pump())
-        meta = {"id": pid, "command": command, "cwd": str(ROOT), "pid": process.pid, "pgid": process.pid, "ownerPid": os.getpid(), "startedAt": started, "log": f".tiny-agent/bg/{pid}.log", "status": "running"}
+        meta = {"id": pid, "command": command, "cwd": str(ROOT), "pid": process.pid, "pgid": process.pid, "ownerPid": os.getpid(), "startedAt": started, "processStartedAt": process_started_at(process.pid), "log": f".tiny-agent/bg/{pid}.log", "status": "running"}
         BG_PROCESSES[pid] = process
         write_bg_meta(meta)
         asyncio.create_task(wait_bg_exit(process, meta, log))
         await asyncio.sleep(0.5)
         status = current_bg_status(meta)
+        if status != "running":
+            with suppress(Exception): meta = read_bg_meta(pid)
+            status = current_bg_status(meta)
         return json.dumps({**meta, "status": status}) + (f"\n{log_tail(log_path)}" if status != "running" else "")
     if action == "list":
         metas = []

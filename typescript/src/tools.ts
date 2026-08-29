@@ -1,4 +1,4 @@
-import { exec, spawn, type ExecException } from "node:child_process";
+import { exec, execFileSync, spawn, type ExecException } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
@@ -331,8 +331,9 @@ type BgMeta = {
     pgid: number;
     ownerPid: number;
     startedAt: string;
+    processStartedAt: string;
     log: string;
-    status: "running" | "exited" | "stopped";
+    status: "running" | "exited" | "stopped" | "stale";
     exitCode?: number | null;
     signal?: NodeJS.Signals | null;
     exitedAt?: string;
@@ -362,6 +363,19 @@ function isProcessRunning(pid: number) {
     }
 }
 
+function processStartedAt(pid: number) {
+    if (!isProcessRunning(pid)) return undefined;
+    try {
+        const output = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+            encoding: "utf8",
+            env: { ...process.env, LC_ALL: "C" },
+        }).trim();
+        return output || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 async function readBgMeta(id: string): Promise<BgMeta> {
     const data = JSON.parse(await readFile(bgPaths(id).meta, "utf8")) as BgMeta;
     if (data.cwd !== root()) throw Error(`bg ${id} belongs to a different cwd`);
@@ -380,9 +394,10 @@ async function tailFile(path: string, lines = 80) {
 }
 
 function currentBgStatus(meta: BgMeta): BgMeta["status"] {
-    if (meta.status === "stopped") return "stopped";
-    if (isProcessRunning(meta.pid)) return "running";
-    return meta.status === "running" ? "exited" : meta.status;
+    if (meta.status !== "running") return meta.status;
+    const currentStartedAt = processStartedAt(meta.pid);
+    if (!currentStartedAt) return "exited";
+    return currentStartedAt === meta.processStartedAt ? "running" : "stale";
 }
 
 function formatBg(meta: BgMeta, status = currentBgStatus(meta)) {
@@ -420,7 +435,7 @@ async function startBg(command: string) {
     if (!child.pid) throw Error("failed to start background process");
     const id = String(child.pid);
     const paths = bgPaths(id);
-    const log = createWriteStream(paths.log, { flags: "a" });
+    const log = createWriteStream(paths.log, { flags: "w" });
     log.write(`$ ${command}\ncwd: ${root()}\npid: ${child.pid}\nstarted: ${startedAt}\n\n`);
     child.stdout.pipe(log, { end: false });
     child.stderr.pipe(log, { end: false });
@@ -432,6 +447,7 @@ async function startBg(command: string) {
         pgid: child.pid,
         ownerPid: process.pid,
         startedAt,
+        processStartedAt: processStartedAt(child.pid) ?? "",
         log: paths.relativeLog,
         status: "running",
     };
@@ -447,7 +463,16 @@ async function startBg(command: string) {
     });
     await new Promise((resolve) => setTimeout(resolve, 500));
     const status = currentBgStatus(meta);
-    if (status !== "running") return `${formatBg({ ...meta, status: "exited" })}\n${await tailFile(paths.log)}`;
+    if (status !== "running") {
+        const exited = {
+            ...meta,
+            status,
+            exitCode: child.exitCode,
+            signal: child.signalCode,
+            exitedAt: new Date().toISOString(),
+        };
+        return `${formatBg(exited, status)}\n${await tailFile(paths.log)}`;
+    }
     return formatBg(meta);
 }
 

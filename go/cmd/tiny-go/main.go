@@ -222,18 +222,19 @@ func resolveToolPath(path string) (string, error) {
 }
 
 type bgMeta struct {
-	ID       string `json:"id"`
-	Command  string `json:"command"`
-	CWD      string `json:"cwd"`
-	PID      int    `json:"pid"`
-	PGID     int    `json:"pgid"`
-	OwnerPID int    `json:"ownerPid"`
-	Started  string `json:"startedAt"`
-	Log      string `json:"log"`
-	Status   string `json:"status"`
-	ExitCode *int   `json:"exitCode,omitempty"`
-	Signal   string `json:"signal,omitempty"`
-	Exited   string `json:"exitedAt,omitempty"`
+	ID               string `json:"id"`
+	Command          string `json:"command"`
+	CWD              string `json:"cwd"`
+	PID              int    `json:"pid"`
+	PGID             int    `json:"pgid"`
+	OwnerPID         int    `json:"ownerPid"`
+	Started          string `json:"startedAt"`
+	ProcessStartedAt string `json:"processStartedAt"`
+	Log              string `json:"log"`
+	Status           string `json:"status"`
+	ExitCode         *int   `json:"exitCode,omitempty"`
+	Signal           string `json:"signal,omitempty"`
+	Exited           string `json:"exitedAt,omitempty"`
 }
 
 var (
@@ -252,6 +253,19 @@ func bgPaths(id string) (string, string, string, error) {
 }
 
 func processRunning(pid int) bool { return syscall.Kill(pid, 0) == nil }
+
+func processStartedAt(pid int) string {
+	if !processRunning(pid) {
+		return ""
+	}
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=")
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
 
 func readBGMeta(id string) (bgMeta, error) {
 	path, _, _, err := bgPaths(id)
@@ -282,16 +296,17 @@ func writeBGMeta(meta bgMeta) error {
 }
 
 func currentBGStatus(meta bgMeta) string {
-	if meta.Status == "stopped" {
-		return "stopped"
+	if meta.Status != "running" {
+		return meta.Status
 	}
-	if processRunning(meta.PID) {
-		return "running"
-	}
-	if meta.Status == "running" {
+	started := processStartedAt(meta.PID)
+	if started == "" {
 		return "exited"
 	}
-	return meta.Status
+	if started != meta.ProcessStartedAt {
+		return "stale"
+	}
+	return "running"
 }
 
 func bgJSON(meta bgMeta) string {
@@ -344,7 +359,7 @@ func startBG(command string) (string, error) {
 	_ = os.Rename(tempLog, logPath)
 	started := time.Now().UTC().Format(time.RFC3339Nano)
 	fmt.Fprintf(log, "$ %s\ncwd: %s\npid: %s\nstarted: %s\n\n", command, cwd, id, started)
-	meta := bgMeta{ID: id, Command: command, CWD: cwd, PID: cmd.Process.Pid, PGID: cmd.Process.Pid, OwnerPID: os.Getpid(), Started: started, Log: relativeLog, Status: "running"}
+	meta := bgMeta{ID: id, Command: command, CWD: cwd, PID: cmd.Process.Pid, PGID: cmd.Process.Pid, OwnerPID: os.Getpid(), Started: started, ProcessStartedAt: processStartedAt(cmd.Process.Pid), Log: relativeLog, Status: "running"}
 	bgMu.Lock()
 	bgProcesses[id] = cmd
 	bgMu.Unlock()
@@ -375,7 +390,10 @@ func startBG(command string) (string, error) {
 	}()
 	time.Sleep(500 * time.Millisecond)
 	if currentBGStatus(meta) != "running" {
-		meta.Status = "exited"
+		if settled, readErr := readBGMeta(id); readErr == nil {
+			meta = settled
+		}
+		meta.Status = currentBGStatus(meta)
 		return bgJSON(meta) + "\n" + tailFile(logPath, 80), nil
 	}
 	return bgJSON(meta), nil

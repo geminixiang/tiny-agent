@@ -2205,6 +2205,7 @@ struct BgMeta {
     pgid: u32,
     owner_pid: u32,
     started_at: String,
+    process_started_at: String,
     log: String,
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2236,6 +2237,19 @@ fn bg_paths(cwd: &str, id: &str) -> Result<(String, String, String), String> {
 fn process_running(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
+fn process_started_at(pid: u32) -> String {
+    if !process_running(pid) {
+        return String::new();
+    }
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env("LC_ALL", "C")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
+}
 fn read_bg_meta(cwd: &str, id: &str) -> Result<BgMeta, String> {
     let (path, _, _) = bg_paths(cwd, id)?;
     let meta: BgMeta =
@@ -2255,16 +2269,17 @@ fn write_bg_meta(cwd: &str, meta: &BgMeta) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 fn current_bg_status(meta: &BgMeta) -> String {
-    if meta.status == "stopped" {
-        return "stopped".to_string();
+    if meta.status != "running" {
+        return meta.status.clone();
     }
-    if process_running(meta.pid) {
-        return "running".to_string();
+    let started = process_started_at(meta.pid);
+    if started.is_empty() {
+        return "exited".to_string();
     }
-    if meta.status == "running" {
-        "exited".to_string()
+    if started == meta.process_started_at {
+        "running".to_string()
     } else {
-        meta.status.clone()
+        "stale".to_string()
     }
 }
 fn refresh_bg_meta(cwd: &str, meta: &mut BgMeta) {
@@ -2340,6 +2355,7 @@ fn start_bg(cwd: &str, command: &str) -> Result<String, String> {
         pgid: child.id(),
         owner_pid: std::process::id(),
         started_at: started,
+        process_started_at: process_started_at(child.id()),
         log: relative_log,
         status: "running".to_string(),
         exit_code: None,

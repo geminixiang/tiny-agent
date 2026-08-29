@@ -33,6 +33,37 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         self.env = patch.dict(os.environ, {"OPENROUTER_API_KEY": "test"})
         self.env.start(); self.addCleanup(self.env.stop)
 
+    async def test_bg_lifecycle_fast_failure_and_stale_metadata(self):
+        (tiny.ROOT / "server.py").write_text(
+            'import time\nprint("ready", flush=True)\nwhile True:\n print("tick", flush=True); time.sleep(0.1)\n',
+            encoding="utf-8",
+        )
+        started_text = await tiny.execute_tool("bg", {"action": "start", "command": "python3 server.py"})
+        started = json.loads(started_text.splitlines()[0])
+        self.assertEqual(started["id"], str(started["pid"]))
+        self.assertEqual(started["status"], "running")
+        self.assertTrue(started["processStartedAt"])
+        await asyncio.sleep(0.25)
+        self.assertIn("tick", await tiny.execute_tool("bg", {"action": "logs", "id": started["id"], "tail": "5"}))
+
+        meta_path, _ = tiny.bg_paths(started["id"])
+        original = json.loads(meta_path.read_text(encoding="utf-8"))
+        tiny.write_bg_meta({**original, "processStartedAt": "different process"})
+        stale = json.loads(await tiny.execute_tool("bg", {"action": "stop", "id": started["id"]}))
+        self.assertEqual(stale["status"], "stale")
+        os.kill(started["pid"], 0)
+
+        tiny.write_bg_meta(original)
+        stopped = json.loads(await tiny.execute_tool("bg", {"action": "stop", "id": started["id"]}))
+        self.assertEqual(stopped["status"], "stopped")
+
+        failed_text = await tiny.execute_tool("bg", {"action": "start", "command": "echo boom >&2; exit 7"})
+        failed = json.loads(failed_text.splitlines()[0])
+        self.assertEqual(failed["status"], "exited")
+        self.assertEqual(failed["exitCode"], 7)
+        self.assertIn("boom", failed_text)
+        await tiny.close_background_processes()
+
     async def test_file_tools_do_not_block_event_loop(self):
         original = Path.read_text
         started = threading.Event()

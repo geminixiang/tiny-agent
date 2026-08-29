@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +168,62 @@ func TestResumeDoesNotCreateSession(t *testing.T) {
 	matches, err := filepath.Glob(filepath.Join(dir, ".tiny-agent", "sessions", "*.jsonl"))
 	if err != nil || len(matches) != 0 {
 		t.Fatalf("sessions=%v err=%v", matches, err)
+	}
+}
+
+func TestBackgroundProcessLifecycleAndStaleMetadata(t *testing.T) {
+	dir := inTempDir(t)
+	defer closeBackgroundProcesses()
+	if err := os.WriteFile(filepath.Join(dir, "server.sh"), []byte("echo ready; while true; do echo tick; sleep 0.1; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	startedText, err := executeTool(context.Background(), "bg", map[string]string{"action": "start", "command": "sh server.sh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started bgMeta
+	if err := json.Unmarshal([]byte(strings.SplitN(startedText, "\n", 2)[0]), &started); err != nil {
+		t.Fatal(err)
+	}
+	if started.ID != strconv.Itoa(started.PID) || started.Status != "running" || started.ProcessStartedAt == "" {
+		t.Fatalf("started: %#v", started)
+	}
+	time.Sleep(250 * time.Millisecond)
+	logs, err := executeTool(context.Background(), "bg", map[string]string{"action": "logs", "id": started.ID, "tail": "5"})
+	if err != nil || !strings.Contains(logs, "tick") {
+		t.Fatalf("logs=%q err=%v", logs, err)
+	}
+	original := started
+	started.ProcessStartedAt = "different process"
+	if err := writeBGMeta(started); err != nil {
+		t.Fatal(err)
+	}
+	staleText, err := executeTool(context.Background(), "bg", map[string]string{"action": "stop", "id": started.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stale bgMeta
+	if err := json.Unmarshal([]byte(staleText), &stale); err != nil || stale.Status != "stale" || !processRunning(started.PID) {
+		t.Fatalf("stale=%s err=%v", staleText, err)
+	}
+	if err := writeBGMeta(original); err != nil {
+		t.Fatal(err)
+	}
+	stoppedText, err := executeTool(context.Background(), "bg", map[string]string{"action": "stop", "id": started.ID})
+	if err != nil || !strings.Contains(stoppedText, `"status":"stopped"`) {
+		t.Fatalf("stopped=%q err=%v", stoppedText, err)
+	}
+
+	failedText, err := executeTool(context.Background(), "bg", map[string]string{"action": "start", "command": "echo boom >&2; exit 7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failed bgMeta
+	if err := json.Unmarshal([]byte(strings.SplitN(failedText, "\n", 2)[0]), &failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != "exited" || failed.ExitCode == nil || *failed.ExitCode != 7 || !strings.Contains(failedText, "boom") {
+		t.Fatalf("failed: %s", failedText)
 	}
 }
 

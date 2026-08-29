@@ -1683,6 +1683,67 @@ fn args() -> ToolArgs {
 }
 
 #[test]
+fn bg_manages_lifecycle_fast_failure_and_stale_metadata() {
+    let cwd = temp_dir();
+    std::fs::write(
+        format!("{cwd}/server.sh"),
+        "echo ready; while true; do echo tick; sleep 0.1; done\n",
+    )
+    .unwrap();
+    let agent = test_agent(&cwd, "", None);
+    let mut start = args();
+    start.action = "start".to_string();
+    start.command = "sh server.sh".to_string();
+    let started_text = agent.execute_tool("bg", &start).unwrap();
+    let started: serde_json::Value =
+        serde_json::from_str(started_text.lines().next().unwrap()).unwrap();
+    let id = started["id"].as_str().unwrap().to_string();
+    let pid = started["pid"].as_u64().unwrap() as i32;
+    assert_eq!(id, pid.to_string());
+    assert_eq!(started["status"], "running");
+    assert!(!started["processStartedAt"].as_str().unwrap().is_empty());
+    thread::sleep(Duration::from_millis(250));
+    let mut logs = args();
+    logs.action = "logs".to_string();
+    logs.id = id.clone();
+    logs.tail = 5;
+    assert!(agent.execute_tool("bg", &logs).unwrap().contains("tick"));
+
+    let meta_path = format!("{cwd}/.tiny-agent/bg/{id}.json");
+    let original = std::fs::read_to_string(&meta_path).unwrap();
+    let mut stale_meta: serde_json::Value = serde_json::from_str(&original).unwrap();
+    stale_meta["processStartedAt"] = serde_json::json!("different process");
+    std::fs::write(
+        &meta_path,
+        serde_json::to_string_pretty(&stale_meta).unwrap() + "\n",
+    )
+    .unwrap();
+    let mut stop = args();
+    stop.action = "stop".to_string();
+    stop.id = id.clone();
+    let stale: serde_json::Value =
+        serde_json::from_str(&agent.execute_tool("bg", &stop).unwrap()).unwrap();
+    assert_eq!(stale["status"], "stale");
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+
+    std::fs::write(&meta_path, original).unwrap();
+    let stopped: serde_json::Value =
+        serde_json::from_str(&agent.execute_tool("bg", &stop).unwrap()).unwrap();
+    assert_eq!(stopped["status"], "stopped");
+
+    let mut fail = args();
+    fail.action = "start".to_string();
+    fail.command = "echo boom >&2; exit 7".to_string();
+    let failed_text = agent.execute_tool("bg", &fail).unwrap();
+    let failed: serde_json::Value =
+        serde_json::from_str(failed_text.lines().next().unwrap()).unwrap();
+    assert_eq!(failed["status"], "exited");
+    assert_eq!(failed["exitCode"], 7);
+    assert!(failed_text.contains("boom"));
+    close_background_processes(&cwd);
+}
+
+#[test]
 fn write_reports_bytes_and_edit_applies_atomic_replacements() {
     let cwd = temp_dir();
     let agent = test_agent(&cwd, "", None);
