@@ -1,51 +1,85 @@
 <p class="lead">
-    LLM 能產生下一段文字；Agent
-    則把文字模型放進一個可以觀察世界、採取行動、接收結果並繼續判斷的閉環。這一章只留下不可再刪的部分。
+    <strong>一句話掌握本章核心</strong>：LLM 是無狀態的文字預測函式，而 Agent 則是將其包裝在一個能夠「<strong>觀察環境（Observe） $\to$ 決定行動（Orient） $\to$ 執行工具（Act） $\to$ 接收反饋（Loop）</strong>」的閉環控制系統。本章只留下不可再簡化的第一性核心。
 </p>
 
 <h2 id="llm-is-not-agent">LLM 不是 Agent</h2>
 <p>
-    一次 LLM 呼叫可以抽象成
-    <code>output = model(messages)</code
-    >。模型不會記得上一次呼叫，也不會真的讀檔、執行測試或修改系統。它只根據本次輸入預測輸出。所謂「記憶」，其實是 host
-    在下一次呼叫時，把先前的訊息再次送入。
+    在計算機模型中，單次 LLM 呼叫可以高度抽象為純函式：<code>output = model(messages)</code>。
+</p>
+<p>
+    模型<strong>既不會記住上一次的呼叫內容，也不具備讀檔、編譯程式或連線網路的系統權限</strong>。所謂的「延續上下文」，完全是外層 Host Application 在發起下一次 API 請求時，將先前的對話歷史重新打包送入的結果。
 </p>
 
-<div class="compare">
-    <section>
-        <h3>LLM</h3>
-        <ul>
-            <li>輸入訊息，輸出文字或 tool call</li>
-            <li>單次呼叫無狀態</li>
-            <li>不直接產生外部副作用</li>
-        </ul>
-    </section>
-    <section>
-        <h3>Agent</h3>
-        <ul>
-            <li>保存 transcript</li>
-            <li>執行模型選擇的 tool</li>
-            <li>把結果送回模型，直到得到 final answer</li>
-        </ul>
-    </section>
-</div>
+<!-- [IMAGE_PROMPT_START]
+【圖片位置】：01-first-principles / LLM vs Agent 職責對比圖
+【圖片形式】：對稱式架構示意圖 (System Comparison Diagram)
+【核心概念】：單次純函式 LLM 與具備閉環執行能力的 Agent 之本質差異
+【視覺元素】：
+  1. 左半部 [LLM]：接收 Input Tokens → 黑盒子運算 → 輸出 Output Tokens（單向、無狀態、無外部副作用）。
+  2. 右半部 [Agent]：Host 控制中心、記憶體 Messages 陣列、LLM 大腦、Tool 執行環境，構成一個持續循環的有向環狀圖（Stateful、具外部副作用、自動迭代）。
+【AI 繪圖/SVG Prompt】：
+"Side-by-side technical comparison diagram. Left: 'Stateless LLM' as a single-pass black box (Input Messages -> LLM -> Text/Tool Call). Right: 'Autonomous Agent Loop' showing a continuous feedback circle: Host Application -> Model Call -> Tool Execution -> Append to Messages -> Repeat until Final Answer. Clean lines, tech textbook aesthetic, glowing accents on active data loop."
+[IMAGE_PROMPT_END] -->
 
-<h2 id="minimal-loop">不可再刪的閉環</h2>
-<pre data-lang="ts"><code>async function runAgentLoop(userText: string) {
+<table>
+    <thead>
+        <tr><th>比較維度</th><th>純大型語言模型 (LLM)</th><th>智能代理 (Agent)</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>計算本質</strong></td><td>無狀態推論函式 <code>f(context) -&gt; output</code></td><td>以狀態機為核心的閉環控制系統 (Control Loop)</td></tr>
+        <tr><td><strong>狀態延續</strong></td><td>完全無狀態（單次 Request 結束即歸零）</td><td>由 Host 透過 Append-only <code>messages</code> 陣列維持</td></tr>
+        <tr><td><strong>環境副作用</strong></td><td>零（僅產生字串或 JSON 資料）</td><td>有（透過 Tool Adapter 執行真實 I/O 與 Shell 命令）</td></tr>
+        <tr><td><strong>終止條件</strong></td><td>產生 Stop Token 或達到長度上限</td><td>模型判斷已獲得足夠資訊，產出最終解答 (Final Answer)</td></tr>
+    </tbody>
+</table>
+
+<h2 id="minimal-loop">不可再刪的閉環 (Minimal Agent Loop)</h2>
+<p>
+    以下是實現一個可用 Agent 所需的最小 TypeScript 實作。只要抽離這幾行中的任何一步，系統便無法運轉：
+</p>
+
+<pre data-lang="ts"><code>async function runAgentLoop(userText: string): Promise&lt;string&gt; {
+    // 1. 初始化對話歷史，寫入使用者目標
     messages.push({ role: "user", content: userText });
 
     for (;;) {
+        // 2. 呼叫模型，注入當前累積的所有 messages 與可用 tools 定義
         const answer = await callModel(messages, toolDefinitions);
         messages.push(answer);
 
-        if (!answer.tool_calls?.length) return answer.content;
+        // 3. 終止判斷：如果模型沒有要求呼叫 Tool，代表推論完畢，回傳最終文字
+        if (!answer.tool_calls?.length) {
+            return answer.content;
+        }
 
+        // 4. 副作用執行：循序執行模型要求的 Tool，並將結果以 role: "tool" 寫回
         for (const call of answer.tool_calls) {
             const result = await tools[call.name].execute(call.arguments);
-            messages.push({ role: "tool", tool_call_id: call.id, content: result });
+            messages.push({
+                role: "tool",
+                tool_call_id: call.id,
+                content: result,
+            });
         }
+        // 5. 回到迴圈頂端，攜帶包含 Tool Results 的最新 messages 再次呼叫模型
     }
 }</code></pre>
+
+<!-- [IMAGE_PROMPT_START]
+【圖片位置】：01-first-principles / 4-Step 核心閉環資料流圖
+【圖片形式】：結構化循序流程圖 (Sequential State Machine Flowchart)
+【核心概念】：不可再刪的 Agent 4-Step 閉環狀態轉移
+【視覺元素】：
+  1. Step 1: Push User Message
+  2. Step 2: callModel(messages, tools)
+  3. Decision Diamond: Has tool_calls?
+     - No -> Return Final Content & Exit
+     - Yes -> Step 3: tools[name].execute(args)
+  4. Step 4: Push Tool Result -> Loop back to Step 2
+  5. 醒目標記：強調 messages 陣列如何在每一輪中嚴格遞增 (Append-only Growth)
+【AI 繪圖/SVG Prompt】：
+"High-contrast technical flowchart of minimal agent loop. Step 1: User Input added to messages. Step 2: callModel API with messages. Decision node: 'Tool call requested?'. Branch A (No): Return final text and terminate. Branch B (Yes): Execute tool adapter on host OS, format tool output, append to messages array, and point arrow back to Step 2. Minimalist vector illustration, clean typography, dark theme."
+[IMAGE_PROMPT_END] -->
 
 <figure class="step-flow" id="fig-01-loop" aria-labelledby="fig-01-loop-caption">
     <ol>
@@ -67,7 +101,7 @@
         <li><span class="step-label">把 tool result 寫回 messages</span></li>
         <li class="step-loop-back"><span aria-hidden="true">↻</span> 以更新後的 messages 再呼叫 model(messages)</li>
     </ol>
-    <figcaption id="fig-01-loop-caption">圖 2：不可再刪的閉環——上面程式碼的形狀。</figcaption>
+    <figcaption id="fig-01-loop-caption">圖 2：不可再刪的閉環——上面程式碼的控制流程。</figcaption>
 </figure>
 
 <figure class="data-anim" id="fig-01-data" aria-labelledby="fig-01-data-caption">
@@ -103,92 +137,96 @@
         </li>
     </ol>
     <figcaption id="fig-01-data-caption">
-        動圖 1：同一個迴圈，換成資料視角——<code>messages</code> 陣列在一輪中怎麼長大。圖 2 畫的是控制流程，這裡畫的是每一步手上的資料。
+        動圖 1：同一個迴圈換成資料視角——<code>messages</code> 陣列如何隨時序單調遞增。
     </figcaption>
 </figure>
 
 <p>
-    這段程式不理解「修 bug」或「查營收」。它只負責機械性的控制：呼叫模型、執行能力、保存結果、決定是否繼續。領域能力在
-    tools；決策能力在 model；連續性在 messages。
+    這段程式碼完全不包含任何「修復 Bug」或「分析商業營收」的特定領域規則。它只專注於<strong>機械式的狀態排程</strong>：呼叫模型 → 派發能力 → 保存結果 → 決定是否迭代。
 </p>
+
+<h2 id="why-coding-agent">Coding Agent 的四個基本原子能力</h2>
+<p>
+    只要為這個最小閉環配備以下四個核心 Tool，就構成了最小的 Coding Agent：
+</p>
+
+<table>
+    <thead>
+        <tr><th>核心工具名稱</th><th>本質功能</th><th>系統對應操作</th><th>安全性考量</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>read</code></td><td>讀取檔案內容</td><td>POSIX <code>open()</code> / <code>read()</code></td><td>路徑合法性、防止讀取二進位大檔撐爆 Token</td></tr>
+        <tr><td><code>write</code></td><td>建立新檔或覆寫檔案</td><td>POSIX <code>O_TRUNC</code> 寫入</td><td>避免無預警破壞非目標檔案</td></tr>
+        <tr><td><code>edit</code></td><td>針對指定字串區段精準置換</td><td>精確字串比對與取代 (Exact Match)</td><td>確認目標唯一性，防止誤改重名區塊</td></tr>
+        <tr><td><code>bash</code></td><td>執行外部指令、編譯與測試</td><td><code>execve()</code> 子程序呼叫</td><td>超時防護 (Timeout)、輸出字元截斷、非同步中斷處理</td></tr>
+    </tbody>
+</table>
 
 <p>
-    這段是教學用的最小形狀：<code>tool_calls</code>、<code>tool_call_id</code> 這些欄位名直接沿用 provider wire
-    format，但真實的 wire format 還把 name 與 arguments 多包一層 <code>call.function</code>——第 2 章會攞開完整形狀。
+    <strong>工程真實面</strong>：撰寫這個幾十行的 Loop 很容易，真正的挑戰在於<strong>生產環境的可靠性</strong>——當遇到網路錯誤、使用者中途中斷、Token 暴增、程式 Crash 崩潰時，系統如何保持 Transcript 合法且能安全復原？這正是後續章節要解決的核心問題。
 </p>
 
-<h2 id="why-coding-agent">Coding Agent 多了什麼</h2>
-<p>給 Agent 四個能力，就得到最小 coding agent：</p>
-<ol>
-    <li><code>read</code>：取得原始碼與檔案。</li>
-    <li><code>write</code>：建立或完整覆寫檔案。</li>
-    <li><code>edit</code>：精準修改既有內容。</li>
-    <li><code>bash</code>：搜尋、編譯、測試與執行命令。</li>
-</ol>
+<h2 id="responsibility">第一性原則的責任邊界分配</h2>
 <p>
-    真正困難的不是把 loop 寫出來，而是讓它在錯誤、取消、context 增長、程式 crash 與不確定外部 effect 下，仍保持
-    transcript 合法且能安全恢復。後面七章都在補上這些可靠性。
+    在設計 Agent 架構時，模組權責劃分必須極度清晰：
 </p>
 
-<h2 id="responsibility">第一性原則的責任分配</h2>
 <table>
     <thead>
         <tr>
-            <th>責任</th>
-            <th>由誰負責</th>
-            <th>不該負責什麼</th>
+            <th>系統層級</th>
+            <th>唯一職責 (Must Do)</th>
+            <th>嚴格禁止 (Must Not Do)</th>
         </tr>
     </thead>
     <tbody>
         <tr>
-            <td>選擇下一步</td>
-            <td>Model</td>
-            <td>直接取得 host credential</td>
+            <td><strong>Model (大腦)</strong></td>
+            <td>根據目前上下文判斷下一步，產出自然語言或 Tool Call 提議</td>
+            <td>直接取得系統憑證、直接操作 OS 硬體</td>
         </tr>
         <tr>
-            <td>控制迴圈</td>
-            <td>Agent runtime</td>
-            <td>理解每個領域的業務規則</td>
+            <td><strong>Agent Runtime (心臟)</strong></td>
+            <td>調度迴圈、管理 Message 狀態機、捕捉例外</td>
+            <td>在程式碼中寫死特定商業領域邏輯</td>
         </tr>
         <tr>
-            <td>產生副作用</td>
-            <td>Tool adapter</td>
-            <td>自行改變授權範圍</td>
+            <td><strong>Tool Adapter (手腳)</strong></td>
+            <td>驗證參數、執行具體 I/O、捕獲錯誤並格式化回傳</td>
+            <td>超越 Host 授權邊界發動未定義的副作用</td>
         </tr>
         <tr>
-            <td>持續與恢復</td>
-            <td>Session</td>
-            <td>猜測未記錄的 effect 是否成功</td>
+            <td><strong>Session / WAL (記憶)</strong></td>
+            <td>Append-only 持久化記錄事件，支援 Crash 復原</td>
+            <td>在復原時盲目猜測未記錄的外部副作用狀態</td>
         </tr>
         <tr>
-            <td>介面與部署</td>
-            <td>CLI / trusted host</td>
-            <td>把 deployment security 假裝成 agent 功能</td>
+            <td><strong>CLI / Host (外殼)</strong></td>
+            <td>提供使用者互動介面、配置安全環境與沙盒邊界</td>
+            <td>將部署安全責任推卸給模型自動判斷</td>
         </tr>
     </tbody>
 </table>
 
 <aside class="note">
-    <strong>閱讀原始碼</strong
-    ><a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L719"
-        >TypeScript <code>Agent.runAgentLoop()</code></a
-    >
-    是這個閉環的 reference implementation。
+    <strong>閱讀原始碼</strong>　<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L719">TypeScript <code>Agent.runAgentLoop()</code></a> 是本閉環的官方標準參考實作 (Reference Implementation)。
 </aside>
 
-<h2 id="hands-on">親手驗證</h2>
+<h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
 <p>
-    本章與第 4 章的練習會真的呼叫模型，需要先安裝 tiny-agent 並設定
-    <code>OPENROUTER_API_KEY</code>（步驟見 <a href="https://github.com/geminixiang/tiny-agent#安裝">repo README</a>）；
-    其餘章節的練習都是離線測試，clone repository 就能執行，不花模型額度。
+    請在終端機中實際執行以下指令，觀察 Tool 邊界如何約束 Agent 的行為（需配置 <code>OPENROUTER_API_KEY</code>）：
 </p>
-<pre data-lang="sh"><code>tiny-ts --plugin read "讀取 README.md，說明 agent loop"
 
-tiny-ts --plugin edit "讀取 README.md"
-# 第二個命令缺少 read 能力，Agent 應明確說明缺少能力，不能捏造結果。</code></pre>
-<p>這個對照揭示一個重要觀念：Agent 的能力不是 prompt 宣稱出來的，而是本次 request 實際提供的 tool definitions。</p>
+<pre data-lang="sh"><code># 1. 賦予 read 權限：Agent 能夠讀取 README 並正常回答
+tiny-ts --plugin read "讀取 README.md，說明 agent loop"
+
+# 2. 僅賦予 edit 權限（缺少 read）：Agent 應明確拒絕並說明缺乏讀檔能力，絕不能胡亂捏造內容
+tiny-ts --plugin edit "讀取 README.md"</code></pre>
+
+<p>
+    <strong>核心收穫</strong>：Agent 的真實能力<strong>絕非 Prompt 中自我宣稱的文字</strong>，而是本次 Request 中 Host 實際注入並支援的 Tool Schemas。
+</p>
 
 <p class="bridge">
-    這個迴圈假設 <code>messages</code> 這個陣列永遠活著——它只存在 process 的記憶體裡，process
-    一死，這個陣列就跟著消失。下一章先處理它裡面裝的東西合不合法，再往後幾章處理它會不會突然消失。
+    在這個最小實作中，<code>messages</code> 陣列只暫存在 Process 的記憶體（Heap）中；一旦行程被殺死（Crash 或 <code>kill -9</code>），狀態便蕩然無存。在進入持久化儲存之前，下一章我們將先探討 <strong>Message 的規範化 (Normalization) 與 Provider Adapter</strong>，確保送入記憶體的每一筆資料都完全合法。
 </p>

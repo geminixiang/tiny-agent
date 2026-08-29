@@ -1,37 +1,51 @@
 <p class="lead">
-    在討論 Agent loop 之前，先建立一套不含行銷術語的共同語言。本章從「模型實際收到什麼」開始，依序拆開
-    token、message、context、context window、tool call、session 與 memory。讀完後，你應該能沿著一次 request
-    的資料流，指出每一份狀態究竟存在模型、host process，還是外部儲存系統中。
+    <strong>一句話掌握本章核心</strong>：在討論 Agent 之前，必須先釐清「模型實際收到什麼」。本章依序拆解 <strong>Token</strong>、<strong>Message</strong>、<strong>Context</strong>、<strong>Context Window</strong>、<strong>Tool Call</strong>、<strong>Session</strong> 與 <strong>Memory</strong>。讀完後，你將能清楚指出每一次 API 呼叫中，每一份資料究竟儲存在模型權重、應用程式記憶體，還是硬碟之中。
 </p>
 
 <h2 id="mental-model">先有一張正確的系統圖</h2>
 <p>
-    大型語言模型（Large Language Model，LLM）可以先近似看成一個函式：輸入一串 token，輸出下一批 token
-    的機率分布。產品裡看似會聊天、會讀專案、會執行命令的「AI」，通常不是只有模型，而是 host application
-    把模型、資料與程式能力接在一起的結果。
+    大型語言模型（Large Language Model，LLM）在計算機科學中本質上是一個<strong>無狀態純函式</strong>：輸入一串 Token 序列，輸出下一個 Token 的條件機率分佈。
 </p>
-<pre data-lang="text"><code>使用者
-  ↓
-host application
-  ├─ 組合 instructions、對話、檢索資料與 tool definitions
-  ├─ 呼叫 model
-  ├─ 執行 model 請求的 tool
-  └─ 保存 transcript / session
-  ↓
-model：根據本次輸入產生回覆或 tool call</code></pre>
 <p>
-    這張圖最重要的邊界是：<strong>model 只看得到本次 request 中送進去的資料</strong>。它看不到你的檔案系統、資料庫、環境變數或上一次
-    API request，除非 host 明確把相關內容送入，或提供一個可取得它們的 tool。
+    產品中看似會聊天、能讀寫專案、能執行指令的「AI」，不是模型本身具備作業系統特權，而是外層的 <strong>Host Application</strong> 將模型、資料結構與系統呼叫串接而成的結果。
+</p>
+
+<!-- [IMAGE_PROMPT_START]
+【圖片位置】：00-foundations / 核心系統邊界圖 (Mental Model)
+【圖片形式】：極簡高對比度架構圖 (Clean Minimalist Infographic / Excalidraw 風格)
+【核心概念】：LLM 無狀態推論與 Host Application 系統邊界劃分
+【視覺元素】：
+  1. 上方：User（發起目標）
+  2. 中央：Host Application（核心控制層）
+     - 內含：Prompt 組合器、Tool 執行守衛 (Guard)、Transcript / Session 持久化儲存 (JSONL)
+  3. 右側：Stateless LLM Provider（無狀態黑盒子，僅接收 Context Tokens，吐出 Next Tokens / Tool Proposals）
+  4. 下方：Host OS & External World（檔案系統、Shell、外部網路）
+  5. 邊界標示：清楚框出「不可見區域」——LLM 預設看不到硬碟、DB 或過去的連線。
+【AI 繪圖/SVG Prompt】：
+"Minimalist technical architecture diagram of LLM Host Application boundary. Top: User. Center: 'Host Application' with components 'Context Assembler', 'Tool Guard', 'Transcript Storage'. Right: 'Stateless LLM' API box. Bottom: 'Operating System' (Disk, Shell, Network). High-contrast red dashed line isolating LLM from direct OS access. Clean lines, tech textbook style, dark accents on white background."
+[IMAGE_PROMPT_END] -->
+
+<pre data-lang="text"><code>使用者 (User)
+  ↓
+Host Application
+  ├─ 組合 Instructions、歷史對話、檢索資料與 Tool Definitions
+  ├─ 呼叫 Model API（送出 Active Context）
+  ├─ 驗證並執行 Model 請求的 Tool（發動 System Effects）
+  └─ 保存 Transcript / Session（持久化狀態）
+  ↓
+Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Call 提議</code></pre>
+
+<p>
+    這張架構圖最核心的邊界是：<strong>Model 永遠只看得到本次 Request 中明確送入的資料</strong>。它看不到你的檔案系統、資料庫、環境變數或上一次 API 連線，除非 Host 明確把相關資料送入，或提供對應的 Tool 讓它主動發起請求。
 </p>
 
 <aside class="note">
-    <strong>抽象層次</strong>　本書會說「模型讀到訊息」或「模型選擇 tool」，這是方便理解的工程抽象。底層仍是數值張量、機率分布與
-    provider protocol；不需要先懂 Transformer 的矩陣推導，才能正確設計 Agent runtime。
+    <strong>工程抽象 vs. 物理現實</strong>　工程討論中常說「模型讀取檔案」或「模型選擇工具」，這是為了溝通便利的擬人化抽象。底層物理現實完全是矩陣乘法、機率取樣與 JSON Protocol 序列化；不需要先推導 Transformer 數學公式，就能以嚴謹的 CS 思維設計出可靠的 Agent Runtime。
 </aside>
 
 <h2 id="recommended-video">推薦先看：建立 LLM 的直觀理解</h2>
 <p>
-    在繼續閱讀 token、context 與生成流程前，推薦直接觀看下面這部影片。它能先建立模型如何接收輸入與產生輸出的整體直覺；觀看後再讀本章的工程定義，會更容易把模型本身與外層 Agent 系統分開。
+    在深入 Token、Context 與推論生命週期前，推薦先觀看 3Blue1Brown 的視覺化解析。它能幫助你在腦中建立神經網路計算的具體直覺，之後再閱讀本章的工程定義時，更容易將「模型本身」與「外層 Agent 系統」清楚拆分。
 </p>
 <figure class="video-embed">
     <iframe width="560" height="315" src="https://www.youtube.com/embed/2eq-8GM2bhg?si=HhPCYKTCv8KqJxoX" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
@@ -40,236 +54,200 @@ model：根據本次輸入產生回覆或 tool call</code></pre>
     </figcaption>
 </figure>
 
-<h2 id="tokens">Token：模型計算的基本單位</h2>
+<h2 id="tokens">Token：計算與計費的基本單位</h2>
 <p>
-    模型不是直接以「字」或「單字」為單位處理文字。Tokenizer 會把字串切成 token，再映射成整數 ID。常見片段、標點、空白與程式碼
-    都可能各自成為 token；同一段文字換模型或 tokenizer，切法也可能不同。
+    <strong>TL;DR</strong>：模型不認識「字元」或「單字」，它處理的是經過 Tokenizer 切割後的整數識別碼（Token ID）。
 </p>
-<pre data-lang="text"><code>原始文字  → tokenizer → token IDs → model → output token IDs → decoder → 輸出文字</code></pre>
+
+<pre data-lang="text"><code>原始文字字串 → [ Tokenizer ] → Token IDs [15496, 11, 703] → [ Model ] → Output Token IDs → [ Decoder ] → 輸出文字字串</code></pre>
+
 <ul>
-    <li>一個英文單字可能是一個 token，也可能被拆成多個。</li>
-    <li>中文字不保證「一字一 token」；罕見字、組合字與不同模型都會改變結果。</li>
-    <li>JSON、縮排、重複 log、base64 與大型 tool result 都會消耗 token。</li>
-    <li>Token 數影響可容納的 context、延遲與費用，不能只用字元數估算。</li>
+    <li><strong>英文單字</strong>：常見單字通常是一個 Token（如 <code>apple</code>），罕見字或複合詞會被拆解為多個 Subwords。</li>
+    <li><strong>中文字詞</strong>：不保證「一字一 Token」；依據不同 Tokenizer 辭典，一個繁體中文字可能佔用 1 至 3 個 Tokens。</li>
+    <li><strong>非文字資料</strong>：程式碼縮排、JSON 標點符號、大型 Log 輸出、Base64 編碼字串都會劇烈消耗 Token。</li>
+    <li><strong>資源限制</strong>：Token 數量直接決定了 Context Window 容量上限、網路傳輸延遲與 API 帳單花費。</li>
 </ul>
-<p>
-    工程上通常不必手寫 tokenizer，但必須知道 token budget 是有限資源。若 provider 宣稱 context window 為
-    128k tokens，意思不是可以放心塞入 128k tokens 的 prompt；還要替模型輸出、tool schema，以及 provider
-    可能需要的內部空間留下餘裕。
-</p>
+
+<aside class="note">
+    <strong>Token Budget 餘裕原則</strong>　若 Provider 宣稱 Context Window 為 128k Tokens，絕不能把 128k 全塞滿 Prompt。必須扣除模型輸出預留空間（如 4k~8k）、Tool Schema 定義以及 Provider 內部保留緩衝區。
+</aside>
 
 <h2 id="generation">模型如何產生答案</h2>
 <p>
-    模型每一步都根據目前 prefix，替下一個 token 計算條件機率
-    <code>P(token | previous tokens)</code>，再由 decoding policy 選出一個 token，重複直到停止條件成立。這解釋了三件事：
+    <strong>TL;DR</strong>：模型輸出是「逐字機率預測」，不是「資料庫查詢」。
 </p>
-<ol>
-    <li><strong>輸出不是資料庫查詢結果</strong>：模型產生的是在目前 context 下合理的序列，可能流暢但錯誤。</li>
-    <li><strong>順序很重要</strong>：前面的 instructions、範例與 tool results 都會改變後續分布。</li>
-    <li><strong>結果可能不完全固定</strong>：temperature、top-p、provider 實作與模型版本都可能造成差異。</li>
-</ol>
 <p>
-    Temperature 可以粗略理解成調整分布的尖銳程度：較低通常更集中，較高通常更多樣，但
-    <code>temperature = 0</code> 也不等於跨時間、跨硬體與跨 provider 的數學保證。需要穩定驗證的系統，應測試可觀察行為與資料 contract，
-    不能把「同一句話每次逐字相同」當成唯一 oracle。
+    模型每一步都根據目前已有的所有 Tokens（Prefix），計算下一個 Token 的條件機率分佈 <code>P(token | previous tokens)</code>，再由 Decoding Policy 取樣選出一個 Token，寫入序列後重複此迴圈，直到觸發停止符號（Stop Sequence）或達到最大長度上限。
 </p>
+
+<table>
+    <thead>
+        <tr><th>核心現象</th><th>計算機科學成因</th><th>軟體工程對策</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>可能產生幻覺 (Hallucination)</strong></td><td>模型追求機率分佈上的語意連貫，非事實查證</td><td>關鍵資訊必須依賴 Tool 讀取真實資料驗證</td></tr>
+        <tr><td><strong>上下文順序敏感 (Order Matters)</strong></td><td>自注意力機制（Self-Attention）受位置編碼強烈影響</td><td>關鍵 Instructions 與 Guardrails 應放置於顯著位置</td></tr>
+        <tr><td><strong>輸出具隨機性 (Non-deterministic)</strong></td><td>Temperature 取樣機制與分散式浮點數運算微小誤差</td><td>測試應驗證「資料契約 (Contract)」而非比對字串逐字相符</td></tr>
+    </tbody>
+</table>
 
 <h2 id="messages">Prompt、Message 與 Transcript</h2>
 <p>
-    Provider API 通常不只接收一個字串，而是接收有角色與內容的 messages。不同 provider 的精確格式不同，但常見角色可先理解為：
+    現代 LLM API（如 OpenAI, Anthropic）多採用具有「結構化角色」的 Message 陣列作為標準輸入：
 </p>
+
 <table>
     <thead>
-        <tr><th>角色</th><th>用途</th><th>典型來源</th></tr>
+        <tr><th>角色 (Role)</th><th>用途與語意</th><th>資料來源與信任等級</th></tr>
     </thead>
     <tbody>
-        <tr><td><code>system</code> / developer</td><td>定義身分、規則、能力邊界與工作方式</td><td>受信任的 host</td></tr>
-        <tr><td><code>user</code></td><td>提出目標、問題與新資訊</td><td>使用者或上游系統</td></tr>
-        <tr><td><code>assistant</code></td><td>模型先前產生的文字或 tool call</td><td>model response</td></tr>
-        <tr><td><code>tool</code></td><td>某個 tool call 的執行結果</td><td>host 的 tool adapter</td></tr>
+        <tr><td><code>system</code> / <code>developer</code></td><td>設定 Agent 核心身分、行為規範、工具使用守則</td><td>受信任的 Host Application</td></tr>
+        <tr><td><code>user</code></td><td>使用者輸入的指令、問題或外部事件</td><td>外部使用者（不受信任輸入）</td></tr>
+        <tr><td><code>assistant</code></td><td>模型先前的推論回應或發起的 Tool Call 請求</td><td>LLM 生成輸出（待驗證）</td></tr>
+        <tr><td><code>tool</code></td><td>對應 Tool Call 執行完畢後的真實返回值</td><td>Host Tool Adapter 產生的結構化結果</td></tr>
     </tbody>
 </table>
+
 <p>
-    <strong>Prompt</strong> 常被泛指「送給模型的輸入」，可能是一個字串，也可能包含完整 messages、tool definitions 與其他 request
-    欄位。<strong>Transcript</strong> 則是按順序累積的對話記錄。為避免歧義，本書在談資料結構時會盡量直接說
-    messages 或 transcript，不把所有東西都叫 prompt。
+    <strong>三者名詞釐清</strong>：
 </p>
-<pre data-lang="json"><code>[
-  { "role": "system", "content": "你是 coding agent。" },
-  { "role": "user", "content": "README 寫了什麼？" },
-  { "role": "assistant", "tool_call": { "name": "read", "arguments": { "path": "README.md" } } },
-  { "role": "tool", "tool_call_id": "call_1", "content": "# tiny-agent ..." },
-  { "role": "assistant", "content": "README 介紹了……" }
-]</code></pre>
-<p>
-    角色不是裝飾。Host 必須保存合法順序與 tool call 的對應關係；不能把 tool result 偽裝成 user message，也不能只保留最後一段自然語言，
-    否則模型會失去「這份資料從何而來」的結構資訊。
-</p>
+<ul>
+    <li><strong>Prompt</strong>：指送入模型的所有輸入集合（包含 Instructions、對話歷史與 Tool 定義）。</li>
+    <li><strong>Transcript</strong>：在記憶體或硬碟中，依照嚴格時序 append-only 累積的 Message 歷史陣列。</li>
+    <li><strong>Role Invariant</strong>：Host 必須保證 Message 序列合法。例如：發出 <code>tool_call</code> 的 <code>assistant</code> 訊息後，緊接著必須是攜帶相同 <code>tool_call_id</code> 的 <code>tool</code> 訊息，不可隨意偽造或顛倒順序。</li>
+</ul>
 
 <h2 id="context">Context 到底是什麼</h2>
 <p>
-    <strong>Context 是模型在一次 generation 中可用的全部輸入資訊。</strong>在 Agent 系統裡，它通常不只包含聊天內容，還可能包含：
+    <strong>Context 是模型在單次推論當下，暫存於其計算視窗中的「全部有效輸入集合」。</strong>
 </p>
-<ul>
-    <li>system / developer instructions；</li>
-    <li>目前送入的 conversation messages；</li>
-    <li>tool definitions，包括名稱、描述與參數 schema；</li>
-    <li>專案規則、檢索文件、程式碼片段與環境描述；</li>
-    <li>先前歷史的 summary，或 provider 支援的其他輸入區塊。</li>
-</ul>
-<p>
-    Context 是<strong>本次推論的可見資料集合</strong>，不是永遠存在模型腦中的記憶。Host 即使在硬碟上保存了一百萬筆事件，只要本次沒有把它們
-    投影進 request，它們就不在模型的 active context 裡。
-</p>
+
+<!-- [IMAGE_PROMPT_START]
+【圖片位置】：00-foundations / Context 邊界對比圖 (In-Context vs Off-Context)
+【圖片形式】：對稱式清單架構圖 (Two-Column System Diagram)
+【核心概念】：區分「當前推論可見 (Active Context)」與「持久儲存但不可見 (Storage/Disk)」
+【視覺元素】：
+  1. 左欄（綠色高亮區）：Active Context（記憶體與 Request 中）
+     - 本次 Instructions、選入的 Messages、Tool Schemas、剛執行的 Tool Result
+  2. 右欄（灰色暗色區）：External State（硬碟與資料庫中）
+     - 專案未讀原始碼、DB 歷程、前一次執行的 RAM、被 Compaction 移出的舊 Log
+  3. 中央分隔線：清楚寫明「未被 Host 投影進 Request 的資料，模型一概不知」
+【AI 繪圖/SVG Prompt】：
+"Two-column technical comparison chart. Left column glowing green labeled 'In Active Context (Visible to Model)': Request Instructions, Current Messages, Tool JSON Schemas, Recent Tool Outputs. Right column dark grey labeled 'Outside Context (Invisible to Model)': Disk Files, PostgreSQL records, Old chat history, Process RAM. Clean sharp lines, technical documentation aesthetic."
+[IMAGE_PROMPT_END] -->
 
 <div class="compare">
     <section>
-        <h3>在 context 裡</h3>
+        <h3>在 Active Context 裡（模型看得見）</h3>
         <ul>
-            <li>本次 request 實際送入的 instructions</li>
-            <li>選入的歷史 messages 或 summary</li>
-            <li>本次可用的 tool definitions</li>
-            <li>剛寫回 transcript 的 tool result</li>
+            <li>本次 Request 明確送入的 System Prompt</li>
+            <li>目前選入對話歷史中的 Messages</li>
+            <li>本次提供給模型的 Tool JSON Schemas</li>
+            <li>剛由 Host 執行並寫回的 Tool Result</li>
         </ul>
     </section>
     <section>
-        <h3>不一定在 context 裡</h3>
+        <h3>不在 Active Context 裡（模型完全看不見）</h3>
         <ul>
-            <li>磁碟上存在但尚未 read 的檔案</li>
-            <li>資料庫中未檢索的紀錄</li>
-            <li>前一次 process 的記憶體</li>
-            <li>被 compaction 移出 active context 的原始事件</li>
+            <li>本機硬碟中存在但尚未被 <code>read</code> 的檔案</li>
+            <li>資料庫中存在但尚未被查詢的記錄</li>
+            <li>上一個已結束 Process 的記憶體狀態</li>
+            <li>被 Compaction（歷史壓縮）移出視窗的原始對話</li>
         </ul>
     </section>
 </div>
 
 <h2 id="context-window">Context Window 與 Token Budget</h2>
 <p>
-    <strong>Context window</strong> 是模型單次推論能處理的 token 上限。可用一個簡化的不等式理解：
+    <strong>Context Window</strong> 是模型單次運算能容納的 Token 物理上限。其運算資源分配可簡化為以下約束：
 </p>
-<pre data-lang="text"><code>instructions
-+ conversation
-+ tool definitions
-+ retrieved data
-+ 預留輸出
-≤ context window</code></pre>
-<p>
-    超過上限時，provider 可能拒絕 request、截斷輸入，或由應用程式先刪除內容。無論哪一種，都不能假設模型「會自己記得被截掉的部分」。
-    比上限更早出現的問題是注意力稀釋：資料雖然放得下，關鍵限制卻埋在大量無關 log 中，模型仍可能漏掉。
-</p>
-<p>因此 context engineering 的核心不是「塞越多越好」，而是管理資訊的選擇、順序、來源與生命週期：</p>
-<ul>
-    <li><strong>Selection</strong>：只選與目前決策相關的資料。</li>
-    <li><strong>Structure</strong>：保留角色、來源、標題與邊界，避免無法辨識的文字堆。</li>
-    <li><strong>Compression</strong>：摘要長歷史，但保留決策、證據、未完成工作與錯誤。</li>
-    <li><strong>Retrieval</strong>：需要時才載入檔案、文件或技能正文。</li>
-    <li><strong>Bounding</strong>：限制 tool result、schema、搜尋結果與輸出大小。</li>
-</ul>
 
-<aside class="note">
-    <strong>Prompt cache 不是更大的 context window</strong>　Cache 可以讓重複 prefix 的計費或延遲下降，但被 cache 的 token
-    通常仍占 context window。它解決重算成本，不解決 active context 無限成長。
-</aside>
+<pre data-lang="text"><code>System Instructions + Conversation Messages + Tool Definitions + Retrieved Docs + Max Output Tokens ≤ Context Window Limit</code></pre>
+
+<p>
+    在系統工程中，並非「Context 越大塞越多越好」。超過上限會引發截斷錯誤；而在上限內塞入過多雜訊則會導致<strong>注意力稀釋（Needle In A Haystack 效應）</strong>，使模型遺漏核心規則。
+</p>
+
+<table>
+    <thead>
+        <tr><th>Context 管理手法</th><th>工程目標</th><th>具體作法</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>Selection（精準篩選）</strong></td><td>降低雜訊，提升注意力集中度</td><td>只注入與當前任務高度相關的指令與檔案片段</td></tr>
+        <tr><td><strong>Progressive Loading（漸進載入）</strong></td><td>節省初始 Token，按需付費</td><td>啟動時僅載入 Skill 名稱，被觸發時才載入詳細文件</td></tr>
+        <tr><td><strong>Compaction（上下文壓縮）</strong></td><td>突破長對話 Window 限制</td><td>將舊對話摘要為結構化 Facts，移除非關鍵中間過程</td></tr>
+        <tr><td><strong>Bounding（輸出邊界保護）</strong></td><td>防止單一 Tool 撐爆 Window</td><td>截斷過長的 Bash 輸出與巨大檔案內容</td></tr>
+    </tbody>
+</table>
 
 <h2 id="tools">Tool Call：模型提議，Host 執行</h2>
 <p>
-    Tool calling 通常是 constrained structured output：host 把可用工具及參數 schema 送給 provider，模型回傳工具名稱與 arguments。
-    模型本身沒有因此獲得作業系統能力；真正的 effect 發生在 host 驗證並執行 call 之後。
+    <strong>重要原則</strong>：Tool Call 是受限的結構化輸出（Constrained Structured Output）。模型<strong>從未獲得作業系統執行權限</strong>，它僅僅是輸出了「建議呼叫某函式」的 JSON 規格，真正的副作用全由 Host 掌控。
 </p>
-<pre data-lang="text"><code>host 提供 read(path) schema
-        ↓
-model 產生 { name: "read", arguments: { path: "README.md" } }
-        ↓
-host 驗證名稱與 arguments
-        ↓
-host 讀檔，把結果作為 tool message 寫回
-        ↓
-model 在下一次 request 才看見內容</code></pre>
-<p>這個邊界帶來四條基本規則：</p>
-<ol>
-    <li>Tool description 只告訴模型如何使用能力，不構成授權。</li>
-    <li>模型產生的 arguments 是不受信任輸入，必須做 runtime validation。</li>
-    <li>Tool result 也可能包含不受信任內容，例如網頁中的 prompt injection。</li>
-    <li>是否允許讀檔、執行 shell 或連線網路，由 host 與執行環境決定，不由模型自行擴權。</li>
-</ol>
 
-<h2 id="state">Stateless、Session 與 Memory</h2>
+<pre data-lang="text"><code>1. Host 送入定義  ───→  提供 read(path: string) 的 JSON Schema
+                             ↓
+2. Model 發起提議  ───→  回傳結構化 JSON：{ name: "read", arguments: { path: "main.go" } }
+                             ↓
+3. Host 驗證授權  ───→  執行 Runtime Validation（檢查路徑合法性、安全邊界）
+                             ↓
+4. Host 發動 Effect ──→  呼叫 OS System Call 讀取檔案
+                             ↓
+5. Host 寫回結果  ───→  以 role: "tool" 訊息將檔案內容 Append 回 Transcript
+                             ↓
+6. Model 下次可見  ───→  模型在下一個 Request 才能根據內容進行推理</code></pre>
+
+<h2 id="state">狀態解構：Model、Session 與 Memory</h2>
 <p>
-    「模型無狀態」是指一般 API 的下一次呼叫不會自動取得你上一次的 application state。某些 provider 提供 conversation ID、server-side
-    response storage 或 prompt cache，但那是 provider / host 管理的狀態，不應誤認為模型權重在每次聊天後被更新。
+    在資工系統設計中，切忌將所有儲存抽象籠統稱為「記憶」。必須嚴格區分每一種狀態的儲存媒介與生命週期：
 </p>
+
 <table>
     <thead>
-        <tr><th>名詞</th><th>它是什麼</th><th>通常存在何處</th></tr>
+        <tr><th>概念名詞</th><th>本質定義</th><th>儲存媒介</th><th>生命週期 (Lifecycle)</th></tr>
     </thead>
     <tbody>
-        <tr><td>Model weights</td><td>訓練後的參數；一般 inference 不會因你的對話立即改變</td><td>model provider</td></tr>
-        <tr><td>Active context</td><td>本次 generation 實際可見的輸入</td><td>provider request / inference runtime</td></tr>
-        <tr><td>Transcript</td><td>有順序的 user、assistant、tool messages</td><td>host 記憶體或 storage</td></tr>
-        <tr><td>Session</td><td>讓一段工作可識別、保存、恢復的狀態與事件</td><td>application storage</td></tr>
-        <tr><td>Memory</td><td>產品術語；可能指摘要、偏好、向量檢索或持久 facts</td><td>取決於具體設計</td></tr>
-        <tr><td>Knowledge in weights</td><td>訓練時吸收的統計模式，不是可稽核資料庫</td><td>model weights</td></tr>
+        <tr><td><strong>Model Weights</strong></td><td>神經網路訓練權重</td><td>GPU VRAM / Provider 伺服器</td><td>長久固定，推論時不改變</td></tr>
+        <tr><td><strong>Active Context</strong></td><td>當前單次推論的 Token 序列</td><td>Inference Runtime 暫存區</td><td>單次 API Request 結束即釋放</td></tr>
+        <tr><td><strong>Transcript</strong></td><td>結構化的歷史 Message 串列</td><td>Host Process Heap Memory</td><td>隨著 Agent Process 結束而消失</td></tr>
+        <tr><td><strong>Durable Session</strong></td><td>支援 Crash Recovery 的交易記錄</td><td>本機磁碟（JSONL WAL 檔案）</td><td>持久儲存，支援跨 Process 復原</td></tr>
+        <tr><td><strong>Memory Service</strong></td><td>跨任務的長期事實或偏好索引</td><td>向量資料庫 (Vector DB) / SQLite</td><td>跨多個 Session 與專案長期持久</td></tr>
     </tbody>
 </table>
-<p>
-    所以「Agent 記得我的名字」至少可能有三種完全不同的實作：名字仍在 transcript；host 從使用者設定讀出後重新注入；或 memory
-    service 檢索到一筆持久紀錄。只說「模型有記憶」不足以討論正確性、隱私、刪除或恢復行為。
-</p>
 
-<h2 id="retrieval">RAG、Fine-tuning 與 Context 不是同一件事</h2>
-<p>三種常被混用的做法，改變系統的位置不同：</p>
-<ul>
-    <li><strong>RAG / retrieval</strong>：先搜尋外部資料，再把選中的片段放進本次 context；資料可更新、可標來源，但檢索可能漏掉。</li>
-    <li><strong>Fine-tuning</strong>：用資料調整模型參數，適合改變行為模式或格式傾向；不適合當精確、即時、可刪除的知識庫。</li>
-    <li><strong>Prompt / context engineering</strong>：安排本次輸入中的規則、範例、資料與工具，使模型更容易完成當前任務。</li>
-</ul>
-<p>
-    讀取 repository 的 coding agent 多半使用 retrieval：先用搜尋或 read tool 找到相關原始碼，再把結果送回 context。程式碼沒有因而進入
-    model weights；下一個 session 若未再次載入，模型就看不到它。
-</p>
+<h2 id="failure-modes">六個常見的觀念誤解 (Pitfalls)</h2>
+<table>
+    <thead>
+        <tr><th>常見錯誤直覺</th><th>系統工程真實情況</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>❌ 「模型知道專案裡的所有檔案」</td><td>✅ 模型只知道本次 Request 送進去的檔案，其餘必須透過 Tool 讀取。</td></tr>
+        <tr><td>❌ 「UI 畫面上看得到的訊息，模型都看得到」</td><td>✅ UI 呈現的是歷史儲存，送入模型前可能已經過裁切、篩選或摘要。</td></tr>
+        <tr><td>❌ 「有了 JSON Schema 就能保證安全」</td><td>✅ Schema 只負責格式校驗，阻擋惡意路徑穿越或危險指令必須靠 Host Runtime Guard。</td></tr>
+        <tr><td>❌ 「Prompt Caching 能擴大 Context 容量」</td><td>✅ 快取只降低重複 Prefix 的運算時間與計費，無法突破 Context Window 物理上限。</td></tr>
+        <tr><td>❌ 「模型說它已經修改好檔案，代表檔案已修改」</td><td>✅ 模型的文字宣稱不可作為依據，必須以 Host 執行 Tool 的返回結果為唯一憑證。</td></tr>
+        <tr><td>❌ 「Process 崩潰重啟後，可以直接重放所有動作」</td><td>✅ 外部副作用（如寫檔、發 API）狀態未知，未經安全檢查重放會引發嚴重重複副作用。</td></tr>
+    </tbody>
+</table>
 
-<h2 id="failure-modes">建立正確直覺：六個常見誤解</h2>
+<h2 id="check-yourself">自我檢查 (Review Questions)</h2>
 <ol>
-    <li><strong>「模型知道 repository 裡所有檔案。」</strong> 不知道；它只知道已送入的內容，以及可藉 tool 取得什麼。</li>
-    <li><strong>「對話在 UI 裡，所以一定都在 context。」</strong> UI 歷史可能只存在資料庫，active context 可能已摘要或裁切。</li>
-    <li><strong>「Context window 放得下，就應該全部放入。」</strong> 成本、延遲、注意力稀釋與不受信任資料都會惡化。</li>
-    <li><strong>「有 tool schema 就安全。」</strong> Schema 不等於 runtime guard、authorization 或 sandbox。</li>
-    <li><strong>「模型說已完成，就代表 effect 已發生。」</strong> 必須以 tool result、檔案、測試或外部系統狀態驗證。</li>
-    <li><strong>「Session 保存了歷史，crash 後就能直接重做。」</strong> 外部 effect 是否已發生可能不確定；恢復需要明確的 durable protocol。</li>
+    <li>硬碟中存在但未被 Tool 讀取的檔案，是否存在於模型的 Active Context 中？</li>
+    <li>Provider 的 Prompt Cache 命中時，會不會釋放 Context Window 的可用容量？</li>
+    <li>Tool Call 回傳的 arguments 參數，在 Host 端可以直接信任並執行嗎？為什麼？</li>
+    <li>Transcript、Active Context 與 Durable Session 這三者在生命週期上有何本質區別？</li>
+    <li>當模型輸出「測試已全數通過」時，Host 端應依據什麼證據確認真實性？</li>
 </ol>
 
-<h2 id="trace-request">沿著一次 Request 追蹤資料</h2>
-<p>假設使用者要求：「讀取設定檔，找出 timeout，改成 30 秒並執行測試。」Host 可能依序進行：</p>
-<ol>
-    <li>把 system instructions、project rules、user message 與 read/edit/bash schemas 組成 request。</li>
-    <li>模型在 context 中看不到設定檔內容，因此產生 read tool call。</li>
-    <li>Host 驗證 path、執行 read，將結果加入 transcript。</li>
-    <li>Host 把更新後的 messages 再送給模型；這次 active context 才包含設定值。</li>
-    <li>模型產生 edit call；host 驗證並修改檔案，回傳結果。</li>
-    <li>模型產生 bash call；host 執行測試並回傳 stdout、stderr 與 exit status。</li>
-    <li>模型根據 tool results 產生 final answer；host 保存 session，UI 顯示結果。</li>
-</ol>
-<p>
-    注意：模型沒有在同一次 generation 中暗中讀檔。每個 tool call 都結束一次 model response；host 執行後，必須發出下一次 request，模型才看得到結果。
-    Agent loop 正是把這個往返自動化。
-</p>
-
-<h2 id="check-yourself">自我檢查</h2>
-<p>閱讀下一章前，試著不看答案回答：</p>
-<ol>
-    <li>檔案存在磁碟上，是否代表它在 model context 中？</li>
-    <li>Provider prompt cache 命中，是否會釋放 context window？</li>
-    <li>Tool call 的 arguments 應被視為可信程式輸入嗎？</li>
-    <li>Transcript、active context 與 durable Session 有何不同？</li>
-    <li>模型回覆「測試通過」時，哪一份證據才能證明測試真的執行過？</li>
-</ol>
 <aside class="note">
-    <strong>答案</strong>　1. 否，除非內容被送入或經 tool 讀取後寫回。2. 通常不會。3. 不可信，必須驗證。4. Transcript 是訊息歷史，active
-    context 是本次選入的可見子集，Session 是 host 保存與恢復工作的持久狀態。5. Bash tool 的可驗證結果，例如 command、exit status
-    與輸出，而不是自然語言宣稱。
+    <strong>解答速查</strong>　
+    1. 否，模型不可見。
+    2. 不會，仍佔用 Window 空間。
+    3. 不可信任，必須做 Runtime Validation 防禦注入與越權。
+    4. Transcript 存在 Process 記憶體；Active Context 是本次推論選入的子集；Durable Session 則是持久化於磁碟的 WAL 交易記錄。
+    5. 必須以 Bash Tool 實際返回的 Exit Status (code 0) 與 stdout/stderr 為唯一客觀證據。
 </aside>
 
 <p class="bridge">
-    現在可以精確描述 Agent 的材料了：model 負責根據 active context 選擇下一段輸出；host 保存 transcript、提供 tools 並產生 effect；
-    Session 負責讓工作跨越 process 壽命。下一章把這些材料縮成一個不可再刪的 model → tool → result 閉環。
+    釐清了基礎概念後，我們知道：Model 是無狀態運算大腦；Host 負責掌控 Transcript、執行 Tool 並產生副作用；Session 負責持久化狀態。下一章我們將這一切簡化為一個<strong>不可再刪的 Agent 最小閉環</strong>。
 </p>
