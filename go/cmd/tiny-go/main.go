@@ -202,7 +202,7 @@ var toolDefinitions = []map[string]any{
 	toolDefinition("read", "Read a UTF-8 text file", map[string]any{"path": map[string]string{"type": "string"}}),
 	toolDefinition("write", "Create or overwrite a UTF-8 text file", map[string]any{"path": map[string]string{"type": "string"}, "content": map[string]string{"type": "string"}}),
 	toolDefinition("edit", "Replace one unique exact string in a UTF-8 text file", map[string]any{"path": map[string]string{"type": "string"}, "oldText": map[string]string{"type": "string"}, "newText": map[string]string{"type": "string"}}),
-	toolDefinition("bg", "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands; list/status/logs can see bg processes left by tiny-agent runs in the same cwd.", map[string]any{"action": map[string]any{"type": "string", "enum": []string{"start", "list", "status", "logs", "stop"}}, "command": map[string]string{"type": "string"}, "id": map[string]string{"type": "string"}, "tail": map[string]any{"type": "integer", "minimum": 1}}),
+	toolDefinition("bg", "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands. List shows running processes by default; use status=all or a specific status to inspect history in the same cwd.", map[string]any{"action": map[string]any{"type": "string", "enum": []string{"start", "list", "status", "logs", "stop"}}, "command": map[string]string{"type": "string"}, "id": map[string]string{"type": "string"}, "tail": map[string]any{"type": "integer", "minimum": 1}, "status": map[string]any{"type": "string", "enum": []string{"running", "exited", "stopped", "stale", "all"}, "description": "Filter for action=list. Defaults to running."}}),
 }
 
 func toolDefinition(name, description string, properties map[string]any) map[string]any {
@@ -427,6 +427,10 @@ func executeBG(ctx context.Context, args map[string]string) (string, error) {
 	case "start":
 		return startBG(args["command"])
 	case "list":
+		status := cmp.Or(args["status"], "running")
+		if !slices.Contains([]string{"running", "exited", "stopped", "stale", "all"}, status) {
+			return "", fmt.Errorf("unknown bg status filter: %s", status)
+		}
 		entries, _ := os.ReadDir(bgDir())
 		metas := []bgMeta{}
 		for _, entry := range entries {
@@ -434,8 +438,11 @@ func executeBG(ctx context.Context, args map[string]string) (string, error) {
 				continue
 			}
 			meta, err := readBGMeta(strings.TrimSuffix(entry.Name(), ".json"))
-			if err == nil {
-				meta.Status = currentBGStatus(meta)
+			if err != nil {
+				continue
+			}
+			meta.Status = currentBGStatus(meta)
+			if status == "all" || meta.Status == status {
 				metas = append(metas, meta)
 			}
 		}

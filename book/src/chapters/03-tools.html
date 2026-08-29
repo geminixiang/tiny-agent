@@ -99,6 +99,7 @@ npm run dev</code></pre>
 
 <pre data-lang="json"><code>{"action":"start","command":"node backend/server.mjs"}
 {"action":"list"}
+{"action":"list","status":"all"}
 {"action":"status","id":"12345"}
 {"action":"logs","id":"12345","tail":80}
 {"action":"stop","id":"12345"}</code></pre>
@@ -106,6 +107,8 @@ npm run dev</code></pre>
 <p>
     <code>bg start</code> 會在目前工作目錄啟動一個背景 process，回傳的 <code>id</code> 就是 OS pid。它不假裝 server
     已經健康，只表示 process 已經啟動且短暫觀察後還活著；真正的健康檢查仍應由 agent 用 <code>curl</code> 或測試命令驗證。
+    <code>bg list</code> 預設只列出仍在執行的 process；需要查看歷史紀錄時使用 <code>status: "all"</code>，也可以指定
+    <code>running</code>、<code>exited</code>、<code>stopped</code> 或 <code>stale</code>。
 </p>
 
 <h3 id="bg-files">看得見的狀態：metadata 與 log</h3>

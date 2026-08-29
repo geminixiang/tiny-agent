@@ -81,7 +81,7 @@ for name, description, properties in [
     ("read", "Read a UTF-8 text file", {"path": {"type": "string"}}),
     ("write", "Create or overwrite a UTF-8 text file", {"path": {"type": "string"}, "content": {"type": "string"}}),
     ("edit", "Replace one unique exact string in a UTF-8 text file", {"path": {"type": "string"}, "oldText": {"type": "string"}, "newText": {"type": "string"}}),
-    ("bg", "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands; list/status/logs can see bg processes left by tiny-agent runs in the same cwd.", {"action": {"type": "string", "enum": ["start", "list", "status", "logs", "stop"]}, "command": {"type": "string"}, "id": {"type": "string"}, "tail": {"type": "integer", "minimum": 1}}),
+    ("bg", "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands. List shows running processes by default; use status=all or a specific status to inspect history in the same cwd.", {"action": {"type": "string", "enum": ["start", "list", "status", "logs", "stop"]}, "command": {"type": "string"}, "id": {"type": "string"}, "tail": {"type": "integer", "minimum": 1}, "status": {"type": "string", "enum": ["running", "exited", "stopped", "stale", "all"], "description": "Filter for action=list. Defaults to running."}}),
 ]:
     required = ["action"] if name == "bg" else list(properties)
     TOOL_DEFINITIONS.append({"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required}}})
@@ -380,11 +380,15 @@ async def execute_bg(args: dict[str, str], cancelled: asyncio.Event) -> str:
             status = current_bg_status(meta)
         return json.dumps({**meta, "status": status}) + (f"\n{log_tail(log_path)}" if status != "running" else "")
     if action == "list":
+        status = args.get("status", "running")
+        if status not in {"running", "exited", "stopped", "stale", "all"}:
+            raise ValueError(f"unknown bg status filter: {status}")
         metas = []
         for path in bg_dir().glob("*.json"):
             with suppress(Exception):
                 meta = read_bg_meta(path.stem)
-                metas.append({**meta, "status": current_bg_status(meta)})
+                current = {**meta, "status": current_bg_status(meta)}
+                if status == "all" or current["status"] == status: metas.append(current)
         return json.dumps(metas)
     pid = args.get("id", "")
     meta = read_bg_meta(pid)

@@ -193,6 +193,10 @@ func TestBackgroundProcessLifecycleAndStaleMetadata(t *testing.T) {
 	if err != nil || !strings.Contains(logs, "tick") {
 		t.Fatalf("logs=%q err=%v", logs, err)
 	}
+	listed, err := executeTool(context.Background(), "bg", map[string]string{"action": "list"})
+	if err != nil || !strings.Contains(listed, `"id":"`+started.ID+`"`) {
+		t.Fatalf("running list=%q err=%v", listed, err)
+	}
 	original := started
 	started.ProcessStartedAt = "different process"
 	if err := writeBGMeta(started); err != nil {
@@ -206,12 +210,22 @@ func TestBackgroundProcessLifecycleAndStaleMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(staleText), &stale); err != nil || stale.Status != "stale" || !processRunning(started.PID) {
 		t.Fatalf("stale=%s err=%v", staleText, err)
 	}
+	listed, _ = executeTool(context.Background(), "bg", map[string]string{"action": "list"})
+	staleList, _ := executeTool(context.Background(), "bg", map[string]string{"action": "list", "status": "stale"})
+	if listed != "[]" || !strings.Contains(staleList, `"id":"`+started.ID+`"`) {
+		t.Fatalf("running=%s stale=%s", listed, staleList)
+	}
 	if err := writeBGMeta(original); err != nil {
 		t.Fatal(err)
 	}
 	stoppedText, err := executeTool(context.Background(), "bg", map[string]string{"action": "stop", "id": started.ID})
 	if err != nil || !strings.Contains(stoppedText, `"status":"stopped"`) {
 		t.Fatalf("stopped=%q err=%v", stoppedText, err)
+	}
+	listed, _ = executeTool(context.Background(), "bg", map[string]string{"action": "list"})
+	all, _ := executeTool(context.Background(), "bg", map[string]string{"action": "list", "status": "all"})
+	if listed != "[]" || !strings.Contains(all, `"id":"`+started.ID+`"`) {
+		t.Fatalf("running=%s all=%s", listed, all)
 	}
 
 	failedText, err := executeTool(context.Background(), "bg", map[string]string{"action": "start", "command": "echo boom >&2; exit 7"})
@@ -224,6 +238,11 @@ func TestBackgroundProcessLifecycleAndStaleMetadata(t *testing.T) {
 	}
 	if failed.Status != "exited" || failed.ExitCode == nil || *failed.ExitCode != 7 || !strings.Contains(failedText, "boom") {
 		t.Fatalf("failed: %s", failedText)
+	}
+	listed, _ = executeTool(context.Background(), "bg", map[string]string{"action": "list"})
+	exited, _ := executeTool(context.Background(), "bg", map[string]string{"action": "list", "status": "exited"})
+	if listed != "[]" || !strings.Contains(exited, `"id":"`+failed.ID+`"`) {
+		t.Fatalf("running=%s exited=%s", listed, exited)
 	}
 }
 

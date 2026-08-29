@@ -45,6 +45,7 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(started["processStartedAt"])
         await asyncio.sleep(0.25)
         self.assertIn("tick", await tiny.execute_tool("bg", {"action": "logs", "id": started["id"], "tail": "5"}))
+        self.assertEqual(json.loads(await tiny.execute_tool("bg", {"action": "list"}))[0]["id"], started["id"])
 
         meta_path, _ = tiny.bg_paths(started["id"])
         original = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -52,16 +53,23 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         stale = json.loads(await tiny.execute_tool("bg", {"action": "stop", "id": started["id"]}))
         self.assertEqual(stale["status"], "stale")
         os.kill(started["pid"], 0)
+        self.assertEqual(json.loads(await tiny.execute_tool("bg", {"action": "list"})), [])
+        self.assertEqual(json.loads(await tiny.execute_tool("bg", {"action": "list", "status": "stale"}))[0]["id"], started["id"])
 
         tiny.write_bg_meta(original)
         stopped = json.loads(await tiny.execute_tool("bg", {"action": "stop", "id": started["id"]}))
         self.assertEqual(stopped["status"], "stopped")
+        self.assertEqual(json.loads(await tiny.execute_tool("bg", {"action": "list"})), [])
+        self.assertEqual(json.loads(await tiny.execute_tool("bg", {"action": "list", "status": "all"}))[0]["id"], started["id"])
 
         failed_text = await tiny.execute_tool("bg", {"action": "start", "command": "echo boom >&2; exit 7"})
         failed = json.loads(failed_text.splitlines()[0])
         self.assertEqual(failed["status"], "exited")
         self.assertEqual(failed["exitCode"], 7)
         self.assertIn("boom", failed_text)
+        self.assertEqual(json.loads(await tiny.execute_tool("bg", {"action": "list"})), [])
+        exited = json.loads(await tiny.execute_tool("bg", {"action": "list", "status": "exited"}))
+        self.assertIn(failed["id"], {meta["id"] for meta in exited})
         await tiny.close_background_processes()
 
     async def test_file_tools_do_not_block_event_loop(self):

@@ -597,6 +597,7 @@ fn formats_tui_tool_events() {
             action: String::new(),
             id: String::new(),
             tail: 0,
+            status: String::new(),
         },
         result: String::new(),
     };
@@ -616,6 +617,7 @@ fn formats_tui_tool_events() {
             action: String::new(),
             id: String::new(),
             tail: 0,
+            status: String::new(),
         },
         result: String::new(),
     };
@@ -635,6 +637,7 @@ fn formats_tui_tool_events() {
             action: String::new(),
             id: String::new(),
             tail: 0,
+            status: String::new(),
         },
         result: "hello".into(),
     };
@@ -1679,6 +1682,7 @@ fn args() -> ToolArgs {
         action: String::new(),
         id: String::new(),
         tail: 0,
+        status: String::new(),
     }
 }
 
@@ -1708,6 +1712,11 @@ fn bg_manages_lifecycle_fast_failure_and_stale_metadata() {
     logs.id = id.clone();
     logs.tail = 5;
     assert!(agent.execute_tool("bg", &logs).unwrap().contains("tick"));
+    let mut list = args();
+    list.action = "list".to_string();
+    let running: serde_json::Value =
+        serde_json::from_str(&agent.execute_tool("bg", &list).unwrap()).unwrap();
+    assert_eq!(running[0]["id"], id);
 
     let meta_path = format!("{cwd}/.tiny-agent/bg/{id}.json");
     let original = std::fs::read_to_string(&meta_path).unwrap();
@@ -1725,11 +1734,26 @@ fn bg_manages_lifecycle_fast_failure_and_stale_metadata() {
         serde_json::from_str(&agent.execute_tool("bg", &stop).unwrap()).unwrap();
     assert_eq!(stale["status"], "stale");
     assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    let running: serde_json::Value =
+        serde_json::from_str(&agent.execute_tool("bg", &list).unwrap()).unwrap();
+    assert_eq!(running, serde_json::json!([]));
+    list.status = "stale".to_string();
+    let stale_list: serde_json::Value =
+        serde_json::from_str(&agent.execute_tool("bg", &list).unwrap()).unwrap();
+    assert_eq!(stale_list[0]["id"], id);
 
     std::fs::write(&meta_path, original).unwrap();
     let stopped: serde_json::Value =
         serde_json::from_str(&agent.execute_tool("bg", &stop).unwrap()).unwrap();
     assert_eq!(stopped["status"], "stopped");
+    list.status = String::new();
+    let running: serde_json::Value =
+        serde_json::from_str(&agent.execute_tool("bg", &list).unwrap()).unwrap();
+    assert_eq!(running, serde_json::json!([]));
+    list.status = "all".to_string();
+    let all: serde_json::Value =
+        serde_json::from_str(&agent.execute_tool("bg", &list).unwrap()).unwrap();
+    assert_eq!(all[0]["id"], id);
 
     let mut fail = args();
     fail.action = "start".to_string();
@@ -1740,6 +1764,20 @@ fn bg_manages_lifecycle_fast_failure_and_stale_metadata() {
     assert_eq!(failed["status"], "exited");
     assert_eq!(failed["exitCode"], 7);
     assert!(failed_text.contains("boom"));
+    list.status = String::new();
+    let running: serde_json::Value =
+        serde_json::from_str(&agent.execute_tool("bg", &list).unwrap()).unwrap();
+    assert_eq!(running, serde_json::json!([]));
+    list.status = "exited".to_string();
+    let exited: serde_json::Value =
+        serde_json::from_str(&agent.execute_tool("bg", &list).unwrap()).unwrap();
+    assert!(
+        exited
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|meta| meta["id"] == failed["id"])
+    );
     close_background_processes(&cwd);
 }
 

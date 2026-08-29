@@ -136,6 +136,8 @@ pub struct ToolArgs {
     pub id: String,
     #[serde(default)]
     pub tail: i64,
+    #[serde(default)]
+    pub status: String,
 }
 
 impl ToolArgs {
@@ -158,6 +160,7 @@ impl ToolArgs {
             action: String::new(),
             id: String::new(),
             tail: 0,
+            status: String::new(),
         }
     }
 }
@@ -2176,14 +2179,15 @@ pub fn tool_definitions_json() -> &'static str {
         "type": "function",
         "function": {
           "name": "bg",
-          "description": "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands; list/status/logs can see bg processes left by tiny-agent runs in the same cwd.",
+          "description": "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands. List shows running processes by default; use status=all or a specific status to inspect history in the same cwd.",
           "parameters": {
             "type": "object",
             "properties": {
               "action": { "type": "string", "enum": ["start", "list", "status", "logs", "stop"] },
               "command": { "type": "string", "description": "Shell command to start. Required for action=start." },
               "id": { "type": "string", "description": "Background process pid. Required for status/logs/stop." },
-              "tail": { "type": "integer", "minimum": 1, "description": "Number of log lines for logs, status, or failed start." }
+              "tail": { "type": "integer", "minimum": 1, "description": "Number of log lines for logs, status, or failed start." },
+              "status": { "type": "string", "enum": ["running", "exited", "stopped", "stale", "all"], "description": "Filter for action=list. Defaults to running." }
             },
             "required": ["action"]
           }
@@ -2413,6 +2417,14 @@ fn execute_bg(cwd: &str, args: &ToolArgs) -> Result<String, String> {
     match args.action.as_str() {
         "start" => start_bg(cwd, &args.command),
         "list" => {
+            let status = if args.status.is_empty() {
+                "running"
+            } else {
+                &args.status
+            };
+            if !["running", "exited", "stopped", "stale", "all"].contains(&status) {
+                return Err(format!("unknown bg status filter: {status}"));
+            }
             let mut metas = Vec::new();
             if let Ok(entries) = std::fs::read_dir(bg_dir(cwd)) {
                 for entry in entries.flatten() {
@@ -2424,7 +2436,9 @@ fn execute_bg(cwd: &str, args: &ToolArgs) -> Result<String, String> {
                         if let Ok(mut meta) = read_bg_meta(cwd, id) {
                             refresh_bg_meta(cwd, &mut meta);
                             meta.status = current_bg_status(&meta);
-                            metas.push(meta);
+                            if status == "all" || meta.status == status {
+                                metas.push(meta);
+                            }
                         }
                     }
                 }

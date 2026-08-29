@@ -28,14 +28,20 @@ test("bg manages lifecycle, logs, fast failures, and stale metadata", async () =
     await writeFile(metaPath, `${JSON.stringify({ ...original, processStartedAt: "different process" }, null, 2)}\n`);
     assert.equal(resultMeta(await executeTool("bg", { action: "stop", id: started.id })).status, "stale");
     process.kill(started.pid, 0);
+    assert.deepEqual(JSON.parse(await executeTool("bg", { action: "list" })), []);
+    assert.ok(JSON.parse(await executeTool("bg", { action: "list", status: "stale" })).some((meta: any) => meta.id === started.id));
 
     await writeFile(metaPath, `${JSON.stringify(original, null, 2)}\n`);
     assert.equal(resultMeta(await executeTool("bg", { action: "stop", id: started.id })).status, "stopped");
+    assert.deepEqual(JSON.parse(await executeTool("bg", { action: "list" })), []);
+    assert.ok(JSON.parse(await executeTool("bg", { action: "list", status: "all" })).some((meta: any) => meta.id === started.id));
 
     const failed = await executeTool("bg", { action: "start", command: "echo boom >&2; exit 7" });
     const failedMeta = resultMeta(failed);
     assert.equal(failedMeta.status, "exited");
     assert.equal(failedMeta.exitCode, 7);
     assert.match(failed, /boom/);
+    assert.deepEqual(JSON.parse(await executeTool("bg", { action: "list" })), []);
+    assert.ok(JSON.parse(await executeTool("bg", { action: "list", status: "exited" })).some((meta: any) => meta.id === failedMeta.id));
     await closeBackgroundProcesses();
 });

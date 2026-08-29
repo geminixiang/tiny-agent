@@ -481,7 +481,7 @@ const bgTool: Tool = {
     replay: "never",
     replayKey: "builtin:bg:v1",
     description:
-        "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands; list/status/logs can see bg processes left by tiny-agent runs in the same cwd.",
+        "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands. List shows running processes by default; use status=all or a specific status to inspect history in the same cwd.",
     parameters: {
         type: "object",
         properties: {
@@ -489,6 +489,7 @@ const bgTool: Tool = {
             command: { type: "string", description: "Shell command to start. Required for action=start." },
             id: { type: "string", description: "Background process pid. Required for status/logs/stop." },
             tail: { type: "integer", minimum: 1, description: "Number of log lines for logs, status, or failed start." },
+            status: { type: "string", enum: ["running", "exited", "stopped", "stale", "all"], description: "Filter for action=list. Defaults to running." },
         },
         required: ["action"],
     },
@@ -497,6 +498,8 @@ const bgTool: Tool = {
         const action = requiredString(args.action, "action");
         if (action === "start") return startBg(requiredString(args.command, "command"));
         if (action === "list") {
+            const status = args.status === undefined ? "running" : requiredString(args.status, "status");
+            if (!["running", "exited", "stopped", "stale", "all"].includes(status)) throw Error(`unknown bg status filter: ${status}`);
             const dir = bgDir();
             const files = await readdir(dir).catch(() => []);
             const metas = await Promise.all(
@@ -504,7 +507,8 @@ const bgTool: Tool = {
                     .filter((file) => file.endsWith(".json"))
                     .map((file) => readBgMeta(basename(file, ".json")).catch(() => undefined)),
             );
-            return JSON.stringify(metas.filter((meta): meta is BgMeta => !!meta).map((meta) => ({ ...meta, status: currentBgStatus(meta) })));
+            const current = metas.filter((meta): meta is BgMeta => !!meta).map((meta) => ({ ...meta, status: currentBgStatus(meta) }));
+            return JSON.stringify(status === "all" ? current : current.filter((meta) => meta.status === status));
         }
         const id = requiredString(args.id, "id");
         const meta = await readBgMeta(id);
