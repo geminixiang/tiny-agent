@@ -1,7 +1,8 @@
-import { exec, type ExecException } from "node:child_process";
+import { exec, spawn, type ExecException } from "node:child_process";
+import { createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname, isAbsolute, resolve } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 const run = promisify(exec);
@@ -44,6 +45,9 @@ export type ToolArgs = {
     offset?: number;
     limit?: number;
     edits?: ToolEdit[];
+    action?: string;
+    id?: string;
+    tail?: number;
 };
 export type Tool = {
     name: string;
@@ -70,7 +74,7 @@ export function formatToolEvent({ phase, name, args, result }: ToolEvent) {
         if (result?.startsWith("Error:") || result === "Operation aborted") return `  └ ${result}`;
         return `  └ ${result === "ok" || result === "(no output)" ? result : `${result?.length ?? 0} chars`}`;
     }
-    const target = name === "bash" ? args.command : args.path;
+    const target = name === "bash" || name === "bg" ? args.command || args.id : args.path;
     const suffix =
         name === "write"
             ? ` (${args.content?.length ?? 0} chars)`
@@ -317,6 +321,177 @@ const editTool: Tool = {
     },
 };
 
+type BgMeta = {
+    id: string;
+    command: string;
+    cwd: string;
+    pid: number;
+    pgid: number;
+    ownerPid: number;
+    startedAt: string;
+    log: string;
+    status: "running" | "exited" | "stopped";
+    exitCode?: number | null;
+    signal?: NodeJS.Signals | null;
+    exitedAt?: string;
+};
+
+type BgProcess = { child: ReturnType<typeof spawn>; log: ReturnType<typeof createWriteStream>; meta: BgMeta };
+
+const bgProcesses = new Map<string, BgProcess>();
+const bgStopping = new Set<string>();
+
+function bgDir() {
+    return resolve(root, ".tiny-agent/bg");
+}
+
+function bgPaths(id: string) {
+    if (!/^\d+$/.test(id)) throw Error("id must be a pid");
+    const dir = bgDir();
+    return { meta: resolve(dir, `${id}.json`), log: resolve(dir, `${id}.log`), relativeLog: `.tiny-agent/bg/${id}.log` };
+}
+
+function isProcessRunning(pid: number) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function readBgMeta(id: string): Promise<BgMeta> {
+    const data = JSON.parse(await readFile(bgPaths(id).meta, "utf8")) as BgMeta;
+    if (data.cwd !== root) throw Error(`bg ${id} belongs to a different cwd`);
+    return data;
+}
+
+async function writeBgMeta(meta: BgMeta) {
+    await writeFile(bgPaths(meta.id).meta, `${JSON.stringify(meta, null, 2)}\n`);
+}
+
+async function tailFile(path: string, lines = 80) {
+    const text = await readFile(path, "utf8").catch(() => "");
+    const all = text.replace(/\r\n/g, "\n").split("\n");
+    if (all.at(-1) === "") all.pop();
+    return all.slice(-Math.min(lines, 2_000)).join("\n");
+}
+
+function currentBgStatus(meta: BgMeta): BgMeta["status"] {
+    if (meta.status === "stopped") return "stopped";
+    if (isProcessRunning(meta.pid)) return "running";
+    return meta.status === "running" ? "exited" : meta.status;
+}
+
+function formatBg(meta: BgMeta, status = currentBgStatus(meta)) {
+    return JSON.stringify({ ...meta, status });
+}
+
+function killBgGroup(pid: number, signal: NodeJS.Signals) {
+    try {
+        process.kill(-pid, signal);
+    } catch {
+        process.kill(pid, signal);
+    }
+}
+
+async function stopBg(meta: BgMeta) {
+    const status = currentBgStatus(meta);
+    if (status !== "running") return { ...meta, status };
+    bgStopping.add(meta.id);
+    killBgGroup(meta.pgid || meta.pid, "SIGTERM");
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+        if (!isProcessRunning(meta.pid)) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (isProcessRunning(meta.pid)) killBgGroup(meta.pgid || meta.pid, "SIGKILL");
+    const stopped = { ...meta, status: "stopped" as const, exitedAt: new Date().toISOString() };
+    await writeBgMeta(stopped);
+    return stopped;
+}
+
+async function startBg(command: string) {
+    await mkdir(bgDir(), { recursive: true });
+    const startedAt = new Date().toISOString();
+    const child = spawn(command, { cwd: root, shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    if (!child.pid) throw Error("failed to start background process");
+    const id = String(child.pid);
+    const paths = bgPaths(id);
+    const log = createWriteStream(paths.log, { flags: "a" });
+    log.write(`$ ${command}\ncwd: ${root}\npid: ${child.pid}\nstarted: ${startedAt}\n\n`);
+    child.stdout.pipe(log, { end: false });
+    child.stderr.pipe(log, { end: false });
+    const meta: BgMeta = {
+        id,
+        command,
+        cwd: root,
+        pid: child.pid,
+        pgid: child.pid,
+        ownerPid: process.pid,
+        startedAt,
+        log: paths.relativeLog,
+        status: "running",
+    };
+    bgProcesses.set(id, { child, log, meta });
+    await writeBgMeta(meta);
+    child.on("exit", (exitCode, signal) => {
+        log.write(`\nexited: ${new Date().toISOString()}\nexitCode: ${exitCode ?? ""}\nsignal: ${signal ?? ""}\n`);
+        log.end();
+        bgProcesses.delete(id);
+        const status = bgStopping.has(id) ? "stopped" : "exited";
+        bgStopping.delete(id);
+        void writeBgMeta({ ...meta, status, exitCode, signal, exitedAt: new Date().toISOString() }).catch(() => {});
+    });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const status = currentBgStatus(meta);
+    if (status !== "running") return `${formatBg({ ...meta, status: "exited" })}\n${await tailFile(paths.log)}`;
+    return formatBg(meta);
+}
+
+const bgTool: Tool = {
+    name: "bg",
+    replay: "never",
+    replayKey: "builtin:bg:v1",
+    description:
+        "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands; list/status/logs can see bg processes left by tiny-agent runs in the same cwd.",
+    parameters: {
+        type: "object",
+        properties: {
+            action: { type: "string", enum: ["start", "list", "status", "logs", "stop"] },
+            command: { type: "string", description: "Shell command to start. Required for action=start." },
+            id: { type: "string", description: "Background process pid. Required for status/logs/stop." },
+            tail: { type: "integer", minimum: 1, description: "Number of log lines for logs, status, or failed start." },
+        },
+        required: ["action"],
+    },
+    async execute(args, signal) {
+        if (signal?.aborted) throw Error("Operation aborted");
+        const action = requiredString(args.action, "action");
+        if (action === "start") return startBg(requiredString(args.command, "command"));
+        if (action === "list") {
+            const dir = bgDir();
+            const files = await readdir(dir).catch(() => []);
+            const metas = await Promise.all(
+                files
+                    .filter((file) => file.endsWith(".json"))
+                    .map((file) => readBgMeta(basename(file, ".json")).catch(() => undefined)),
+            );
+            return JSON.stringify(metas.filter((meta): meta is BgMeta => !!meta).map((meta) => ({ ...meta, status: currentBgStatus(meta) })));
+        }
+        const id = requiredString(args.id, "id");
+        const meta = await readBgMeta(id);
+        if (action === "status") return `${formatBg(meta)}\n${await tailFile(bgPaths(id).log, args.tail ?? 40)}`;
+        if (action === "logs") return (await tailFile(bgPaths(id).log, args.tail ?? 80)) || "(no output)";
+        if (action === "stop") return formatBg(await stopBg(meta));
+        throw Error(`unknown bg action: ${action}`);
+    },
+};
+
+export async function closeBackgroundProcesses() {
+    await Promise.all([...bgProcesses.values()].map(({ meta }) => stopBg(meta).catch(() => undefined)));
+}
+
 export function durableToolReplay(tool: Tool) {
     if (tool === readTool) return { replay: "safe" as const, replayKey: "builtin:read:v1" };
     return { replay: "never" as const, replayKey: tool.replayKey ?? `tool:${tool.name}:v1` };
@@ -327,7 +502,7 @@ export function executeDurableTool(tool: Tool, args: ToolArgs, signal?: AbortSig
     return tool.execute(args, signal);
 }
 
-export const builtInTools: readonly Tool[] = Object.freeze([bashTool, readTool, writeTool, editTool]);
+export const builtInTools: readonly Tool[] = Object.freeze([bashTool, readTool, writeTool, editTool, bgTool]);
 export const builtInPlugins: readonly Plugin[] = Object.freeze(
     builtInTools.map((tool) => Object.freeze({ name: tool.name, tools: Object.freeze([tool]) })),
 );

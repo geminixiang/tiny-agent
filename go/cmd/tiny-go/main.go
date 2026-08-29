@@ -25,11 +25,11 @@ import (
 )
 
 const (
-	defaultModel  = "deepseek/deepseek-v4-flash-0731"
-	maxBashOutput = 10 * 1024 * 1024
-	maxToolOutput = 50 * 1024
-	bashTimeout   = 120 * time.Second
-	openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+	defaultModel    = "deepseek/deepseek-v4-flash-0731"
+	maxBashOutput   = 10 * 1024 * 1024
+	maxToolOutput   = 50 * 1024
+	bashTimeout     = 120 * time.Second
+	defaultEndpoint = "https://openrouter.ai/api/v1"
 )
 
 var cwd, _ = os.Getwd()
@@ -81,6 +81,15 @@ type ModelResponse struct {
 
 func text(s string) *string { return &s }
 func model() string         { return cmp.Or(os.Getenv("TINY_MODEL"), defaultModel) }
+func endpoint() string      { return cmp.Or(os.Getenv("TINY_ENDPOINT"), defaultEndpoint) }
+
+func chatCompletionsURL(endpoint string) string {
+	trimmed := strings.TrimRight(endpoint, "/")
+	if strings.HasSuffix(trimmed, "/chat/completions") {
+		return trimmed
+	}
+	return trimmed + "/chat/completions"
+}
 func formatTokens(n int) string {
 	if n < 1000 {
 		return fmt.Sprint(n)
@@ -387,7 +396,7 @@ func newAgent(skills []Skill, session *SessionStore, instructions string) *Agent
 		project = fmt.Sprintf("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"%s\">\n%s\n</project_instructions>\n\n</project_context>", filepath.Join(cwd, "AGENTS.md"), instructions)
 	}
 	prompt := fmt.Sprintf("You are tiny-agent, a concise coding agent in %s. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.\n\nFor implementation tasks, inspect only what is needed, then make the changes and run focused tests. Do not keep researching the same uncertainty when a mature dependency or direct implementation is available.\nUse the provided tool descriptions to choose the right capability. Not every run enables file access, shell access, or file modification.\nPrefer completing a small working implementation over exhaustively researching every option. If repeated experiments fail, reconsider the approach instead of making another similar attempt.%s\n\n<available_skills>\n%s\n</available_skills>", cwd, project, list)
-	return &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: openRouterURL, OnTool: func(ToolEvent) {}, Tools: localTools()}
+	return &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: chatCompletionsURL(endpoint()), OnTool: func(ToolEvent) {}, Tools: localTools()}
 }
 
 func localTools(names ...string) []Tool {

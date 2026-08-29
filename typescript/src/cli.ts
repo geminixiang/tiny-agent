@@ -4,6 +4,7 @@ import { createInterface, emitKeypressEvents } from "node:readline";
 import { parseArgs } from "node:util";
 import {
     Agent,
+    ENDPOINT,
     MODEL,
     Session,
     loadMcpConfigs,
@@ -18,6 +19,7 @@ import {
     type RunResult,
     type SessionStore,
     builtInPlugins,
+    closeBackgroundProcesses,
 } from "./index.js";
 
 const activeMcp: LoadedMcpTools[] = [];
@@ -87,6 +89,7 @@ async function main() {
             timestamp: new Date().toISOString(),
             sessionId: session.id,
             model: MODEL,
+            endpoint: ENDPOINT,
             plugins: selectedPlugins,
             mcp,
         });
@@ -179,7 +182,7 @@ async function main() {
     };
     if (!json) {
         console.log(
-            `\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nmodel: ${MODEL}\nsession: ${session.id}\npath: ${session.path}\ntools: ${tools.map((tool) => displayToolName(tool.name)).join(", ") || "(none)"}\nmcp: ${mcp.join(", ") || "(none)"}${sessionId ? "\nrestored: yes" : ""}`,
+            `\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nendpoint: ${ENDPOINT}\nmodel: ${MODEL}\nsession: ${session.id}\npath: ${session.path}\ntools: ${tools.map((tool) => displayToolName(tool.name)).join(", ") || "(none)"}\nmcp: ${mcp.join(", ") || "(none)"}${sessionId ? "\nrestored: yes" : ""}`,
         );
     }
     if (oneShot) {
@@ -272,6 +275,7 @@ function mcpFailureCause(error: unknown) {
 
 main()
     .finally(async () => {
+        await closeBackgroundProcesses();
         await closeMcp(activeMcp);
         await activeSession?.close();
     })

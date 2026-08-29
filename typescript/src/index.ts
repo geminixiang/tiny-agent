@@ -1,7 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { canonicalDigest } from "./canonical-json.js";
-import { MODEL, requireOpenRouterApiKey } from "./env.js";
+import { ENDPOINT, MODEL, chatCompletionsUrl, requireOpenRouterApiKey } from "./env.js";
 import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
 import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
 import { expect, type ConfigurationSnapshot, type ToolCall } from "./session-reducer.js";
@@ -30,6 +30,7 @@ export {
     builtInPlugins,
     builtInTools,
     durableToolReplay,
+    closeBackgroundProcesses,
     executeTool,
     formatToolEvent,
     type Plugin,
@@ -38,7 +39,7 @@ export {
     type ToolEvent,
 } from "./tools.js";
 
-export { MODEL };
+export { ENDPOINT, MODEL };
 const root = process.cwd();
 type Message = {
     role: "system" | "user" | "assistant" | "tool";
@@ -675,7 +676,7 @@ ${list}
     async callModel(messages = this.messages, tools: unknown = toolDefinitions(this.tools), signal?: AbortSignal) {
         const key = requireOpenRouterApiKey();
         const body = { model: MODEL, messages, ...when(tools, { tools }) };
-        const r = await this.fetcher("https://openrouter.ai/api/v1/chat/completions", {
+        const r = await this.fetcher(chatCompletionsUrl(), {
             method: "POST",
             signal,
             headers: {
