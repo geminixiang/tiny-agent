@@ -20,6 +20,10 @@
 【AI 繪圖/SVG Prompt】：
 "High-contrast technical sequence diagram of AI Agent cancellation and Abort Race handling. Step 1: Append 'abortRequested' fact to durable JSONL WAL on disk. Step 2: Propagate AbortSignal to active workers (Model API, Child Process, Compaction). Step 3: Reconcile synthetic entries (mark tool as interrupted). Step 4: Finalize operation as 'aborted'. High-contrast modern vector art on white background."
 [IMAGE_PROMPT_END] -->
+<figure class="diagram-embed">
+    <img src="<!-- ASSET:07-abort-race.png -->" alt="Abort 循序寫入與 Phase 分流及 Race 仲裁架構圖" loading="lazy" />
+    <figcaption>圖 7.1：Abort 循序寫入與 Phase 分流——先記錄中斷意圖再發送信號，精確仲裁並行競爭。</figcaption>
+</figure>
 
 <pre data-lang="text"><code>1. 持久化中斷意圖 ──→ commit(abortRequested) 落盤
                            ↓
@@ -79,6 +83,10 @@
 【AI 繪圖/SVG Prompt】：
 "Two-track technical partitioning diagram for LLM context compaction. Top track labeled 'Track 1: Active-Context Cut (Model Visibility)' showing messages 1 to N-6 summarized into a single 'Summary Block' followed by 'Retained Tail N-5..N'. Bottom track labeled 'Track 2: Durable Source Partition (Audit & Recovery)' showing exact UUID lists and sourceDigest. High-contrast engineering textbook style."
 [IMAGE_PROMPT_END] -->
+<figure class="diagram-embed">
+    <img src="<!-- ASSET:07-two-cut-compaction.png -->" alt="歷史壓縮雙切點 (Two-Cut) 軌道示意圖" loading="lazy" />
+    <figcaption>圖 7.2：雙切點（Two-Cut）歷史壓縮——在縮減推論視窗的同時，保持審計日誌數位指紋完整不變。</figcaption>
+</figure>
 
 <figure class="data-anim" id="fig-07-compact-flow" aria-labelledby="fig-07-compact-flow-caption">
     <ol class="anim-track">

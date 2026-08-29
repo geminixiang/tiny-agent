@@ -22,6 +22,10 @@
 【AI 繪圖/SVG Prompt】：
 "Two-phase technical recovery architecture for AI agent runtime. Phase 1: Pure Reducer takes raw JSONL bytes and produces deterministic SessionState without any I/O. Phase 2: Pure Planner compares SessionState with current system configuration and outputs a strict RecoveryPlan (Retry, Replay, Blocked, or Terminate). Clean vector illustration, emerald green and dark slate accents on white."
 [IMAGE_PROMPT_END] -->
+<figure class="diagram-embed">
+    <img src="<!-- ASSET:06-recovery-architecture.png -->" alt="兩階段崩潰復原架構：Pure Reducer 重建狀態與 Pure Planner 決策" loading="lazy" />
+    <figcaption>圖 6.1：兩階段復原架構——Reducer 專注歷史重組（不碰 I/O），Planner 專注環境比對與決策規劃。</figcaption>
+</figure>
 
 <table>
     <thead>
@@ -50,6 +54,10 @@
 【AI 繪圖/SVG Prompt】：
 "Technical decision tree flowchart for AI agent crash recovery. Gate 1: Check AbortRequested flag. Gate 2: Verify Configuration & Environment identity hash. Gate 3: Check Tool Replay Policy. Four distinct outcome badges: Green for 'Retry Model Attempt' and 'Replay Safe Tool', Amber for 'Blocked (Human Intervention Required)', Red for 'Failed/Aborted Terminal State'. Clean sharp lines, high contrast."
 [IMAGE_PROMPT_END] -->
+<figure class="diagram-embed">
+    <img src="<!-- ASSET:06-recovery-tree.png -->" alt="崩潰復原四種結局決策樹流程圖" loading="lazy" />
+    <figcaption>圖 6.2：四種復原結局決策樹——透過三道嚴格安全閘門避免誤重試與副作用失控。</figcaption>
+</figure>
 
 <table>
     <thead>

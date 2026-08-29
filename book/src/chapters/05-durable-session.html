@@ -31,6 +31,10 @@
 【AI 繪圖/SVG Prompt】：
 "Sequence diagram for Write-Ahead Logging in an AI agent runtime. Three chronological steps: Step 1 (Write toolStarted Intent to JSONL WAL on disk). Step 2 (Execute Effect on Host OS / Shell). Step 3 (Write toolResult to JSONL on disk). Crash markers at each step showing deterministic recovery paths. High contrast, clean technical illustration, emerald green and slate accents on white."
 [IMAGE_PROMPT_END] -->
+<figure class="diagram-embed">
+    <img src="<!-- ASSET:05-intent-effect.png -->" alt="WAL 交易順序：先持久化 Intent 再發動 Effect 時序架構圖" loading="lazy" />
+    <figcaption>圖 5.1：Intent 必須早於 Effect——崩潰後的確定性來自嚴格的 Write-Ahead Logging 交易順序。</figcaption>
+</figure>
 
 <h2 id="promise">Durability 的精確承諾邊界</h2>
 <p>
@@ -108,6 +112,10 @@
 【AI 繪圖/SVG Prompt】：
 "Storage repair flowchart for append-only JSONL files. Top shows file stream on disk with valid lines ending in newline '\n' and an incomplete trailing byte fragment labeled 'Torn Tail'. A scan pointer finds 'Last LF (ASCII 10)', truncates the file, and feeds the clean prefix into a Pure Reducer. Clean technical aesthetic, emerald green and slate tones on pure white background."
 [IMAGE_PROMPT_END] -->
+<figure class="diagram-embed">
+    <img src="<!-- ASSET:05-torn-tail-repair.png -->" alt="Torn Tail 尾端截斷修復流程圖" loading="lazy" />
+    <figcaption>圖 5.2：Torn-Tail 容錯修復——自動偵測最後一個 LF 並丟棄殘缺位元組，確保狀態機基於乾淨歷史重建。</figcaption>
+</figure>
 
 <h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
 <p>
