@@ -1,5 +1,5 @@
 <p class="lead">
-    <strong>一句話掌握本章核心</strong>：取消（Cancellation）不是單純「把 Promise 拋棄」，而是必須遵循嚴格的 <strong>先記 Abort 意圖再發送中斷信號</strong> 順序；歷史壓縮（Compaction）則是一次具備 <strong>雙切點（Two-Cut）</strong> 的正規交易，在縮減模型 Active Context 的同時，完整保留磁碟 WAL 供審計與復原。
+    <strong>一句話掌握本章核心</strong>：取消（Cancellation）不是單純「把 Promise 拋棄」，而是必須遵循 <strong>先記 Abort 意圖再發送中斷信號</strong> 的順序；歷史壓縮（Compaction）則透過本文所稱的 <strong>雙切點（Two-Cut）</strong> 交易縮減 Active Context，同時保留原始 message facts 供復原與一致性稽核。
 </p>
 
 <h2 id="abort-order">中斷的正確順序：先持久化意圖，再發送信號</h2>
@@ -25,15 +25,16 @@
     <figcaption>圖 7.1：Abort 循序寫入與 Phase 分流——先記錄中斷意圖再發送信號，精確仲裁並行競爭。</figcaption>
 </figure>
 
-<pre data-lang="text"><code>1. 持久化中斷意圖 ──→ commit(abortRequested) 落盤
+<pre data-lang="text"><code># 概念偽碼；TypeScript 實際介面名稱是 session.append(...)
+1. 持久化中斷意圖 ──→ append(abortRequested) 完成
                            ↓
 2. 發送中斷信號   ──→ 向當前 Model API / Bash Child Process 傳遞 AbortSignal
                            ↓
 3. 補齊結構化狀態 ──→ 將未完成的 Tool 標記為 interrupted，保持 Transcript 合法
                            ↓
-4. 寫入終局記錄   ──→ commit(operationFinished: aborted)
+4. 寫入終局記錄   ──→ append(operationFinished: aborted)
                            ↓
-5. 釋放系統資源   ──→ 關閉檔案描述子、終止背景 Process Tree</code></pre>
+5. 釋放本次資源   ──→ 關閉 Session/連線；已完成 bg start 的程序需另行 bg stop 或由部署 supervisor 清理</code></pre>
 
 <h2 id="phase-routing">Cancellation 依 Phase 精準分流</h2>
 <table>
@@ -41,15 +42,15 @@
         <tr><th>當前運行階段 (Phase)</th><th>具體中斷動作 (Signal Action)</th><th>Durable WAL 狀態修復 (Reconciliation)</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>Model Phase</strong></td><td>中斷 HTTP 網路連線，終止串流接收</td><td>將未結算的 Attempt 標記為 <code>stepFailed(aborted)</code></td></tr>
-        <tr><td><strong>Tool Phase</strong></td><td>向子程序發送 <code>SIGTERM/SIGKILL</code> 終止 Process Tree</td><td>已啟動的 Tool 補寫 <code>interrupted</code>；未啟動的補寫 <code>aborted</code></td></tr>
+        <tr><td><strong>Model Phase</strong></td><td>透過 <code>AbortSignal</code> 取消進行中的 Provider HTTP request</td><td>將未結算的 Attempt 標記為 <code>stepFailed(aborted)</code></td></tr>
+        <tr><td><strong>Tool Phase</strong></td><td>將 <code>AbortSignal</code> 傳給當前 Tool。foreground <code>bash</code> 交由 Node child-process API 中斷；本路徑沒有通用的 TERM→grace→KILL process-tree supervisor。<code>bg stop</code> 是另一條具兩階段 signal 的管理路徑。</td><td>已啟動的 Tool 補寫 <code>interrupted</code>；同一 assistant response 中尚未啟動的 calls 補寫 <code>aborted</code></td></tr>
         <tr><td><strong>Compaction Phase</strong></td><td>中斷摘要生成請求</td><td>關閉當前 Compaction Attempt，結束該 Operation</td></tr>
     </tbody>
 </table>
 
 <h2 id="race">Abort Race 競爭條件的裁決鐵律</h2>
 <p>
-    當「使用者按下中斷」與「模型/工具成功回傳」在同一毫秒發生時，系統必須將其嚴格序列化為兩種確定性歷史：
+    當使用者中斷與模型/工具回傳互相競爭時，關鍵不是牆鐘上的「同一毫秒」，而是 durable append 與 serialized settlement 的先後：
 </p>
 
 <table>
@@ -57,14 +58,14 @@
         <tr><th>競爭勝出方</th><th>判決條件</th><th>最終歷史呈現</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>成功結算先落盤</strong></td><td><code>toolResult</code> 或 <code>assistantMessage</code> 已成功寫入 WAL</td><td>Abort 操作判定該步驟已完成，<strong>不改寫已成功的結果</strong>，正常推進下一步。</td></tr>
+        <tr><td><strong>成功結算先完成，active 已解除</strong></td><td>結果已 append，且該 active operation 已由 settlement 清除</td><td>後到的 Abort 找不到 active operation，不改寫既有結果；Runtime 可依既有狀態繼續。</td></tr>
         <tr><td><strong><code>abortRequested</code> 先落盤</strong></td><td>中斷意圖已成功寫入 WAL</td><td><strong>遲到的成功回應一律作廢丟棄</strong>，該操作嚴格記錄為 <code>aborted</code>。</td></tr>
     </tbody>
 </table>
 
 <h2 id="compaction">Compaction 歷史壓縮：雙切點（Two-Cut）架構</h2>
 <p>
-    <strong>重要觀念</strong>：Compaction 絕非從磁碟中「刪除」舊資料！它是建立一個新的摘要節點（Checkpoint），在縮減 Active Context 的同時，將所有歷史原始事實完整保存在 Append-only WAL 中。
+    <strong>重要觀念</strong>：目前的 Compaction 不會從 Session JSONL 中刪除舊 message facts；它建立新的摘要節點（Checkpoint）來縮減 Active Context。這是現行格式行為，不代表跨備份、retention policy 或儲存媒體的「永存」承諾。
 </p>
 
 <!-- [IMAGE_PROMPT_START]
@@ -85,7 +86,7 @@
 [IMAGE_PROMPT_END] -->
 <figure class="diagram-embed">
     <img src="<!-- ASSET:07-two-cut-compaction.png -->" alt="歷史壓縮雙切點 (Two-Cut) 軌道示意圖" loading="lazy" />
-    <figcaption>圖 7.2：雙切點（Two-Cut）歷史壓縮——在縮減推論視窗的同時，保持審計日誌數位指紋完整不變。</figcaption>
+    <figcaption>圖 7.2：本文所稱的雙切點（Two-Cut）歷史壓縮——縮減推論視窗，並以來源 ID partition 與 digest 檢查內部一致性。</figcaption>
 </figure>
 
 <figure class="data-anim" id="fig-07-compact-flow" aria-labelledby="fig-07-compact-flow-caption">
@@ -116,7 +117,7 @@
         </li>
     </ol>
     <figcaption id="fig-07-compact-flow-caption">
-        動圖 4：一次 <code>/compact</code> 的資料流。淡出的標籤僅是移出推論視窗，原始紀錄永存於磁碟日誌中。
+        動圖 4：一次 <code>/compact</code> 的資料流。淡出的標籤僅移出 Active Context；在目前未執行 retention/deletion 的 Session 檔中，原始 facts 仍保留。
     </figcaption>
 </figure>
 
@@ -127,7 +128,7 @@
     </thead>
     <tbody>
         <tr><td><strong>Track 1: Active-Context Cut</strong></td><td><strong>LLM 大腦（推論視窗）</strong></td><td>保留最近至少 6 則訊息，並自動向前尋找 <code>user</code> 邊界（避免拆散單次完整問答）。前次產生的舊 Summary 會參與本次新摘要的計算。</td></tr>
-        <tr><td><strong>Track 2: Durable Source Partition</strong></td><td><strong>審計人員與 Crash Recovery</strong></td><td>嚴格記錄被壓縮的所有 <code>compactedEntryIds</code>、保留的 <code>retainedEntryIds</code>，並計算 <code>sourceDigest</code> 數位指紋，確保歷史不可篡改。</td></tr>
+        <tr><td><strong>Track 2: Durable Source Partition</strong></td><td><strong>一致性稽核與 Crash Recovery</strong></td><td>記錄 <code>compactedEntryIds</code>、<code>retainedEntryIds</code> 與 <code>sourceDigest</code>。Reducer 可偵測內容、順序或 partition 未同步更新；但未加密 SHA-256 不是 MAC/signature，能寫檔的攻擊者仍可重算，因此不構成 tamper-proof audit log。</td></tr>
     </tbody>
 </table>
 
@@ -145,11 +146,12 @@ cd ..
 grep -R 'abortRequested\|compactionStarted\|sourceDigest' schemas/session/fixtures | head -20</code></pre>
 
 <p class="bridge">
-    至此，我們已經構建出一個在錯誤、崩潰、中斷與無限上下文下均能穩定運行的 Agent 核心。但我們該如何建立<strong>自動化測試體系</strong>？如何監控<strong>生產環境指標</strong>？又該如何劃定 <strong>MCP 與多租戶的最高安全防線</strong>？最後一章我們將全面走向 <strong>Production 實戰</strong>。
+    至此，我們已經構建出一個能在已定義的錯誤、崩潰與中斷情境下復原，並透過有損摘要控制 Active Context 成長的 Agent 核心。但我們該如何建立<strong>自動化測試體系</strong>？如何監控<strong>生產環境指標</strong>？又該如何劃定 <strong>MCP 與多租戶的最高安全防線</strong>？最後一章我們將全面走向 <strong>Production 實戰</strong>。
 </p>
 
 <aside class="note">
     <strong>閱讀原始碼</strong>　
     <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L942">TypeScript Durable <code>compact()</code> 實作</a>、
-    <a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/compaction-comparison.md">主流 Agent 壓縮機制深度對比</a>。
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/compaction-comparison.md">主流 Agent 壓縮機制深度對比</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/multi-tenant-threat-model.md#5-tenant-state-and-audit-store">多租戶 Threat Model：JSONL 不是合規 Audit Proof</a>。
 </aside>

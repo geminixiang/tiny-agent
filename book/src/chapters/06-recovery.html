@@ -1,10 +1,10 @@
 <p class="lead">
-    <strong>一句話掌握本章核心</strong>：崩潰重啟後最危險的直覺，就是「把上次沒做完的指令再跑一次」。tiny-agent 將復原邏輯嚴格拆分為兩個 <strong>Pure Functions（純函式）</strong>：第一步只讀取 WAL 記錄<strong>還原狀態（Reducer）</strong>；第二步比對當前環境與設定<strong>決定決策（Planner）</strong>。
+    <strong>一句話掌握本章核心</strong>：崩潰重啟後最危險的直覺，就是「把上次沒做完的指令再跑一次」。tiny-agent 將復原判斷拆成兩個 <strong>Pure Functions（純函式）</strong>：第一步由 WAL bytes<strong>還原狀態（Reducer）</strong>；第二步比對當前環境與設定，產生<strong>復原計畫（Planner）</strong>；真正的 I/O 留給外層 Runtime 執行。
 </p>
 
-<h2 id="two-functions">兩個完全隔離的 Pure Functions</h2>
+<h2 id="two-functions">兩個不執行外部 Effect 的 Pure Functions</h2>
 <p>
-    在系統架構中，將狀態計算與外部 I/O 徹底分離是保證可預測性與可測試性的黃金法則：
+    將狀態計算與外部 I/O 分離，能讓復原決策更容易重播與測試；可預測性仍取決於嚴格解析、不變量與外層 executor 是否正確遵守計畫：
 </p>
 
 <pre data-lang="text"><code>1. Reducer（純狀態重組）: reduceSession(wal_bytes) ──────────→ SessionState
@@ -17,10 +17,10 @@
 【視覺元素】：
   1. 階段一：JSONL WAL Bytes $\to$ [ Pure Reducer ] $\to$ SessionState (Transcript, ActiveContext, Usage, Pending Operation)。
   2. 階段二：SessionState + Current System Config $\to$ [ Pure Planner ]。
-  3. 產出決策清單：Retry / Replay / Blocked / Terminate，完全不碰外部 I/O。
+  3. 產出實際 RecoveryPlan：finish / startStep / startTool / appendSynthetic / closeAttempt / blocked，完全不碰外部 I/O。
   4. 外層包裝：由 Agent Runtime 接收 RecoveryPlan 後，才發動具體網路呼叫或 Synthetic 寫入。
 【AI 繪圖/SVG Prompt】：
-"Two-phase technical recovery architecture for AI agent runtime. Phase 1: Pure Reducer takes raw JSONL bytes and produces deterministic SessionState without any I/O. Phase 2: Pure Planner compares SessionState with current system configuration and outputs a strict RecoveryPlan (Retry, Replay, Blocked, or Terminate). Clean vector illustration, emerald green and dark slate accents on white."
+"Two-phase technical recovery architecture for AI agent runtime. Phase 1: Pure Reducer takes raw JSONL bytes and produces deterministic SessionState without any I/O. Phase 2: Pure Planner compares SessionState with current system configuration and outputs a discriminated RecoveryPlan such as startStep, startTool, appendSynthetic, finish, or blocked. Clean vector illustration, emerald green and dark slate accents on white."
 [IMAGE_PROMPT_END] -->
 <figure class="diagram-embed">
     <img src="<!-- ASSET:06-recovery-architecture.png -->" alt="兩階段崩潰復原架構：Pure Reducer 重建狀態與 Pure Planner 決策" loading="lazy" />
@@ -37,9 +37,9 @@
     </tbody>
 </table>
 
-<h2 id="retry-replay">四種復原結局：Retry、Replay、Blocked 與 Failed</h2>
+<h2 id="retry-replay">RecoveryPlan 與常見復原語意</h2>
 <p>
-    工程師最常犯的錯誤是混淆 <strong>Retry</strong> 與 <strong>Replay</strong>，或混淆 <strong>Blocked</strong> 與 <strong>Failed</strong>：
+    實際 <code>RecoveryPlan</code> 是 <code>finish | startStep | startTool | appendSynthetic | closeAttempt | blocked</code> 的 discriminated union。下表用較高階的語意解釋其中常見分支；它不是型別本身的完整列舉：
 </p>
 
 <!-- [IMAGE_PROMPT_START]
@@ -49,14 +49,14 @@
 【視覺元素】：
   1. 閘門 1 (最優先): 曾寫入 abortRequested? $\to$ 直接導向 Aborted 終局。
   2. 閘門 2: Model Attempt 檢查 $\to$ 比對 Config/Env Digest $\to$ 符合則 Retry (最多 2 次)，不符則 Blocked。
-  3. 閘門 3: Tool Intent 檢查 $\to$ 比對 Replay Key $\to$ Safe 則 Replay，Never 則補 Synthetic Interrupted。
-  4. 4 種結局以不同色彩高亮標籤呈現 (綠: 自動繼續, 橙: Blocked 人工介入, 紅: Failed/Aborted 終局)。
+  3. 閘門 3: Tool Intent 檢查 $\to$ 比對 declaration / definition / Replay Key $\to$ Safe 則 Replay，Never 則補 Synthetic Interrupted。
+  4. 以不同色彩呈現自動繼續、Synthetic reconciliation、Blocked 與 Completed/Failed/Aborted 終局。
 【AI 繪圖/SVG Prompt】：
-"Technical decision tree flowchart for AI agent crash recovery. Gate 1: Check AbortRequested flag. Gate 2: Verify Configuration & Environment identity hash. Gate 3: Check Tool Replay Policy. Four distinct outcome badges: Green for 'Retry Model Attempt' and 'Replay Safe Tool', Amber for 'Blocked (Human Intervention Required)', Red for 'Failed/Aborted Terminal State'. Clean sharp lines, high contrast."
+"Technical decision tree flowchart for AI agent crash recovery. Gate 1: Check AbortRequested flag. Gate 2: Verify Configuration digest and Environment identity. Gate 3: Check Tool definition and Replay Policy compatibility. Outcome badges include startStep, replay safe tool, append synthetic result, blocked, and completed/failed/aborted terminal states. Clean sharp lines, high contrast."
 [IMAGE_PROMPT_END] -->
 <figure class="diagram-embed">
-    <img src="<!-- ASSET:06-recovery-tree.png -->" alt="崩潰復原四種結局決策樹流程圖" loading="lazy" />
-    <figcaption>圖 6.2：四種復原結局決策樹——透過三道嚴格安全閘門避免誤重試與副作用失控。</figcaption>
+    <img src="<!-- ASSET:06-recovery-tree.png -->" alt="崩潰復原決策樹流程圖" loading="lazy" />
+    <figcaption>圖 6.2：復原決策樹——透過 abort、configuration/environment 與 replay compatibility 檢查，避免誤重試與副作用失控。</figcaption>
 </figure>
 
 <table>
@@ -64,27 +64,27 @@
         <tr><th>復原結局</th><th>精確定義與適用情境</th><th>處理方式與責任方</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>Retry</strong></td><td><strong>模型請求重試</strong>：前次推論時行程崩潰，且無外部副作用。</td><td>Runtime 自動將相同 Context 再次發送給 Provider（<strong>嚴格限制最多 Attempt 2</strong>，防無界計費）。</td></tr>
-        <tr><td><strong>Replay</strong></td><td><strong>安全工具重放</strong>：前次執行 <code>read</code> 等無副作用工具時中斷。</td><td>Runtime 自動重新執行該 Tool（<strong>僅限完全相符的 <code>builtin:read:v1</code></strong>）。</td></tr>
-        <tr><td><strong>Blocked</strong></td><td><strong>安全阻斷</strong>：偵測到 Model 定義、工作目錄或環境金鑰已被竄改。</td><td><strong>立即停止自動運行，不寫入終局，交由人工介入排查</strong>（安全防護機制）。</td></tr>
-        <tr><td><strong>Failed</strong></td><td><strong>明確失敗</strong>：前次運行已收到 Provider 5xx 或明確 <code>stepFailed</code> 記錄。</td><td>寫入 <code>Failed</code> 終局狀態，不再自動嘗試。</td></tr>
+        <tr><td><strong>Retry</strong></td><td><strong>模型請求重試</strong>：WAL 顯示前次 attempt 尚未結算。</td><td>以記錄的 context boundary 再發送一次請求；configuration 必須相符，且最多進入 Attempt 2。這不是 exactly-once，輸出、路由與費用仍可能不同。</td></tr>
+        <tr><td><strong>Replay</strong></td><td><strong>安全工具重放</strong>：已寫 <code>toolStarted</code>、結果未知，且 persisted/current replay declaration 與 implementation identity 相符。</td><td>目前內建工具僅真正的 <code>builtin:read:v1</code> 會標為 safe；重新讀取時檔案內容仍可能已改變。</td></tr>
+        <tr><td><strong>Blocked</strong></td><td><strong>相容性阻斷</strong>：configuration、environment 或 safe replay declaration 不一致。</td><td>停止自動 effect 並拋出 blocked error，不寫終局；但 <code>attempts_exhausted</code> 是例外：一般 run 由 executor 轉成 failed 終局，compaction 則維持 blocked。</td></tr>
+        <tr><td><strong>Finish / Synthetic</strong></td><td>已存在 <code>stepFailed</code>、正常/截斷/取消終局，或需要補 <code>interrupted</code>、<code>truncated</code> 等 synthetic result。</td><td>Planner 只描述下一步；<code>resumeSession()</code> 才 append facts、呼叫 model/tool 或完成 operation。</td></tr>
     </tbody>
 </table>
 
-<h2 id="configuration">三道嚴格的安全校驗閘門 (Safety Gates)</h2>
+<h2 id="configuration">三道 Identity / Compatibility 檢查</h2>
 <p>
-    在發動任何 Retry 或 Replay 之前，Planner 必須強制通過三道身分雜湊（Digest）檢查：
+    在發動 Retry 或 Replay 前，Planner 會比對三類 identity；它們用來判斷復原相容性，不是 MAC、signature 或防惡意改寫的 tamper proof：
 </p>
 
 <ol>
     <li><strong>Configuration Identity 閘門</strong>：<br>
-        比對 Model 名稱、System Prompt 雜湊、可用 Tool 清單與參數 Schema。若工程師在重啟前偷偷修改了 System Prompt，Planner 會判定為 <code>configuration_changed</code> 並<strong>拒絕重試</strong>。
+        比對 Model、System Prompt digest、排序後的 Tool definitions，以及 adapter/routing/output identities。正常升級 Model、Prompt 或 Tool Schema 也可能得到 <code>configuration_changed</code>；這代表不相容，不等同偵測到竄改。
     </li>
     <li><strong>Environment Identity 閘門</strong>：<br>
-        比對工作目錄的真實物理路徑（Canonical Realpath）。若 Session 檔案被移動到其他目錄，Planner 會判定為 <code>environment_changed</code> 並<strong>阻止副作用發動</strong>。
+        比對 header/tool intent 記錄的 environment identity 與復原時計算值。預設 identity 來自建立 Session 時 cwd 的 canonical realpath，也可由部署環境覆寫；不是以 JSONL 檔案本身的位置直接判定。
     </li>
     <li><strong>Replay Declaration 閘門</strong>：<br>
-        比對 Tool 的 <code>replayKey</code>。若自訂工具試圖覆寫內建工具名稱（如自製危險的 <code>read</code> 工具），系統會判定宣告不符並<strong>強制阻斷</strong>。
+        比對 persisted/current tool definition、replay declaration 與 <code>replayKey</code>。Runtime 同時拒絕同一工具清單中的 duplicate names，且只有內建 <code>readTool</code> 物件會被標為 safe；自訂同名 <code>read</code> 不會自動取得 safe replay。
     </li>
 </ol>
 
@@ -96,7 +96,7 @@
     <tbody>
         <tr><td>Run 已接受，尚未發起任何 Model Attempt</td><td>發起 <code>startAssistantAttempt(1)</code></td></tr>
         <tr><td>Attempt 1 處於 Open 狀態，未收到完整 Response</td><td>若 Config 一致則發起 Attempt 2；若不符則判定 <code>Blocked</code></td></tr>
-        <tr><td>Attempt 2 仍處於 Open 狀態</td><td>判定 <code>Blocked: attempts_exhausted</code>（防止重複扣款）</td></tr>
+        <tr><td>Attempt 2 仍處於 Open 狀態</td><td>Planner 回 <code>blocked: attempts_exhausted</code>；一般 run 的 executor 接著寫 failed 終局，compaction 則停止並回報 blocked。</td></tr>
         <tr><td>Provider 回傳 <code>length</code> 截斷且包含殘缺 Tool Calls</td><td>補寫 <code>truncated</code> synthetic results，<strong>絕不執行</strong></td></tr>
         <tr><td>內建 <code>read</code> 工具已記錄 <code>toolStarted</code>，缺少 Result</td><td>比對環境一致後發起 <code>Replay</code></td></tr>
         <tr><td>危險工具（<code>bash</code>/<code>write</code>/<code>edit</code>）記錄 <code>toolStarted</code>，缺少 Result</td><td>補寫 <code>interrupted</code> synthetic results，<strong>絕不重跑</strong></td></tr>
@@ -106,19 +106,19 @@
 
 <h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
 <p>
-    執行真實的 <code>kill -9</code> 崩潰復原測試，觀察系統如何在極端情境下安全復原：
+    先執行 deterministic planner fixtures，再明確啟用被標為 ignored 的 Rust <code>kill -9</code> 整合測試。後者依賴 Unix process/signal 語意，請在隔離工作目錄執行：
 </p>
 
-<pre data-lang="sh"><code># 1. 執行 TypeScript 的 Deterministic Fixtures 測試
+<pre data-lang="sh"><code># 1. 執行 TypeScript 的 planner metadata 與 recovery decision fixtures
 cd typescript
-node --import tsx --test --test-name-pattern="planner" tests/session-reducer.test.ts
+node --import tsx --test --test-name-pattern="planner fixture|session recovery plan" tests/session-reducer.test.ts
 
-# 2. 執行 Rust 版本的崩潰復原整合測試
+# 2. Rust fixtures 預設標為 ignored；明確、單執行緒啟用真實 fork/SIGKILL 測試
 cd ../rust
-cargo test --test crash_recovery</code></pre>
+cargo test --test crash_recovery -- --ignored --test-threads=1</code></pre>
 
 <p class="bridge">
-    透過 Reducer 與 Planner，系統具備了強大的崩潰復原與安全阻斷能力。然而，在長時間運行的任務中，使用者可能會隨時按下 <code>Ctrl+C</code> 要求<strong>取消任務（Cancellation）</strong>，或因為對話過長而需要進行<strong>歷史壓縮（Compaction）</strong>。下一章我們將深入探討 <strong>Abort Race 競爭條件與雙切點（Two-Cut）歷史壓縮</strong>。
+    透過 Reducer 與 Planner，系統能依已持久化的 prefix 做出範圍明確的崩潰復原與相容性阻斷決策。然而，在長時間運行的任務中，使用者可能會隨時按下 <code>Ctrl+C</code> 要求<strong>取消任務（Cancellation）</strong>，或因為對話過長而需要進行<strong>歷史壓縮（Compaction）</strong>。下一章我們將深入探討 <strong>Abort Race 競爭條件與雙切點（Two-Cut）歷史壓縮</strong>。
 </p>
 
 <aside class="note">

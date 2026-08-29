@@ -4,7 +4,7 @@
 
 <h2 id="mental-model">先有一張正確的系統圖</h2>
 <p>
-    大型語言模型（Large Language Model，LLM）在計算機科學中本質上是一個<strong>無狀態純函式</strong>：輸入一串 Token 序列，輸出下一個 Token 的條件機率分佈。
+    在固定模型權重與推論設定下，可將大型語言模型（Large Language Model，LLM）近似為一個<strong>不自行保存應用程式對話狀態的推論函式</strong>：輸入 Token 序列，計算下一個 Token 的條件機率分佈。這是方便設計 Runtime 的工程抽象；實際取樣回覆可能不同，而部分 Provider API 也能在伺服器端保存或串接對話狀態。
 </p>
 <p>
     產品中看似會聊天、能讀寫專案、能執行指令的「AI」，不是模型本身具備作業系統特權，而是外層的 <strong>Host Application</strong> 將模型、資料結構與系統呼叫串接而成的結果。
@@ -13,7 +13,7 @@
 <figure class="diagram-embed" id="fig-00-system-boundary" aria-labelledby="fig-00-system-boundary-caption">
     <img src="<!-- ASSET:00-system-boundary.png -->" alt="LLM Host Application 與作業系統邊界圖" loading="lazy" />
     <figcaption id="fig-00-system-boundary-caption">
-        圖 1：LLM 與 Host Application 的系統邊界——模型本質無狀態且受紅線隔離，所有作業系統副作用均由 Host 驗證後代為執行。
+        圖 1：LLM 與 Host Application 的系統邊界——在 tiny-agent 採用的 Chat Completions 架構中，作業系統副作用均由 Host 依已啟用工具與 Runtime Guard 代為執行。
     </figcaption>
 </figure>
 
@@ -25,10 +25,10 @@ Host Application
   ├─ 驗證並執行 Model 請求的 Tool（發動 System Effects）
   └─ 保存 Transcript / Session（持久化狀態）
   ↓
-Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Call 提議</code></pre>
+Model：根據本次有效 Context 計算下一個回覆或 Tool Call 提議</code></pre>
 
 <p>
-    這張架構圖最核心的邊界是：<strong>Model 永遠只看得到本次 Request 中明確送入的資料</strong>。它看不到你的檔案系統、資料庫、環境變數或上一次 API 連線，除非 Host 明確把相關資料送入，或提供對應的 Tool 讓它主動發起請求。
+    對 tiny-agent 目前使用的 OpenRouter Chat Completions 配接器而言，模型可用的資料來自本次 Request 中的 Messages、Tool Definitions 與其他明確輸入；未送入的檔案系統、資料庫或環境變數不會自動出現在 Context。這不是所有 API 的通則：例如 OpenAI Responses API 可用 <code>previous_response_id</code> 串接由 Provider 管理的對話狀態，詳見 <a href="https://platform.openai.com/docs/guides/conversation-state">OpenAI Conversation State</a>。
 </p>
 
 <aside class="note">
@@ -55,13 +55,13 @@ Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Ca
 
 <ul>
     <li><strong>英文單字</strong>：常見單字通常是一個 Token（如 <code>apple</code>），罕見字或複合詞會被拆解為多個 Subwords。</li>
-    <li><strong>中文字詞</strong>：不保證「一字一 Token」；依據不同 Tokenizer 辭典，一個繁體中文字可能佔用 1 至 3 個 Tokens。</li>
-    <li><strong>非文字資料</strong>：程式碼縮排、JSON 標點符號、大型 Log 輸出、Base64 編碼字串都會劇烈消耗 Token。</li>
-    <li><strong>資源限制</strong>：Token 數量直接決定了 Context Window 容量上限、網路傳輸延遲與 API 帳單花費。</li>
+    <li><strong>中文字詞</strong>：不保證「一字一 Token」；實際切分與數量取決於模型使用的 Tokenizer。</li>
+    <li><strong>非文字資料</strong>：程式碼縮排、JSON 標點符號、大型 Log 與 Base64 字串通常也會占用可觀 Token，程度仍依 Tokenizer 與資料內容而定。</li>
+    <li><strong>資源限制</strong>：Token 數量會影響 Context Window 用量、傳輸與推論延遲、以及依 Token 計費的 API 成本；排隊、模型、硬體與快取也會影響延遲。</li>
 </ul>
 
 <aside class="note">
-    <strong>Token Budget 餘裕原則</strong>　若 Provider 宣稱 Context Window 為 128k Tokens，絕不能把 128k 全塞滿 Prompt。必須扣除模型輸出預留空間（如 4k~8k）、Tool Schema 定義以及 Provider 內部保留緩衝區。
+    <strong>Token Budget 餘裕原則</strong>　若模型的 Context Window 為 128k Tokens，輸入不能不加區分地塞滿 128k。應依該模型與 Endpoint 的文件，為最大輸出（部分模型另含 Reasoning Tokens）預留空間，並計入 Tool Schemas 與其他 Request 內容；預留量是應用程式策略，不存在跨 Provider 固定的 4k～8k 通則。
 </aside>
 
 <h2 id="generation">模型如何產生答案</h2>
@@ -96,7 +96,7 @@ Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Ca
         <tr><td><code>system</code> / <code>developer</code></td><td>設定 Agent 核心身分、行為規範、工具使用守則</td><td>受信任的 Host Application</td></tr>
         <tr><td><code>user</code></td><td>使用者輸入的指令、問題或外部事件</td><td>外部使用者（不受信任輸入）</td></tr>
         <tr><td><code>assistant</code></td><td>模型先前的推論回應或發起的 Tool Call 請求</td><td>LLM 生成輸出（待驗證）</td></tr>
-        <tr><td><code>tool</code></td><td>對應 Tool Call 執行完畢後的真實返回值</td><td>Host Tool Adapter 產生的結構化結果</td></tr>
+        <tr><td><code>tool</code></td><td>對應 Tool Call 執行後的觀測結果或錯誤文字</td><td>Host Tool Adapter 產生；內容仍可能來自不受信任的檔案、程序或遠端服務</td></tr>
     </tbody>
 </table>
 
@@ -106,7 +106,7 @@ Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Ca
 <ul>
     <li><strong>Prompt</strong>：指送入模型的所有輸入集合（包含 Instructions、對話歷史與 Tool 定義）。</li>
     <li><strong>Transcript</strong>：在記憶體或硬碟中，依照嚴格時序 append-only 累積的 Message 歷史陣列。</li>
-    <li><strong>Role Invariant</strong>：Host 必須保證 Message 序列合法。例如：發出 <code>tool_call</code> 的 <code>assistant</code> 訊息後，緊接著必須是攜帶相同 <code>tool_call_id</code> 的 <code>tool</code> 訊息，不可隨意偽造或顛倒順序。</li>
+    <li><strong>Role Invariant</strong>：Host 必須維持 Message 序列合法。例如：Assistant 一輪發出的每個 Tool Call，都必須有相同 <code>tool_call_id</code> 的 Tool Result；完成這組 Calls 前不可插入無關的新對話。</li>
 </ul>
 
 <h2 id="context">Context 到底是什麼</h2>
@@ -144,7 +144,7 @@ Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Ca
 
 <h2 id="context-window">Context Window 與 Token Budget</h2>
 <p>
-    <strong>Context Window</strong> 是模型單次運算能容納的 Token 物理上限。其運算資源分配可簡化為以下約束：
+    <strong>Context Window</strong> 是模型單次 Request 能處理的 Token 上限。OpenAI 與 Anthropic 的官方文件均說明，輸入、輸出，以及適用時的 Reasoning Tokens、Tool Definitions 與 Tool Results 都可能計入此上限。其分配可簡化為以下約束：
 </p>
 
 <pre data-lang="text"><code>System Instructions + Conversation Messages + Tool Definitions + Retrieved Docs + Max Output Tokens ≤ Context Window Limit</code></pre>
@@ -167,20 +167,24 @@ Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Ca
 
 <h2 id="tools">Tool Call：模型提議，Host 執行</h2>
 <p>
-    <strong>重要原則</strong>：Tool Call 是受限的結構化輸出（Constrained Structured Output）。模型<strong>從未獲得作業系統執行權限</strong>，它僅僅是輸出了「建議呼叫某函式」的 JSON 規格，真正的副作用全由 Host 掌控。
+    <strong>重要原則</strong>：Tool Call 是結構化的工具呼叫提議。只有在 Provider 與模型支援且啟用 Strict Mode 時，才可期待參數可靠遵循 Schema；tiny-agent 目前的 Chat Completions Tool Definitions 未啟用 <code>strict: true</code>，因此 Host 仍須解析並驗證所有參數。模型<strong>沒有直接取得作業系統執行權限</strong>，真正的副作用由 Host 發動。參見 <a href="https://platform.openai.com/docs/guides/function-calling#strict-mode">OpenAI Function Calling：Strict Mode</a>。
 </p>
 
 <pre data-lang="text"><code>1. Host 送入定義  ───→  提供 read(path: string) 的 JSON Schema
                              ↓
 2. Model 發起提議  ───→  回傳結構化 JSON：{ name: "read", arguments: { path: "main.go" } }
                              ↓
-3. Host 驗證授權  ───→  執行 Runtime Validation（檢查路徑合法性、安全邊界）
+3. Host 驗證派發  ───→  檢查 Plugin Allowlist、參數為 JSON Object 與 Built-in 欄位型別
                              ↓
 4. Host 發動 Effect ──→  呼叫 OS System Call 讀取檔案
                              ↓
 5. Host 寫回結果  ───→  以 role: "tool" 訊息將檔案內容 Append 回 Transcript
                              ↓
 6. Model 下次可見  ───→  模型在下一個 Request 才能根據內容進行推理</code></pre>
+
+<aside class="note">
+    <strong>tiny-agent 的實際安全邊界</strong>　CLI 只限制本次啟用哪些 Plugin，Built-in Tools 也會驗證參數型別；但 File Tools 接受 Working Directory 外的絕對路徑與 Symlink，<code>bash</code> 也不是 OS Sandbox。若處理敵對程式碼或多租戶工作，必須由部署層另建 Container、VM、gVisor 或其他 Execution Capsule。
+</aside>
 
 <h2 id="state">狀態解構：Model、Session 與 Memory</h2>
 <p>
@@ -193,10 +197,10 @@ Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Ca
     </thead>
     <tbody>
         <tr><td><strong>Model Weights</strong></td><td>神經網路訓練權重</td><td>GPU VRAM / Provider 伺服器</td><td>長久固定，推論時不改變</td></tr>
-        <tr><td><strong>Active Context</strong></td><td>當前單次推論的 Token 序列</td><td>Inference Runtime 暫存區</td><td>單次 API Request 結束即釋放</td></tr>
-        <tr><td><strong>Transcript</strong></td><td>結構化的歷史 Message 串列</td><td>Host Process Heap Memory</td><td>隨著 Agent Process 結束而消失</td></tr>
+        <tr><td><strong>Active Context</strong></td><td>當前單次推論可引用的 Token 集合</td><td>Inference Runtime；Provider 可能另有不受應用程式控制的快取或對話狀態</td><td>應用程式不可假設下次 Request 能直接取用，須依 Endpoint 的狀態契約</td></tr>
+        <tr><td><strong>In-memory Transcript View</strong></td><td>Runtime 當下使用的結構化 Message 串列</td><td>Host Process Heap Memory</td><td>Process 結束即消失，但可由 Durable Session 重建</td></tr>
         <tr><td><strong>Durable Session</strong></td><td>支援 Crash Recovery 的交易記錄</td><td>本機磁碟（JSONL WAL 檔案）</td><td>持久儲存，支援跨 Process 復原</td></tr>
-        <tr><td><strong>Memory Service</strong></td><td>跨任務的長期事實或偏好索引</td><td>向量資料庫 (Vector DB) / SQLite</td><td>跨多個 Session 與專案長期持久</td></tr>
+        <tr><td><strong>Memory Service</strong></td><td>跨任務的長期事實或偏好索引</td><td>例如關聯式、文件、向量或 Key-Value Store，也可由檔案或 Provider Service 實作</td><td>依產品政策跨 Session 或專案保存</td></tr>
     </tbody>
 </table>
 
@@ -208,9 +212,9 @@ Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Ca
     <tbody>
         <tr><td>❌ 「模型知道專案裡的所有檔案」</td><td>✅ 模型只知道本次 Request 送進去的檔案，其餘必須透過 Tool 讀取。</td></tr>
         <tr><td>❌ 「UI 畫面上看得到的訊息，模型都看得到」</td><td>✅ UI 呈現的是歷史儲存，送入模型前可能已經過裁切、篩選或摘要。</td></tr>
-        <tr><td>❌ 「有了 JSON Schema 就能保證安全」</td><td>✅ Schema 只負責格式校驗，阻擋惡意路徑穿越或危險指令必須靠 Host Runtime Guard。</td></tr>
+        <tr><td>❌ 「有了 JSON Schema 就能保證安全」</td><td>✅ Schema 或 Strict Mode 只處理結構契約；權限、路徑、Shell 與網路政策必須由 Host / Deployment Guard 負責。tiny-agent 目前不做 CWD Containment。</td></tr>
         <tr><td>❌ 「Prompt Caching 能擴大 Context 容量」</td><td>✅ 快取只降低重複 Prefix 的運算時間與計費，無法突破 Context Window 物理上限。</td></tr>
-        <tr><td>❌ 「模型說它已經修改好檔案，代表檔案已修改」</td><td>✅ 模型的文字宣稱不可作為依據，必須以 Host 執行 Tool 的返回結果為唯一憑證。</td></tr>
+        <tr><td>❌ 「模型說它已經修改好檔案，代表檔案已修改」</td><td>✅ 應核對 Host 實際派發的 Tool、目標路徑、執行結果與後續讀取或測試；Tool Result 比模型自述更可稽核，但不是單獨且充分的真實性證明。</td></tr>
         <tr><td>❌ 「Process 崩潰重啟後，可以直接重放所有動作」</td><td>✅ 外部副作用（如寫檔、發 API）狀態未知，未經安全檢查重放會引發嚴重重複副作用。</td></tr>
     </tbody>
 </table>
@@ -229,10 +233,17 @@ Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Ca
     1. 否，模型不可見。
     2. 不會，仍佔用 Window 空間。
     3. 不可信任，必須做 Runtime Validation 防禦注入與越權。
-    4. Transcript 存在 Process 記憶體；Active Context 是本次推論選入的子集；Durable Session 則是持久化於磁碟的 WAL 交易記錄。
-    5. 必須以 Bash Tool 實際返回的 Exit Status (code 0) 與 stdout/stderr 為唯一客觀證據。
+    4. In-memory Transcript View 存在 Process 記憶體；Active Context 是本次推論選入的內容；Durable Session 則以磁碟 JSONL Facts 支援跨 Process 重建。
+    5. 應檢查實際執行的命令、Exit Status、stdout/stderr、測試選取範圍與必要的獨立驗證；Exit Code 0 只表示該命令依自身契約成功退出。
+</aside>
+
+<aside class="note">
+    <strong>官方延伸閱讀</strong>　
+    <a href="https://platform.openai.com/docs/guides/conversation-state#managing-the-context-window">OpenAI：Managing the Context Window</a>、
+    <a href="https://docs.anthropic.com/en/docs/build-with-claude/context-windows">Anthropic：Context Windows</a>、
+    <a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching">Anthropic：Prompt Caching</a>。快取 Token 仍計入 Context Window，不會釋放容量。
 </aside>
 
 <p class="bridge">
-    釐清了基礎概念後，我們知道：Model 是無狀態運算大腦；Host 負責掌控 Transcript、執行 Tool 並產生副作用；Session 負責持久化狀態。下一章我們將這一切簡化為一個<strong>不可再刪的 Agent 最小閉環</strong>。
+    釐清了基礎概念後，我們知道：在本專案的工程抽象中，Model 負責推論；Host 掌控 Transcript、執行 Tool 並產生副作用；Session 負責持久化狀態。下一章會以教學用的 <strong>Canonical Agent Loop</strong> 串起這些角色。
 </p>

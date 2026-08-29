@@ -4,7 +4,7 @@
 
 <h2 id="interface">小而深的 Tool 介面設計</h2>
 <p>
-    在良好設計的 Agent 架構中，核心 Runtime 完全不需要知道某個 Tool 背後是本機讀檔、查詢資料庫還是遠端 MCP。它只需要一個極小且深（Deep Interface）的契約：
+    在 TypeScript reference implementation 中，核心 Runtime 不需要知道某個 Tool 背後是本機讀檔、查詢資料庫還是遠端 MCP；它只依賴一個極小且深（Deep Interface）的契約：
 </p>
 
 <pre data-lang="ts"><code>export type Tool = {
@@ -12,8 +12,9 @@
     description: string;                                         // 語意描述（引導模型何時呼叫）
     parameters: Record&lt;string, unknown&gt;;                         // JSON Schema 格式參數規範
     replay?: "safe" | "never";                                   // 崩潰復原重放策略
-    replayKey?: string;                                          // 精確版本金鑰（防止自訂同名覆蓋）
-    execute(args: ToolArgs, signal?: AbortSignal): Promise&lt;string&gt;; // 具體副作用執行函式
+    replayKey?: string;                                          // 復原時比對的實作版本金鑰
+    definitionIdentity?: string;                                 // 遠端 adapter 定義身分
+    execute(args: ToolArgs, signal?: AbortSignal): Promise&lt;string&gt;; // 具體執行函式
 };</code></pre>
 
 <!-- [IMAGE_PROMPT_START]
@@ -35,7 +36,7 @@
 
 <h2 id="locality">高內聚原則：Schema 與 Execute 必須合一</h2>
 <p>
-    <strong>反模式警示</strong>：切忌將工具的 JSON Schema 放一張全域清單，而在另一個地方用 <code>switch (call.name)</code> 進行派發。這種做法會導致型別檢查與業務邏輯分離，極易產生定義漂移。
+    <strong>TypeScript reference 的取捨</strong>：將 JSON Schema、replay 宣告與 <code>execute</code> 放在同一物件，可降低定義與實作漂移。Go、Python、Rust 的教學版為保持直接，仍有集中 definitions 與 dispatcher；若採此形式，就必須以 contract tests 持續核對 schema、派發與 runtime guard，而不能假設兩者自然同步。
 </p>
 
 <pre data-lang="ts"><code>// 推薦做法：將定義、守衛與實作高內聚封裝
@@ -57,8 +58,8 @@ const readTool: Tool = Object.freeze({
 });</code></pre>
 
 <aside class="note">
-    <strong>資工硬核設計思維：為什麼 File Tools 不做應用層 CWD 限制？</strong><br>
-    在使用者空間做字串檢查（如檢查路徑是否以 <code>/workspace</code> 開頭）存在經典的 <strong>TOCTOU (Time-of-Check to Time-of-Use) 競態條件</strong>與 Symlink 繞過漏洞，只會給人「已安全」的虛假安全感。真正的檔案與行程隔離必須交由外層 OS 級別的 <strong>Execution Capsule（如 Docker, gVisor, Linux Namespaces）</strong> 提供（詳見第 8 章）。
+    <strong>安全邊界：目前 File Tools 沒有 CWD containment</strong><br>
+    tiny-agent 的 <code>read</code>、<code>write</code>、<code>edit</code> 接受 cwd 外絕對路徑，也會跟隨 symlink；CLI 本身不建立 Docker、gVisor、namespace 或其他 OS sandbox。單純以字串前綴檢查 <code>/workspace</code> 確實會遭遇正規化、symlink 與 TOCTOU 問題，但這不代表應用程式永遠無法做安全解析：Linux <code>openat2()</code> 的 <code>RESOLVE_BENEATH</code>、<code>RESOLVE_IN_ROOT</code>、<code>RESOLVE_NO_SYMLINKS</code> 可提供 kernel-assisted 限制。敵對或多租戶工作仍應由外層 <strong>Execution Capsule</strong> 限定檔案系統、程序、資源與網路（詳見第 8 章）。
 </aside>
 
 <h2 id="validation">JSON Schema 不等於 Runtime Validation</h2>
@@ -73,9 +74,13 @@ const readTool: Tool = Object.freeze({
     <tbody>
         <tr><td><code>null</code> 或 <code>[]</code>（非物件）</td><td>解構時拋出 <code>TypeError: Cannot read property</code></td><td>進入派發前強制校驗 <code>typeof args === "object" && args !== null</code></td></tr>
         <tr><td>型別錯亂（如 <code>{"command": 42}</code>）</td><td>底層 OS 指令執行函式型別崩潰</td><td>在 Tool 內部進行精確型別 Assertion</td></tr>
-        <tr><td>字串錯誤訊息 <code>return "Error: file not found"</code></td><td>監控系統誤判為「成功執行」，無法追蹤失敗率</td><td><strong>一律以 <code>throw new Error()</code> 拋出例外</strong>，由 Runtime 統一轉換為結構化 Error Event</td></tr>
+        <tr><td>以成功回傳值承載失敗文字</td><td>若監控只看 Promise 是否 reject，可能把失敗記成成功</td><td>先定義清楚 adapter 契約。多數 builtin 參數／I/O 錯誤會 <code>throw</code>；但目前 <code>bash</code> 的 non-zero exit、timeout 與輸出上限會回傳文字，因此其 <code>tool.completed.ok</code> 只代表 adapter 已正常 settle，不等同 shell command exit 0</td></tr>
     </tbody>
 </table>
+
+<p>
+    三種邊界不可混為一談：provider 的 strict function calling（若啟用）約束模型產生的 arguments；tiny-agent builtin tools 另做逐欄 runtime guard；MCP adapter 目前只在 Host 端確認 arguments 是 object 並限制 schema 大小／深度，實際欄位驗證仍由遠端 MCP server 依其 <code>inputSchema</code> 負責。即使 provider 支援 strict mode，Host 與 Tool 邊界仍應把輸入視為不可信。
+</p>
 
 <h2 id="background-processes">背景行程管理：為什麼需要 <code>bg</code> 工具？</h2>
 <p>
@@ -88,8 +93,8 @@ const readTool: Tool = Object.freeze({
     </thead>
     <tbody>
         <tr><td><strong>執行語意</strong></td><td>同步等待命令結束，收集並回傳 stdout/stderr</td><td>非同步啟動行程，短暫確認存活後立即回傳 PID</td></tr>
-        <tr><td><strong>持久伺服器適用性</strong></td><td>❌ 嚴重阻斷 Agent Loop，超時後強制中斷</td><td>✅ 完美支援長時間運行的 Dev Server、Watcher</td></tr>
-        <tr><td><strong>生命週期控制</strong></td><td>指令結束即釋放，無法後續查看 Log</td><td>支援 <code>list</code>、<code>status</code>、<code>logs</code>、<code>stop</code> 完整管理</td></tr>
+        <tr><td><strong>持久伺服器適用性</strong></td><td>會等待命令結束，預設 120 秒 timeout，不適合直接承載長期服務</td><td>適合在目前支援的 POSIX 環境啟動 Dev Server、Watcher；實作依賴 <code>ps</code>、process group 與 Unix signals</td></tr>
+        <tr><td><strong>生命週期控制</strong></td><td>回傳當次 stdout/stderr；被截斷時另存完整輸出檔</td><td>支援 <code>list</code>、<code>status</code>、<code>logs</code>、<code>stop</code>；stop 先送 SIGTERM，等待後仍存活才送 SIGKILL</td></tr>
     </tbody>
 </table>
 
@@ -100,7 +105,7 @@ const readTool: Tool = Object.freeze({
 【視覺元素】：
   1. 上方：Action 狀態轉移（start → running → stop / crash → stale / cleanup）
   2. 下方：工作目錄檔案映射（.tiny-agent/bg/<id>.json 記錄 PID, 啟動時間, 指令；<id>.log 記錄 stdout/stderr）
-  3. 側邊標示：同一個 cwd 下的下一個 tiny-agent 行程如何透過 metadata 接管並清理遺留 server。
+  3. 側邊標示：同一個 cwd 下的下一個 tiny-agent 行程可透過 list/status/logs/stop 手動檢視與清理遺留 server；啟動時不會自動掃描接管。
 【AI 繪圖/SVG Prompt】：
 "System architecture diagram of background process manager (bg tool). Top shows process states: 'start' -> 'running' -> 'logs/status' -> 'stop'. Bottom shows local directory structure: '.tiny-agent/bg/<id>.json' (PID, start time, command) and '.tiny-agent/bg/<id>.log' (real-time stream). High contrast, tech textbook aesthetic, emerald green and slate grey accents."
 [IMAGE_PROMPT_END] -->
@@ -117,7 +122,7 @@ const readTool: Tool = Object.freeze({
 
 <aside class="note">
     <strong>Process Identity 與防誤殺設計</strong><br>
-    每個 <code>bg</code> 行程在 <code>.tiny-agent/bg/<id>.json</code> 中記錄 PID 與 <code>startedAt</code>。當 tiny-agent 行程異常結束重啟後，能透過掃描 metadata 與比對作業系統行程啟動時間（防止 OS PID 重複使用誤殺無關程式），安全地接管或清理孤兒伺服器。
+    每個 <code>bg</code> 行程在 <code>.tiny-agent/bg/&lt;id&gt;.json</code> 中記錄 PID、<code>startedAt</code> 與實際查得的 <code>processStartedAt</code>。後續的 list/status/stop 會把目前 OS 行程啟動時間與 <code>processStartedAt</code> 比對；不一致時標成 <code>stale</code> 且不送 signal，以降低 PID 重複使用造成的誤殺風險。這是防護性檢查，不是不可偽造的 process identity，也不會在 CLI 啟動時自動接管舊行程。
 </aside>
 
 <h2 id="mcp">MCP (Model Context Protocol) 的本質</h2>
@@ -143,19 +148,19 @@ Tool.execute()  ──(遠端呼叫)──→ MCP tools/call (Streamable HTTP)</
         <tr><th>Replay 宣告</th><th>適用工具</th><th>背後理論與原因</th></tr>
     </thead>
     <tbody>
-        <tr><td><code>safe</code></td><td><strong>內建 <code>read</code> 工具</strong>（精確版本 <code>builtin:read:v1</code>）</td><td>純讀取操作（Idempotent），無外部副作用，重跑不破壞系統狀態。</td></tr>
+        <tr><td><code>safe</code></td><td><strong>內建 <code>read</code> 工具</strong>（精確版本 <code>builtin:read:v1</code>）</td><td>專案策略允許在 implementation identity、replay key 與 environment identity 相符時重跑。它不會寫入目標檔，但檔案可能在兩次讀取間改變，因此不應稱為輸出固定的 pure function。</td></tr>
         <tr><td><code>never</code></td><td><code>write</code>, <code>edit</code>, <code>bash</code>, <code>bg</code>, <code>MCP</code></td><td>具備外部副作用。崩潰當下無法保證磁碟寫入或網路請求是否已發生，<strong>嚴禁盲目重放</strong>，避免重複發送請求或破壞原始碼。</td></tr>
     </tbody>
 </table>
 
 <h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
 <p>
-    執行跨語言的離線測試，觀察 Tool 派發、型別守衛與 Symlink 行為：
+    執行離線測試，觀察 TypeScript 的 Tool 注入、參數守衛、cwd 外／symlink 行為，以及 Go 的對應檔案工具 contract：
 </p>
 
 <pre data-lang="sh"><code># 1. 驗證 TypeScript 的 Tool 注入與路徑穿透特性
 cd typescript
-node --import tsx --test --test-name-pattern="injected tool|paths outside cwd" tests/index.test.ts
+node --import tsx --test --test-name-pattern="injected tool|validates tool argument objects|paths outside cwd" tests/index.test.ts
 
 # 2. 驗證 Go 版本的同等檔案工具行為
 cd ../go
@@ -166,7 +171,11 @@ go test ./cmd/tiny-go -run 'TestFilesystemToolsOperateOutsideCwdIncludingSymlink
 </p>
 
 <aside class="note">
-    <strong>閱讀原始碼</strong>　
-    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/tools.ts">TypeScript 內建工具與 Plugin 實作 <code>tools.ts</code></a>、
-    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/mcp.ts">MCP 配接器 <code>mcp.ts</code></a>。
+    <strong>原始碼與權威來源</strong>　
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/tools.ts">TypeScript 內建工具與 Plugin 實作</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/mcp.ts">MCP 配接器</a>、
+    <a href="https://modelcontextprotocol.io/specification/2025-06-18/server/tools">MCP Tools 規格（<code>tools/list</code> / <code>tools/call</code>）</a>、
+    <a href="https://platform.openai.com/docs/guides/function-calling#strict-mode">OpenAI Function Calling Strict Mode</a>、
+    <a href="https://man7.org/linux/man-pages/man2/openat2.2.html">Linux <code>openat2(2)</code> 路徑解析限制</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/multi-tenant-threat-model.md">tiny-agent 多租戶威脅模型</a>。
 </aside>

@@ -1,5 +1,5 @@
 <p class="lead">
-    <strong>一句話掌握本章核心</strong>：如果假設網路永遠正常、工具永遠成功、程序絕不崩潰，幾十行就能寫出 Agent；但生產環境的硬核挑戰在於<strong>崩潰之後的確定性</strong>。tiny-agent 採用資料庫級別的 WAL（Write-Ahead Logging）架構：<strong>先記意圖（Intent），再發動副作用（Effect）</strong>。
+    <strong>一句話掌握本章核心</strong>：如果假設網路永遠正常、工具永遠成功、程序絕不崩潰，幾十行就能寫出 Agent；但生產環境的硬核挑戰在於<strong>崩潰之後仍能辨認已知與未知</strong>。tiny-agent 採用 WAL（Write-Ahead Logging）啟發的 append-only 設計：<strong>先記意圖（Intent），再發動副作用（Effect）</strong>。
 </p>
 
 <h2 id="mental-model">經典問題：被 <code>kill -9</code> 強制關閉後，指令到底執行了沒？</h2>
@@ -12,8 +12,8 @@
         <tr><th>若採用錯誤的「先做再記」策略</th><th>崩潰重啟後的致命困境</th><th>系統被迫面臨的代價</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>執行完畢才寫磁碟</strong><br><code>execute() -&gt; commit()</code></td><td>磁碟中完全沒有這筆記錄，系統處於「完全失憶」狀態。</td><td><strong>猜錯代價巨大</strong>：若重新執行會造成重複部署；若以為沒事則遺漏關鍵變更。</td></tr>
-        <tr><td><strong>先寫意圖才發動副作用</strong><br><code>commit(toolStarted) -&gt; execute() -&gt; commit(toolResult)</code></td><td>磁碟明確記錄「我打算執行 <code>deploy.sh</code>」，但缺少結束記錄。</td><td><strong>確定的未知</strong>：系統明確知道「此操作中斷」，可依法則安全標記 <code>interrupted</code> 且絕不盲目重放。</td></tr>
+        <tr><td><strong>執行完畢才寫磁碟</strong><br><code>execute() -&gt; append()</code></td><td>磁碟中可能完全沒有這筆記錄，系統無法判斷 effect 是否已發生。</td><td><strong>猜錯代價巨大</strong>：若重新執行會造成重複部署；若以為沒事則遺漏關鍵變更。</td></tr>
+        <tr><td><strong>先寫意圖才發動副作用</strong><br><code>append(toolStarted) -&gt; execute() -&gt; append(toolResult)</code></td><td>磁碟明確記錄「我打算執行 <code>deploy.sh</code>」，但缺少結束記錄。</td><td><strong>確定的未知</strong>：復原規則會依狀態與 Replay Policy 決定下一步；尚未開始的 effect 可正常啟動，符合 identity/key 的 builtin read 可 replay，執行狀態不明且不可安全 replay 的 effect 才補 <code>interrupted</code>。</td></tr>
     </tbody>
 </table>
 
@@ -46,20 +46,20 @@
         <tr><th>承諾維度</th><th>是否保證</th><th>技術原理與限制</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>Process-Crash Durability</strong></td><td>✅ <strong>保證</strong></td><td>每一筆以 <code>\n</code>（LF）結尾的 JSONL 交易已交給 OS Page Cache。程式崩潰重啟時，自動丟棄末端殘缺的 <strong>Torn Tail</strong>，並從完整 Prefix 完美重建狀態。</td></tr>
+        <tr><td><strong>Process-Crash Recovery</strong></td><td>✅ <strong>設計支援</strong></td><td>在 OS 與儲存仍正常、已完成的 prefix 可讀取的前提下，程式崩潰重啟會丟棄末端殘缺的 <strong>Torn Tail</strong>，再由 reducer 從通過驗證的完整 prefix 重建狀態。這不是對 filesystem corruption、惡意改寫或硬體故障的保證。</td></tr>
         <tr><td><strong>Power-Loss Durability</strong></td><td>❌ <strong>不保證</strong></td><td>未在每行寫入時執行極度耗損效能的 <code>fsync()</code> / <code>fdatasync()</code>。若整台伺服器瞬間斷電或硬體故障，未刷入快閃記憶體的 Cache 可能遺失。</td></tr>
     </tbody>
 </table>
 
 <h2 id="framing">單一 JSONL 檔案的兩類核心紀錄</h2>
 <p>
-    Session 檔案由第一行的全域 Header 與後續的原子交易行（Transactions）組成：
+    Session 檔案由第一行的全域 Header 與後續的交易行（Transactions）組成。每行是 reducer 與 torn-tail 修復使用的 <strong>atomic recovery unit</strong>；這不表示任意 OS/filesystem 都保證單次 write 在硬體層永遠全有或全無：
 </p>
 
-<pre data-lang="json"><code>// Line 1: Header（不可變的全域設定與環境身分）
-{"kind":"header","version":2,"id":"019...","createdAt":1787371200000,"cwd":"/workspace","provider":"openrouter","model":"deepseek/deepseek-v4-flash-0731","environmentIdentity":"/workspace"}
+<pre data-lang="json"><code>// Line 1: Header（Session 建立時寫入的設定與環境身分）
+{"kind":"header","version":2,"id":"019...","createdAt":1787371200000,"cwd":"/workspace","provider":"openrouter","model":"&lt;provider-model-id&gt;","environmentIdentity":"/workspace"}
 
-// Line 2+: 原子交易行（可以是一筆 Fact，或是多筆綁定的 Fact Array）
+// Line 2+: recovery transaction line（可以是一筆 Fact，或是多筆綁定的 Fact Array）
 [
   {"kind":"entry","seq":1,"id":"019...","entry":{"type":"message","message":{"role":"user","content":"修復 Bug"}}},
   {"kind":"record","seq":2,"id":"019...","record":{"type":"runStarted","operationId":"...","operationKind":"run","inputEntryId":"..."}}
@@ -77,16 +77,16 @@
     <tbody>
         <tr><td><code>entry</code></td><td>User/Assistant 訊息、Tool 結果、Compaction 摘要</td><td>✅ <strong>會</strong>（依 Active Context 規則選入）</td><td>維持模型推論所需的上下文與語意歷史</td></tr>
         <tr><td><code>record</code></td><td><code>runStarted</code>, <code>stepAttempt</code>, <code>toolStarted</code>, <code>abortRequested</code></td><td>❌ <strong>不會</strong></td><td>供 Reducer 與 Planner 進行狀態轉移與崩潰復原</td></tr>
-        <tr><td><code>usage</code></td><td>每次物理 API 請求的 Token/Cache 消耗明細</td><td>❌ <strong>不會</strong></td><td>精確獨立的成本記帳本（Usage Ledger）</td></tr>
+        <tr><td><code>usage</code></td><td>每次物理 API 請求由 provider 回報並經 adapter 正規化的 Token/Cache 明細</td><td>❌ <strong>不會</strong></td><td>獨立的 Usage Ledger；精度與欄位完整性受 provider response 影響</td></tr>
     </tbody>
 </table>
 
 <h2 id="transaction-invariants">交易不變量 (Transaction Invariants)</h2>
 <ol>
     <li><strong>單調遞增 <code>seq</code></strong>：流水號從 1 開始，檔案內每一筆 Fact（包含 Array 內部）嚴格遞增 +1，絕不允許跳號或重複。</li>
-    <li><strong>嚴格 UUIDv7 關聯</strong>：所有記錄皆使用時序唯一的 UUIDv7，父子參照必須指向已存在且歸屬合法的 Fact。</li>
+    <li><strong>本機 UUIDv7 與外部 ID 分工</strong>：tiny-agent 配置的 Fact、Operation、Entry、Step 等 ID 使用 UUIDv7 並受引用不變量約束；provider 傳入的 <code>tool_call_id</code> 是外部 protocol ID，不要求是 UUID。</li>
     <li><strong>先持久化再更新記憶體（WAL 原則）</strong>：資料必須先以 LF 格式 Append 至磁碟，成功後才允許更新記憶體狀態機。</li>
-    <li><strong>Torn-Tail 容錯修復</strong>：最後一個 <code>\n</code>（LF）之後未完成的殘缺 Bytes 視為 Torn Tail，在 <code>load()</code> 時自動截斷修復；但如果某一行在 LF 之前就存在語法或欄位錯誤，則視為嚴重的 <strong>Corruption</strong>，系統選擇 Fail-closed 拒絕載入。</li>
+    <li><strong>Torn-Tail 容錯修復</strong>：最後一個 <code>\n</code>（LF）之後未完成的殘缺 Bytes 視為 Torn Tail，在開啟 Session 時自動截斷修復；但如果某一行在 LF 之前就存在語法或欄位錯誤，則視為嚴重的 <strong>Corruption</strong>，系統選擇 Fail-closed 拒絕載入。</li>
 </ol>
 
 <h2 id="store">深而小的 Storage 介面</h2>
@@ -94,10 +94,11 @@
     SessionStore 是標準的 <strong>Deep Module</strong>——以極簡的介面隱藏了極其複雜的交易流水號、ID 生成、隊列排程與尾端修復：
 </p>
 
-<pre data-lang="ts"><code>interface SessionStore {
-    commit(facts: NewFact[]): Promise&lt;CommittedFact[]&gt;; // 原子寫入多筆 Facts
-    load(): Promise&lt;SessionState&gt;;                     // 載入、修復 Torn Tail 並重建狀態
-    close(): Promise&lt;void&gt;;                            // 安全關閉檔案描述子
+<pre data-lang="ts"><code>// 教學化摘錄；實際 public method 名稱與核心語意如下
+interface SessionStore {
+    append(input: NewFact | NewFact[]): Promise&lt;CommittedFact[]&gt;; // 驗證後追加一個 recovery unit
+    load(): Promise&lt;SessionState&gt;;                                // 取得 reducer 投影的目前狀態
+    close(): Promise&lt;void&gt;;                                       // 關閉檔案描述子
 }</code></pre>
 
 <!-- [IMAGE_PROMPT_START]
@@ -119,7 +120,7 @@
 
 <h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
 <p>
-    親手製造一個帶有 Torn Tail 的損壞檔案，並觀察修復邏輯（不需消耗 API 額度）：
+    先用任意 JSONL 示範 LF framing，再執行真正的 SessionStore contract test（不需消耗 API 額度）。前兩步只展示「最後完整 LF prefix」概念；手工 header/fact 並不符合完整 session schema，不能當成合法 Session fixture：
 </p>
 
 <pre data-lang="sh"><code># 1. 手工建立帶有殘缺尾部的 JSONL 檔案
@@ -141,11 +142,15 @@ cd typescript
 node --import tsx --test --test-name-pattern="repairs a torn tail" tests/session.test.ts</code></pre>
 
 <p class="bridge">
-    透過 WAL 與 Append-only JSONL，我們確保了所有的 Intent 與 Effect 都有據可查。但是，當程序重啟並讀入整份 WAL 日誌後，<strong>我們該如何從數百筆時序事件中，精準計算出當前系統狀態並決定「下一步該做什麼」？</strong>下一章我們將深入探討 <strong>Pure Reducer 與 Planner 的復原狀態機</strong>。
+    透過 WAL 順序與 append-only JSONL，tiny-agent 為正常 runtime 寫入提供可追溯、可驗證內部一致性的 session history；但沒有 MAC、signature、trusted timestamp 或外部 anchor，因此它不是能抵抗有寫檔權限攻擊者的「不可竄改合規 audit log」。當程序重啟並讀入整份日誌後，<strong>我們該如何從數百筆時序事件中計算目前狀態並決定下一步？</strong>下一章將深入探討 <strong>Pure Reducer 與 Planner 的復原狀態機</strong>。
 </p>
 
 <aside class="note">
-    <strong>閱讀原始碼</strong>　
-    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session.ts">TypeScript Durable SessionStore 實作 <code>session.ts</code></a>、
-    <a href="https://github.com/geminixiang/tiny-agent/blob/main/schemas/session.schema.json">Session JSON Schema 規範</a>。
+    <strong>原始碼與權威來源</strong>　
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session.ts">TypeScript Durable SessionStore 實作</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/session-recovery.ts">Replay／Interrupted 復原規則</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/schemas/session.schema.json">Session JSON Schema 規範</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/docs/multi-tenant-threat-model.md">Audit store 的正式威脅邊界</a>、
+    <a href="https://www.rfc-editor.org/rfc/rfc9562.html#name-uuid-version-7">RFC 9562：UUID Version 7</a>、
+    <a href="https://nodejs.org/api/fs.html#filehandlesync">Node.js <code>filehandle.sync()</code> 文件</a>。
 </aside>

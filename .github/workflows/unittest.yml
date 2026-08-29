@@ -22,6 +22,7 @@ jobs:
       - run: npm ci --prefix typescript
       - run: npm --prefix typescript test
       - run: cd typescript && node --import tsx --test ../eval/run.test.ts
+      - run: npm --prefix book test
 
   python:
     name: Python

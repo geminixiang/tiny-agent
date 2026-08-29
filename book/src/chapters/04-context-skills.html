@@ -2,15 +2,15 @@
     <strong>一句話掌握本章核心</strong>：Context Engineering 不是「把所有資料都塞給模型」，而是建立<strong>結構化分層（Layering）</strong>與<strong>漸進式載入（Progressive Loading）</strong>機制：讓通用規則常駐、專案規範明確隔離、領域知識（Skills）僅在命中時動態載入。
 </p>
 
-<h2 id="layers">Context 的四個嚴格層級架構</h2>
+<h2 id="layers">Context 的四種組裝來源</h2>
 <p>
-    在組裝每次 API Request 時，tiny-agent 將輸入嚴格劃分為四個優先級層次：
+    在組裝每次 API Request 時，可把 tiny-agent 的輸入理解為四種來源。這是 Host 端的組裝模型，不是 provider 協定原生的四級權限：Project Rules 與 Skill Metadata 實際上都被串進同一則 <code>system</code> message，Conversation 則是後續 transcript。
 </p>
 
 <!-- [IMAGE_PROMPT_START]
 【圖片位置】：04-context-skills / Context 4 層金字塔與漸進載入圖
 【圖片形式】：分層金字塔與動態載入示意圖 (Pyramid Architecture & Progressive Loading Diagram)
-【核心概念】：Context 4 層劃分與 Skill 動態載入流程
+【核心概念】：Context 4 種來源與 Skill 動態載入流程
 【視覺元素】：
   1. 金字塔結構（由上至下）：
      - Layer 1 (頂層/常駐): System Prompt（核心身分、環境、Workflow）
@@ -24,7 +24,7 @@
 [IMAGE_PROMPT_END] -->
 <figure class="diagram-embed">
     <img src="<!-- ASSET:04-context-pyramid.png -->" alt="Context 四層金字塔與 Skill 漸進式按需載入架構圖" loading="lazy" />
-    <figcaption>圖 4.1：Context 四層金字塔與 Progressive Loading——通用規則常駐，領域知識按需讀取。</figcaption>
+    <figcaption>圖 4.1：Context 組裝來源與 Progressive Loading——圖中的層次是教學分類，不代表 provider 額外提供四級 priority arbitration。</figcaption>
 </figure>
 
 <table>
@@ -32,9 +32,9 @@
         <tr><th>Context 層級</th><th>資料來源</th><th>生命週期與特性</th><th>Token 佔用成本</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>1. System Prompt</strong></td><td>內建 Runtime</td><td>核心 Agent 身分、基本 Workflow 準則</td><td>極低（固定 ~200 Tokens）</td></tr>
-        <tr><td><strong>2. Project Rules</strong></td><td><code>./AGENTS.md</code></td><td>目前專案特定的 Coding Style、禁忌與指令</td><td>中等（專案級固定，易命中 Prompt Cache）</td></tr>
-        <tr><td><strong>3. Skill Metadata</strong></td><td><code>.tiny-agent/skills/**/SKILL.md</code></td><td>僅包含 Frontmatter（Name 與 Description 摘要）</td><td>極低（索引清單，按需延遲載入）</td></tr>
+        <tr><td><strong>1. Base Instructions</strong></td><td>內建 Runtime</td><td>核心 Agent 身分、基本 Workflow 準則；組入 system message</td><td>固定文字，但 token 數依 tokenizer／model 而異</td></tr>
+        <tr><td><strong>2. Project Rules</strong></td><td><code>./AGENTS.md</code></td><td>目前專案特定的 Coding Style、禁忌與指令；同樣組入 system message</td><td>隨檔案長度增加；穩定 prefix 可能符合 Prompt Cache 條件</td></tr>
+        <tr><td><strong>3. Skill Metadata</strong></td><td><code>.tiny-agent/skills/**/SKILL.md</code> 與 <code>--skill</code></td><td>索引只放 Name、Description 與 Location，不預載正文</td><td>仍會隨 skill 數量、描述與路徑長度線性增加，但通常遠小於全文</td></tr>
         <tr><td><strong>4. Conversation</strong></td><td>即時對話歷程</td><td>動態 Append 的 User 指令、Tool Calls 與 Observations</td><td>持續成長（需透過 Compaction 治理）</td></tr>
     </tbody>
 </table>
@@ -54,7 +54,7 @@ Project-specific instructions and guidelines:
 &lt;/project_context&gt;</code></pre>
 
 <aside class="note">
-    <strong>最佳實踐</strong>：<code>AGENTS.md</code> 適合存放架構決策、團隊規範與測試命令；<strong>嚴禁存放 API 金鑰、密碼等敏感憑證</strong>，也不該寫入容易變動的暫存狀態。
+    <strong>最佳實踐與信任邊界</strong>：<code>AGENTS.md</code> 適合存放架構決策、團隊規範與測試命令；API 金鑰、密碼等敏感憑證應交由 secrets manager／環境注入，不應提交到這類專案文字檔。XML-like 標籤只提供模型可讀的語意分隔，沒有 escaping、簽章或權限隔離；檔案內容仍是 prompt text，不能把標籤視為 prompt-injection 防線。
 </aside>
 
 <h2 id="skills">Skills 的漸進式載入 (Progressive Loading)</h2>
@@ -62,7 +62,7 @@ Project-specific instructions and guidelines:
     <strong>核心設計哲學</strong>：不要在啟動時把所有 Skill 的正文全數灌入！
 </p>
 <p>
-    系統啟動時遞迴掃描目錄，僅解析 YAML Frontmatter 建立輕量索引：
+    系統啟動時遞迴掃描目錄，以小型 parser 從 frontmatter 抽取單行 <code>name</code> 與 <code>description</code>，再加上檔案 location 建立輕量索引。它不是完整 YAML parser；多行 scalar、巢狀結構等一般 YAML 語法不在此教學實作的 contract 內：
 </p>
 
 <pre data-lang="yaml"><code>---
@@ -75,16 +75,16 @@ description: 針對 ADHD 讀者最佳化輸出結構，提供結論先行、高�
         <tr><th>比較項目</th><th>全部預先載入 (Eager All-in)</th><th>漸進式按需載入 (Progressive Loading)</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>初始 Token 消耗</strong></td><td>❌ 隨著 Skill 增加線性暴增</td><td>✅ 永遠保持數十個 Tokens 的輕量 Metadata</td></tr>
+        <tr><td><strong>初始 Token 消耗</strong></td><td>隨 Skill 全文總長線性增加</td><td>也會隨 metadata 數量線性增加，但斜率通常較低；應以目標 model tokenizer 實測</td></tr>
         <tr><td><strong>模型注意力聚焦</strong></td><td>❌ 充斥大量無關領域規則，干擾推論</td><td>✅ 保持上下文純淨，模型只關注當前任務</td></tr>
-        <tr><td><strong>可稽核性 (Auditability)</strong></td><td>❌ 無法追蹤模型究竟何時參考了哪份知識</td><td>✅ 模型必須發起 <code>read(SKILL.md)</code>，操作被 Session 完整記錄</td></tr>
+        <tr><td><strong>可稽核性 (Auditability)</strong></td><td>正文從 request 一開始就存在，較難分辨何時真正使用</td><td>Autonomous route 若呼叫 <code>read(SKILL.md)</code>，該 tool call/result 會進 durable Session；這能證明曾讀取，不證明模型確實遵循或正確理解</td></tr>
     </tbody>
 </table>
 
 <h3 id="skill-loading-paths">兩種合法的 Skill 載入路徑</h3>
 <ol>
     <li><strong>模型自主觸發（Autonomous Route）</strong>：<br>
-        模型閱讀 Metadata 後，判斷當前任務匹配該 Skill，主動呼叫 <code>read(path: ".tiny-agent/skills/.../SKILL.md")</code>。若執行時未提供 <code>read</code> 工具，模型必須誠實說明缺少讀檔能力，嚴禁捏造規則。
+        模型閱讀 Metadata 後，判斷當前任務匹配該 Skill，主動呼叫 <code>read(path: ".tiny-agent/skills/.../SKILL.md")</code>。System prompt 要求缺少能力時說明限制，而 runtime 能保證的是「未提供的 tool 不會被派發」；它無法保證模型一定誠實、一定選中正確 Skill 或一定產生特定措辭。
     </li>
     <li><strong>使用者顯式指定（CLI Slash Command Route）</strong>：<br>
         使用者輸入 <code>/skill:i-have-adhd 說明架構</code>。CLI 作為 Trusted Host 會直接讀取本機 Skill 檔案，將全文附加至本次 User Message 送入，<strong>此路徑完全不需要賦予模型 <code>read</code> 權限</strong>。
@@ -114,18 +114,22 @@ Round 3: ... + [Tool: bash test] ─────────→ 12,000 Tokens (�
     在終端機中體驗 Slash Command 如何由 Trusted Host 注入 Skill：
 </p>
 
-<pre data-lang="sh"><code># 即使只啟用有限工具，CLI 也能透過 Trusted Host 直接載入 Skill
-tiny-ts --plugin read
+<pre data-lang="sh"><code># 不提供 read plugin；Slash Command 仍由 Trusted Host 直接載入 Skill
+tiny-ts --plugin write
 
 # 在互動提示字元中輸入：
 /skill:i-have-adhd 幫我把工作拆解為可執行的具體步驟</code></pre>
 
 <p class="bridge">
-    至此，我們已經掌握了 Agent 的大腦（Model）、手腳（Tools）與注意力（Context）。然而，所有的 Message 與狀態目前都只存放在行程的記憶體中——一旦作業系統斷電、行程崩潰或被 <code>kill -9</code> 強制終止，所有工作將化為烏有。下一章我們將進入最核心的工程領域：<strong>先記 Intent，再發動 Effect 的 Durable Session（持久化交易記錄）</strong>。
+    至此，我們已經掌握了 Agent 的大腦（Model）、手腳（Tools）與注意力（Context）。實際 CLI 在開始工作前就會建立或開啟 JSONL Session，並在每一步追加 facts；記憶體中的 <code>messages</code> 只是可由 durable log 重建的 active view。下一章將把這條已存在的持久化路徑拆開，說明<strong>先記 Intent，再發動 Effect</strong>的交易順序、torn-tail 修復與明確的 durability 限制。
+
 </p>
 
 <aside class="note">
-    <strong>閱讀原始碼</strong>　
-    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts#L152">TypeScript Skill 探索與 Frontmatter 解析器 <code>findSkillFiles()</code></a>、
-    <a href="https://github.com/geminixiang/tiny-agent/blob/main/.tiny-agent/skills/i-have-adhd/SKILL.md">ADHD 友善 Skill 範例 <code>SKILL.md</code></a>。
+    <strong>原始碼與權威來源</strong>　
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts">TypeScript Project Context／Skill discovery 與 system prompt 組裝</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/cli.ts">Slash Command 的 Trusted Host 載入路徑</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/.tiny-agent/skills/i-have-adhd/SKILL.md">ADHD 友善 Skill 範例</a>、
+    <a href="https://platform.openai.com/docs/guides/prompt-caching">OpenAI Prompt Caching：降低重複 prefix 的成本與延遲</a>、
+    <a href="https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html">OWASP Secrets Management Cheat Sheet</a>。
 </aside>
