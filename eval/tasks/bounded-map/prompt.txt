@@ -1,0 +1,14 @@
+修正 `src/bounded-map.js` 的 `mapConcurrent(items, limit, worker, options)`。
+
+需求：
+- `items` 必須是 array，`limit` 必須是正整數，`worker` 必須是 function；開始任何 worker 前先完成驗證。
+- 同時執行的 worker 永遠不能超過 `limit`。
+- worker 會收到 `(item, index, signal)`。
+- 成功結果必須保持 input order，不是完成順序；每個已啟動的 index 最多執行一次。
+- 空 array 回傳空 array，不呼叫 worker。
+- 第一個 worker throw/reject 後，不再啟動 queued items；等待已啟動的 workers settle，再使用原本的 error object reject。
+- `options.signal` pre-aborted 時不能啟動 worker。執行中 abort 後不能再啟動 queued items；等待已啟動的 workers settle，再使用原本的 `signal.reason` reject。
+- 完成後移除 abort listener。
+- 不要修改 `items`、測試或 `package.json`。
+
+不要使用固定 sleep 來控制排程。完成後執行測試，並簡短說明結果。
