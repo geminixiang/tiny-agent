@@ -135,6 +135,18 @@ fn tool_args(call_id: &str, name: &str, arguments: &str) -> String {
 }
 
 #[test]
+fn accepts_null_tool_calls_from_openai_compatible_providers() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let server = start_serving(vec![
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done","tool_calls":null}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.into(),
+    ]);
+    let mut agent = test_agent(&cwd, &server.url, None);
+
+    assert_eq!(agent.run_agent_loop("hi").unwrap(), "done");
+}
+
+#[test]
 fn handles_finish_reasons_and_empty_assistant() {
     unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
     let cwd = temp_dir();

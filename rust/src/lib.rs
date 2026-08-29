@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::session::ConditionalAppend;
 pub use crate::session::Session;
@@ -91,7 +91,7 @@ pub struct Message {
     pub content: Option<String>,
     #[serde(rename = "tool_call_id", default)]
     pub tool_call_id: String,
-    #[serde(rename = "tool_calls", default)]
+    #[serde(rename = "tool_calls", default, deserialize_with = "null_default")]
     pub tool_calls: Vec<ToolCall>,
 }
 
@@ -163,6 +163,14 @@ impl ToolArgs {
             status: String::new(),
         }
     }
+}
+
+fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 fn fn_type() -> String {
