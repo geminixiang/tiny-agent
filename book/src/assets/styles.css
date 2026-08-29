@@ -112,7 +112,14 @@ button { color: inherit; }
 .icon-button { display: inline-grid; place-items: center; min-width: 2.35rem; min-height: 2.35rem; border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; transition: border-color 160ms ease-out, background 160ms ease-out, color 160ms ease-out, transform 100ms ease-out; }
 .icon-button:hover { background: var(--accent-soft); border-color: var(--line-strong); color: var(--accent-strong); }
 .icon-button:active { transform: scale(.94); }
+.icon-button svg { display: block; }
 .menu-button { display: none; }
+.theme-button .icon-sun { display: none; }
+.theme-button .icon-moon { display: block; }
+.theme-button[data-active-theme="dark"] .icon-sun { display: block; }
+.theme-button[data-active-theme="dark"] .icon-moon { display: none; }
+.theme-button svg { transition: transform 220ms cubic-bezier(.34, 1.56, .64, 1), opacity 160ms ease-out; }
+.theme-button:hover svg { transform: rotate(-14deg) scale(1.08); }
 .progress-line { position: absolute; left: 0; bottom: -2px; width: 100%; height: 3px; appearance: none; border: 0; background: transparent; }
 .progress-line::-webkit-progress-bar { background: transparent; }
 .progress-line::-webkit-progress-value { background: var(--rust); }

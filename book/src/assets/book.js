@@ -16,7 +16,7 @@ function effectiveTheme() {
 function syncThemeButton() {
     if (!themeButton) return;
     const theme = effectiveTheme();
-    themeButton.textContent = theme === "dark" ? "☀" : "☾";
+    themeButton.dataset.activeTheme = theme;
     themeButton.setAttribute("aria-label", theme === "dark" ? "切換亮色主題" : "切換暗色主題");
 }
 
