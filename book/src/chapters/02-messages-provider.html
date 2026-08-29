@@ -22,6 +22,10 @@
 【AI 繪圖/SVG Prompt】：
 "Data pipeline architecture diagram for software engineering book. Left side shows raw 'Provider Wire Format' with messy JSON payload containing extra fields ('reasoning', 'refusal', 'vendor_id'). Middle shows a protective 'Normalization Seam' filter box with checkmarks for runtime validation. Right side shows clean, standardized 'Canonical Message' JSON flowing into 'Durable Session WAL'. High contrast, clean technical illustration, charcoal and emerald green accents on white."
 [IMAGE_PROMPT_END] -->
+<figure class="diagram-embed">
+    <img src="<!-- ASSET:02-normalization-seam.png -->" alt="Provider Wire Shape 經過 Normalization Seam 正規化為標準 Canonical Message 架構圖" loading="lazy" />
+    <figcaption>圖 2.1：Provider Normalization Seam 防線架構——將外部雜訊隔離於 Durable WAL 之外。</figcaption>
+</figure>
 
 <h2 id="message-roles">四種訊息角色的嚴格語意</h2>
 <p>

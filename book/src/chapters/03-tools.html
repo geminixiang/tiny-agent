@@ -28,6 +28,10 @@
 【AI 繪圖/SVG Prompt】：
 "Technical software architecture diagram of AI Agent Tool execution pipeline. Top shows JSON tool call from LLM. Center shows 'Tool Dispatch Seam & Runtime Guard' with validation checks and AbortSignal timeout. Bottom shows four concrete tool adapters: 'Read/Write/Edit', 'Bash Process', 'Background Manager (bg)', and 'MCP Client'. Clear arrows, high contrast, clean vector style on white background."
 [IMAGE_PROMPT_END] -->
+<figure class="diagram-embed">
+    <img src="<!-- ASSET:03-tool-pipeline.png -->" alt="LLM Tool 呼叫經由 Dispatch Seam 與 Runtime Guard 驗證後派發至具體 Tool 實作" loading="lazy" />
+    <figcaption>圖 3.1：Tool 派發與安全守衛管線——模型僅提議行動，Runtime Guard 控制副作用邊界。</figcaption>
+</figure>
 
 <h2 id="locality">高內聚原則：Schema 與 Execute 必須合一</h2>
 <p>
@@ -100,6 +104,10 @@ const readTool: Tool = Object.freeze({
 【AI 繪圖/SVG Prompt】：
 "System architecture diagram of background process manager (bg tool). Top shows process states: 'start' -> 'running' -> 'logs/status' -> 'stop'. Bottom shows local directory structure: '.tiny-agent/bg/<id>.json' (PID, start time, command) and '.tiny-agent/bg/<id>.log' (real-time stream). High contrast, tech textbook aesthetic, emerald green and slate grey accents."
 [IMAGE_PROMPT_END] -->
+<figure class="diagram-embed">
+    <img src="<!-- ASSET:03-bg-lifecycle.png -->" alt="背景行程 bg 工具生命週期狀態機與檔案結構映射圖" loading="lazy" />
+    <figcaption>圖 3.2：背景行程管理——透過狀態機與本機中繼資料追蹤長期運行的服務。</figcaption>
+</figure>
 
 <pre data-lang="json"><code>// bg 工具支援的標準操作契約
 {"action":"start","command":"node backend/server.mjs"} // 啟動並取得 ID
