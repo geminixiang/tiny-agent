@@ -34,7 +34,7 @@ export const chapters = [
         file: "02-messages-provider.html",
         minutes: 18,
         takeaways: [
-            "Provider 回傳的原始資料不能直接當成 Message；type assertion 不會移除威險欄位。",
+            "Provider 回傳的原始資料不能直接當成 Message；type assertion 不會移除危險欄位。",
             "Normalization seam 逐欄驗證後重建，不合法欄位一律丟棄。",
             "finish_reason 比有沒有 tool_calls 更重要：length 截斷時 tool arguments 不可執行。",
         ],
@@ -63,7 +63,7 @@ export const chapters = [
         minutes: 15,
         takeaways: [
             "Context 分四層：system prompt、AGENTS.md、skill metadata、conversation。",
-            "Skills 用 progressive loading：啟動只讀 metadata，味中才讀正文。",
+            "Skills 用 progressive loading：啟動只讀 metadata，命中才讀正文。",
             "/skill:name 是 CLI 直接讀檔，不需要 read tool；模型自動判斷則需要。",
         ],
     },
@@ -75,9 +75,9 @@ export const chapters = [
         file: "05-durable-session.html",
         minutes: 26,
         takeaways: [
-            "核心規則只有一句：intent 必須早於 effect——先寫硬磜，才去執行。",
+            "核心規則只有一句：intent 必須早於 effect——先寫硬碟，才去執行。",
             "tiny-agent 承諾 process-crash durability，不承諾 power-loss durability。",
-            "一行 JSONL 就是一筆原子交易；最後 LF 之後的 bytes 是 torn tail，會被舍棄。",
+            "一行 JSONL 就是一筆原子交易；最後 LF 之後的 bytes 是 torn tail，會被捨棄。",
             "commit/load 是小而深的 storage 介面，隱藏 seq、ID、framing 與 torn-tail repair。",
         ],
     },
