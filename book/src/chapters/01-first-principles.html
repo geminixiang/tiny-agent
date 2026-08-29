@@ -10,16 +10,12 @@
     模型<strong>既不會記住上一次的呼叫內容，也不具備讀檔、編譯程式或連線網路的系統權限</strong>。所謂的「延續上下文」，完全是外層 Host Application 在發起下一次 API 請求時，將先前的對話歷史重新打包送入的結果。
 </p>
 
-<!-- [IMAGE_PROMPT_START]
-【圖片位置】：01-first-principles / LLM vs Agent 職責對比圖
-【圖片形式】：對稱式架構示意圖 (System Comparison Diagram)
-【核心概念】：單次純函式 LLM 與具備閉環執行能力的 Agent 之本質差異
-【視覺元素】：
-  1. 左半部 [LLM]：接收 Input Tokens → 黑盒子運算 → 輸出 Output Tokens（單向、無狀態、無外部副作用）。
-  2. 右半部 [Agent]：Host 控制中心、記憶體 Messages 陣列、LLM 大腦、Tool 執行環境，構成一個持續循環的有向環狀圖（Stateful、具外部副作用、自動迭代）。
-【AI 繪圖/SVG Prompt】：
-"Side-by-side technical comparison diagram. Left: 'Stateless LLM' as a single-pass black box (Input Messages -> LLM -> Text/Tool Call). Right: 'Autonomous Agent Loop' showing a continuous feedback circle: Host Application -> Model Call -> Tool Execution -> Append to Messages -> Repeat until Final Answer. Clean lines, tech textbook aesthetic, glowing accents on active data loop."
-[IMAGE_PROMPT_END] -->
+<figure class="diagram-embed" id="fig-01-llm-vs-agent" aria-labelledby="fig-01-llm-vs-agent-caption">
+    <img src="<!-- ASSET:01-llm-vs-agent.png -->" alt="LLM 純函式與 Agent 閉環控制系統對比圖" loading="lazy" />
+    <figcaption id="fig-01-llm-vs-agent-caption">
+        圖 1：LLM 與 Agent 的本質差異——LLM 是無狀態的文字預測黑盒子；Agent 則是具備 Transcript 狀態機與 Tool 副作用的閉環系統。
+    </figcaption>
+</figure>
 
 <table>
     <thead>
@@ -65,21 +61,12 @@
     }
 }</code></pre>
 
-<!-- [IMAGE_PROMPT_START]
-【圖片位置】：01-first-principles / 4-Step 核心閉環資料流圖
-【圖片形式】：結構化循序流程圖 (Sequential State Machine Flowchart)
-【核心概念】：不可再刪的 Agent 4-Step 閉環狀態轉移
-【視覺元素】：
-  1. Step 1: Push User Message
-  2. Step 2: callModel(messages, tools)
-  3. Decision Diamond: Has tool_calls?
-     - No -> Return Final Content & Exit
-     - Yes -> Step 3: tools[name].execute(args)
-  4. Step 4: Push Tool Result -> Loop back to Step 2
-  5. 醒目標記：強調 messages 陣列如何在每一輪中嚴格遞增 (Append-only Growth)
-【AI 繪圖/SVG Prompt】：
-"High-contrast technical flowchart of minimal agent loop. Step 1: User Input added to messages. Step 2: callModel API with messages. Decision node: 'Tool call requested?'. Branch A (No): Return final text and terminate. Branch B (Yes): Execute tool adapter on host OS, format tool output, append to messages array, and point arrow back to Step 2. Minimalist vector illustration, clean typography, dark theme."
-[IMAGE_PROMPT_END] -->
+<figure class="diagram-embed" id="fig-01-agent-loop-flow" aria-labelledby="fig-01-agent-loop-flow-caption">
+    <img src="<!-- ASSET:01-agent-loop-flow.png -->" alt="4-Step 不可再刪的最小 Agent 閉環流程圖" loading="lazy" />
+    <figcaption id="fig-01-agent-loop-flow-caption">
+        圖 2：最小 Agent 閉環的狀態機流程——推論、工具派發、執行守衛與 Append-only 寫回。
+    </figcaption>
+</figure>
 
 <figure class="step-flow" id="fig-01-loop" aria-labelledby="fig-01-loop-caption">
     <ol>

@@ -74,7 +74,7 @@ test("build emits Cloudflare Pages files and content-hashed assets", async () =>
     assert.ok(jsAsset, "hashed JavaScript asset");
     assert.ok(themeAsset, "hashed theme JavaScript asset");
     assert.ok(faviconAsset, "hashed favicon asset");
-    assert.equal(generatedAssets.length, 4);
+    assert.equal(generatedAssets.length, 8);
     assert.equal(pages.size, chapters.length + 2);
     for (const html of pages.values()) {
         assert.match(html, new RegExp(`<link rel="stylesheet" href="${cssAsset}">`));

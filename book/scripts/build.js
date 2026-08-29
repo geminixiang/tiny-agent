@@ -118,27 +118,44 @@ function homePage(assets) {
 async function main() {
     await rm(out, { recursive: true, force: true });
     await mkdir(join(out, "assets"), { recursive: true });
-    const [cssContent, jsContent, themeContent, faviconContent] = await Promise.all([
+    const [cssContent, jsContent, themeContent, faviconContent, img00Sys, img00Ctx, img01Vs, img01Flow] = await Promise.all([
         readFile(join(bookRoot, "src/assets/styles.css"), "utf8"),
         readFile(join(bookRoot, "src/assets/book.js"), "utf8"),
         readFile(join(bookRoot, "src/assets/theme.js"), "utf8"),
         readFile(join(bookRoot, "src/assets/favicon.png")),
+        readFile(join(bookRoot, "src/assets/00-system-boundary.png")),
+        readFile(join(bookRoot, "src/assets/00-context-boundary.png")),
+        readFile(join(bookRoot, "src/assets/01-llm-vs-agent.png")),
+        readFile(join(bookRoot, "src/assets/01-agent-loop-flow.png")),
     ]);
     const assets = {
         css: `styles.${hash(cssContent)}.css`,
         js: `book.${hash(jsContent)}.js`,
         theme: `theme.${hash(themeContent)}.js`,
         favicon: `favicon.${hash(faviconContent)}.png`,
+        img00Sys: `00-system-boundary.${hash(img00Sys)}.png`,
+        img00Ctx: `00-context-boundary.${hash(img00Ctx)}.png`,
+        img01Vs: `01-llm-vs-agent.${hash(img01Vs)}.png`,
+        img01Flow: `01-agent-loop-flow.${hash(img01Flow)}.png`,
     };
     await Promise.all([
         writeFile(join(out, "assets", assets.css), cssContent),
         writeFile(join(out, "assets", assets.js), jsContent),
         writeFile(join(out, "assets", assets.theme), themeContent),
         writeFile(join(out, "assets", assets.favicon), faviconContent),
+        writeFile(join(out, "assets", assets.img00Sys), img00Sys),
+        writeFile(join(out, "assets", assets.img00Ctx), img00Ctx),
+        writeFile(join(out, "assets", assets.img01Vs), img01Vs),
+        writeFile(join(out, "assets", assets.img01Flow), img01Flow),
         writeFile(join(out, "index.html"), homePage(assets)),
     ]);
     for (const [index, chapter] of chapters.entries()) {
-        const content = await readFile(join(bookRoot, "src/chapters", chapter.file), "utf8");
+        let content = await readFile(join(bookRoot, "src/chapters", chapter.file), "utf8");
+        content = content
+            .replaceAll("<!-- ASSET:00-system-boundary.png -->", `/assets/${assets.img00Sys}`)
+            .replaceAll("<!-- ASSET:00-context-boundary.png -->", `/assets/${assets.img00Ctx}`)
+            .replaceAll("<!-- ASSET:01-llm-vs-agent.png -->", `/assets/${assets.img01Vs}`)
+            .replaceAll("<!-- ASSET:01-agent-loop-flow.png -->", `/assets/${assets.img01Flow}`);
         const directory = join(out, chapter.slug);
         await mkdir(directory, { recursive: true });
         await writeFile(join(directory, "index.html"), articlePage(chapter, index, content, assets));

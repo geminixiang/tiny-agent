@@ -10,20 +10,12 @@
     產品中看似會聊天、能讀寫專案、能執行指令的「AI」，不是模型本身具備作業系統特權，而是外層的 <strong>Host Application</strong> 將模型、資料結構與系統呼叫串接而成的結果。
 </p>
 
-<!-- [IMAGE_PROMPT_START]
-【圖片位置】：00-foundations / 核心系統邊界圖 (Mental Model)
-【圖片形式】：極簡高對比度架構圖 (Clean Minimalist Infographic / Excalidraw 風格)
-【核心概念】：LLM 無狀態推論與 Host Application 系統邊界劃分
-【視覺元素】：
-  1. 上方：User（發起目標）
-  2. 中央：Host Application（核心控制層）
-     - 內含：Prompt 組合器、Tool 執行守衛 (Guard)、Transcript / Session 持久化儲存 (JSONL)
-  3. 右側：Stateless LLM Provider（無狀態黑盒子，僅接收 Context Tokens，吐出 Next Tokens / Tool Proposals）
-  4. 下方：Host OS & External World（檔案系統、Shell、外部網路）
-  5. 邊界標示：清楚框出「不可見區域」——LLM 預設看不到硬碟、DB 或過去的連線。
-【AI 繪圖/SVG Prompt】：
-"Minimalist technical architecture diagram of LLM Host Application boundary. Top: User. Center: 'Host Application' with components 'Context Assembler', 'Tool Guard', 'Transcript Storage'. Right: 'Stateless LLM' API box. Bottom: 'Operating System' (Disk, Shell, Network). High-contrast red dashed line isolating LLM from direct OS access. Clean lines, tech textbook style, dark accents on white background."
-[IMAGE_PROMPT_END] -->
+<figure class="diagram-embed" id="fig-00-system-boundary" aria-labelledby="fig-00-system-boundary-caption">
+    <img src="<!-- ASSET:00-system-boundary.png -->" alt="LLM Host Application 與作業系統邊界圖" loading="lazy" />
+    <figcaption id="fig-00-system-boundary-caption">
+        圖 1：LLM 與 Host Application 的系統邊界——模型本質無狀態且受紅線隔離，所有作業系統副作用均由 Host 驗證後代為執行。
+    </figcaption>
+</figure>
 
 <pre data-lang="text"><code>使用者 (User)
   ↓
@@ -122,19 +114,12 @@ Model：僅根據「本次 Request 的 Tokens」計算下一個回覆或 Tool Ca
     <strong>Context 是模型在單次推論當下，暫存於其計算視窗中的「全部有效輸入集合」。</strong>
 </p>
 
-<!-- [IMAGE_PROMPT_START]
-【圖片位置】：00-foundations / Context 邊界對比圖 (In-Context vs Off-Context)
-【圖片形式】：對稱式清單架構圖 (Two-Column System Diagram)
-【核心概念】：區分「當前推論可見 (Active Context)」與「持久儲存但不可見 (Storage/Disk)」
-【視覺元素】：
-  1. 左欄（綠色高亮區）：Active Context（記憶體與 Request 中）
-     - 本次 Instructions、選入的 Messages、Tool Schemas、剛執行的 Tool Result
-  2. 右欄（灰色暗色區）：External State（硬碟與資料庫中）
-     - 專案未讀原始碼、DB 歷程、前一次執行的 RAM、被 Compaction 移出的舊 Log
-  3. 中央分隔線：清楚寫明「未被 Host 投影進 Request 的資料，模型一概不知」
-【AI 繪圖/SVG Prompt】：
-"Two-column technical comparison chart. Left column glowing green labeled 'In Active Context (Visible to Model)': Request Instructions, Current Messages, Tool JSON Schemas, Recent Tool Outputs. Right column dark grey labeled 'Outside Context (Invisible to Model)': Disk Files, PostgreSQL records, Old chat history, Process RAM. Clean sharp lines, technical documentation aesthetic."
-[IMAGE_PROMPT_END] -->
+<figure class="diagram-embed" id="fig-00-context-boundary" aria-labelledby="fig-00-context-boundary-caption">
+    <img src="<!-- ASSET:00-context-boundary.png -->" alt="Active Context 視窗 vs 外部儲存邊界對比圖" loading="lazy" />
+    <figcaption id="fig-00-context-boundary-caption">
+        圖 2：可見 Context 與外部儲存的邊界——未被 Host 明確投影進本次推論 Request 的資料，模型一概不知。
+    </figcaption>
+</figure>
 
 <div class="compare">
     <section>
