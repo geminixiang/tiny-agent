@@ -251,6 +251,31 @@ figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem
 .chapter-footer a:last-child { text-align: right; }
 .chapter-footer small { display: block; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; }
 
+.home-hero { position: relative; margin: 0 0 1.5rem; padding: .6rem; border: 2px solid var(--ink); background: var(--paper); box-shadow: var(--shadow); }
+.home-hero::before {
+    content: "";
+    position: absolute;
+    inset: .6rem;
+    border: 1px solid var(--line-strong);
+    pointer-events: none;
+    z-index: 1;
+}
+.home-hero img { display: block; width: 100%; height: auto; filter: saturate(.92) contrast(1.02); }
+.home-hero-tag {
+    position: absolute;
+    left: 1.4rem;
+    bottom: 1.4rem;
+    z-index: 2;
+    padding: .35rem .7rem;
+    border: 1px solid color-mix(in srgb, var(--ink) 25%, transparent);
+    background: color-mix(in srgb, var(--paper) 82%, transparent);
+    backdrop-filter: blur(6px);
+    color: var(--ink);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .74rem;
+    font-weight: 700;
+    letter-spacing: .04em;
+}
 .home-intro { padding: clamp(2rem, 6vw, 5.5rem); }
 .home-intro h1 { max-width: 12ch; }
 .path { margin-top: 3rem; counter-reset: chapter; }
@@ -278,6 +303,7 @@ figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem
     .shell { padding: 1rem; }
     .js .shell { padding-top: 5.25rem; }
     .article { padding: 1.4rem; }
+    .home-hero-tag { left: .8rem; bottom: .8rem; font-size: .68rem; padding: .3rem .55rem; }
     .compare { grid-template-columns: 1fr; }
     .path-card { grid-template-columns: 3rem 1fr; }
     .path-card time { grid-column: 2; }
@@ -375,7 +401,7 @@ figure.data-anim figcaption { margin-top: .65rem; color: var(--muted); font-size
 @media print {
     :root { color-scheme: light; --paper: white; --ink: black; --muted: #444; --line: #bbb; --bg: white; }
     body { background-image: none; }
-    .topbar, .sidebar, .chapter-footer, .footer, .copy-button, .chapter-toc { display: none !important; }
+    .topbar, .sidebar, .chapter-footer, .footer, .copy-button, .chapter-toc, .home-hero { display: none !important; }
     .shell { padding: 0; }
     .reader { width: auto; }
     .article { padding: 0; border: 0; box-shadow: none; }
