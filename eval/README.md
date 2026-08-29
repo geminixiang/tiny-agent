@@ -40,6 +40,48 @@ Only compare results with the same task Spec. Prompt or verifier changes create 
 
 <!-- EVAL_RUNS -->
 
+## 2026-08-29T13:50:39.147Z
+
+Commit: `762d8f3c696d` · Platform: `darwin-arm64` · Node: `v24.14.1`
+
+### Summary
+
+| Agent | Model | Passed | Pass rate | Median time | Median tokens | Median tools |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| tiny-ts | deepseek/deepseek-v4-flash-0731 | 6/6 | 100.0% | 10.7s | 5420 | 5 |
+| tiny-go | deepseek/deepseek-v4-flash-0731 | 5/6 | 83.3% | 6.8s | 4917 | 6 |
+| tiny-py | deepseek/deepseek-v4-flash-0731 | 6/6 | 100.0% | 14.8s | 6001 | 6 |
+| tiny-rs | deepseek/deepseek-v4-flash-0731 | 6/6 | 100.0% | 11.0s | 5891 | 4.5 |
+
+### Tasks
+
+| Task | Spec | Agent | Model | Result | Time | Input | Output | Cache read | Cache write | Tools | Detail |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| add-feature | `e93464a71b8a` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 8.4s | 5027 | 429 | 2304 | 0 | 4 |  |
+| add-feature | `e93464a71b8a` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 4.6s | 2152 | 462 | 3072 | 0 | 4 |  |
+| add-feature | `e93464a71b8a` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 23.3s | 4091 | 553 | 2048 | 0 | 5 |  |
+| add-feature | `e93464a71b8a` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 8.9s | 2332 | 517 | 5120 | 0 | 4 |  |
+| async-cache | `db7ca3acc745` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 19.6s | 7549 | 2992 | 19712 | 0 | 10 |  |
+| async-cache | `db7ca3acc745` | tiny-go | deepseek/deepseek-v4-flash-0731 | FAIL | 120.0s | 6716 | 2001 | 6144 | 0 | 7 | agent timeout |
+| async-cache | `db7ca3acc745` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 20.0s | 7843 | 2178 | 9472 | 0 | 7 |  |
+| async-cache | `db7ca3acc745` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 10.2s | 6607 | 1582 | 4352 | 0 | 5 |  |
+| config-loader | `b11eefa2367a` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 7.7s | 4421 | 1137 | 7424 | 0 | 5 |  |
+| config-loader | `b11eefa2367a` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 9.6s | 4089 | 1513 | 7936 | 0 | 6 |  |
+| config-loader | `b11eefa2367a` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 18.8s | 8437 | 1268 | 2816 | 0 | 5 |  |
+| config-loader | `b11eefa2367a` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 12.9s | 4610 | 2139 | 7168 | 0 | 4 |  |
+| fix-bug | `14237efa45fb` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 6.5s | 4806 | 578 | 5376 | 0 | 6 |  |
+| fix-bug | `14237efa45fb` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 7.1s | 4116 | 592 | 2816 | 0 | 6 |  |
+| fix-bug | `14237efa45fb` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 7.7s | 3419 | 651 | 3328 | 0 | 6 |  |
+| fix-bug | `14237efa45fb` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 11.7s | 4218 | 814 | 5632 | 0 | 4 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 18.4s | 3139 | 791 | 6656 | 0 | 5 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 5.4s | 2925 | 642 | 5376 | 0 | 5 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 7.0s | 4291 | 776 | 5888 | 0 | 6 |  |
+| follow-instructions | `ee47fd37cb69` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 31.1s | 3051 | 659 | 7424 | 0 | 5 |  |
+| session-summary | `71a3943910cd` | tiny-ts | deepseek/deepseek-v4-flash-0731 | PASS | 12.9s | 3394 | 884 | 7936 | 0 | 4 |  |
+| session-summary | `71a3943910cd` | tiny-go | deepseek/deepseek-v4-flash-0731 | PASS | 6.5s | 4240 | 886 | 6656 | 0 | 7 |  |
+| session-summary | `71a3943910cd` | tiny-py | deepseek/deepseek-v4-flash-0731 | PASS | 10.7s | 5568 | 1367 | 6400 | 0 | 6 |  |
+| session-summary | `71a3943910cd` | tiny-rs | deepseek/deepseek-v4-flash-0731 | PASS | 10.0s | 8242 | 1217 | 12800 | 0 | 8 |  |
+
 ## 2026-08-24T20:00:30.927Z
 
 Commit: `e3ffeff54906` · Platform: `darwin-arm64` · Node: `v24.14.1`
