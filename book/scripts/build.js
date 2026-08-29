@@ -17,7 +17,7 @@ function chapterGroups(current) {
     return chapters
         .map((chapter, index) => {
             const heading = chapter.part === part ? "" : `<li class="nav-part">${escape((part = chapter.part))}</li>`;
-            return `${heading}<li data-search-item><a href="/${chapter.slug}/"${chapter.slug === current ? ' aria-current="page"' : ""}><span class="chapter-number">${String(index).padStart(2, "0")}</span> <span>${escape(chapter.title)}</span></a></li>`;
+            return `${heading}<li><a href="/${chapter.slug}/"${chapter.slug === current ? ' aria-current="page"' : ""}><span class="chapter-number">${String(index).padStart(2, "0")}</span> <span>${escape(chapter.title)}</span></a></li>`;
         })
         .join("");
 }
@@ -53,10 +53,7 @@ function layout({ title, description, path, current = "", body, assets, type = "
 <progress class="progress-line" data-reading-progress max="100" value="0" aria-label="閱讀進度"></progress>
 </header>
 <aside class="sidebar" data-sidebar aria-label="章節目錄">
-<label for="chapter-search" class="nav-part">篩選章節</label>
-<input id="chapter-search" class="search" type="search" placeholder="輸入關鍵字" data-nav-search>
-<p class="search-note">沒有 JavaScript 時仍顯示完整目錄。</p>
-<nav aria-label="全書章節"><ol class="chapter-nav">${chapterGroups(current)}</ol><p class="nav-empty" data-nav-empty hidden>沒有符合的章節。</p></nav>
+<nav aria-label="全書章節"><ol class="chapter-nav">${chapterGroups(current)}</ol></nav>
 </aside>
 <button class="drawer-backdrop" data-drawer-backdrop aria-label="關閉章節目錄"></button>
 <main id="main" class="shell"><div class="reader">${body}</div><footer class="footer">MIT © 2026 Ying Xiang · <a href="${repo}">Source on GitHub</a></footer></main>

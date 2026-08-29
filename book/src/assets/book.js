@@ -3,7 +3,6 @@ root.classList.add("js");
 const themeButton = document.querySelector("[data-theme-toggle]");
 const menuButton = document.querySelector("[data-menu-toggle]");
 const backdrop = document.querySelector("[data-drawer-backdrop]");
-const search = document.querySelector("[data-nav-search]");
 const sidebar = document.querySelector("[data-sidebar]");
 const mobile = matchMedia("(max-width: 860px)");
 
@@ -37,7 +36,7 @@ function syncDrawer(open, restoreFocus = false) {
         if (isMobile && !open) sidebar.setAttribute("aria-hidden", "true");
         else sidebar.removeAttribute("aria-hidden");
     }
-    if (open && isMobile) search?.focus();
+    if (open && isMobile) sidebar?.querySelector("a")?.focus();
     else if (restoreFocus && isMobile) menuButton?.focus();
 }
 
@@ -55,18 +54,6 @@ document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeDrawer();
 });
 document.querySelectorAll(".chapter-nav a").forEach((link) => link.addEventListener("click", closeDrawer));
-
-search?.addEventListener("input", () => {
-    const query = search.value.trim().toLocaleLowerCase("zh-TW");
-    let visible = 0;
-    document.querySelectorAll("[data-search-item]").forEach((item) => {
-        const match = !query || item.textContent.toLocaleLowerCase("zh-TW").includes(query);
-        item.hidden = !match;
-        if (match) visible++;
-    });
-    const empty = document.querySelector("[data-nav-empty]");
-    if (empty) empty.hidden = visible > 0;
-});
 
 const progress = document.querySelector("[data-reading-progress]");
 function updateProgress() {

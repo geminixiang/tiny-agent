@@ -130,16 +130,12 @@ button { color: inherit; }
 .sidebar::-webkit-scrollbar-track { background: transparent; }
 .sidebar::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; border: 2px solid var(--paper); }
 .sidebar::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-.search { width: 100%; padding: .65rem .75rem; color: var(--ink); background: var(--bg); border: 1.5px solid var(--ink); border-radius: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88rem; }
-.search-note { margin: .35rem 0 1rem; color: var(--muted); font-size: .75rem; font-style: italic; }
 .nav-part { margin: 1.35rem .5rem .4rem; color: var(--accent-strong); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .7rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .chapter-nav { list-style: none; margin: 0; padding: 0; }
 .chapter-nav a { display: grid; grid-template-columns: 1.9rem 1fr; gap: .5rem; padding: .5rem .55rem; border-left: 3px solid transparent; color: var(--muted); text-decoration: none; line-height: 1.35; transition: border-color 140ms ease-out, background 140ms ease-out; }
 .chapter-nav a:hover { background: var(--soft); color: var(--ink); border-left-color: var(--line-strong); }
 .chapter-nav a[aria-current="page"] { background: var(--accent-soft); color: var(--accent-strong); font-weight: 700; border-left-color: var(--rust); }
 .chapter-number { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; color: var(--muted); }
-.nav-empty { padding: .75rem; color: var(--muted); font-size: .85rem; }
-
 .shell { padding: 5.25rem 1.5rem 4rem calc(var(--sidebar) + 1.5rem); }
 .reader { width: min(100%, 52rem); margin: 0 auto; }
 .article { position: relative; padding: clamp(1.5rem, 4vw, 3.8rem); background: var(--paper); border: 2px solid var(--ink); box-shadow: var(--shadow); }
