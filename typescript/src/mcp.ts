@@ -9,11 +9,11 @@ const MAX_SCHEMA_DEPTH = 20;
 const MAX_TOOLS = 64;
 
 export type McpConfig = {
-    alias: string;
-    url: URL;
-    headers?: Record<string, string>;
-    callTimeoutMs: number;
-    allowedTools?: string[];
+    readonly alias: string;
+    readonly url: URL;
+    readonly headers?: Readonly<Record<string, string>>;
+    readonly callTimeoutMs: number;
+    readonly allowedTools?: readonly string[];
 };
 
 export type LoadedMcpTools = {
@@ -38,7 +38,7 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
 
     try {
         transport = new StreamableHTTPClientTransport(config.url, {
-            requestInit: config.headers ? { headers: config.headers } : undefined,
+            requestInit: { redirect: "error", ...(config.headers ? { headers: config.headers } : {}) },
         });
         await client.connect(transport, { signal });
         const listed = await client.listTools(undefined, { signal });
@@ -107,7 +107,7 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
 }
 
 // prettier-ignore
-function mcpAuthType(headers?: Record<string, string>) { const h = new Headers(headers); return h.has("x-api-key") ? "metabaseApiKey" : h.has("authorization") ? "bearer" : "none"; }
+function mcpAuthType(headers?: Readonly<Record<string, string>>) { const h = new Headers(headers); return h.has("x-api-key") ? "metabaseApiKey" : h.has("authorization") ? "bearer" : "none"; }
 
 function validateSchema(schema: unknown, toolName: string) {
     let encoded: string;

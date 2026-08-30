@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from mcp_fixture import McpFixture
 from tiny_agent.http import read_http_response
-from tiny_agent.mcp import McpConfig, _encode_mcp_param_value, _normalize_result, display_tool_name, load_mcp_configs, load_mcp_tools, split_names
+from tiny_agent.mcp import _McpConfig as McpConfig, _encode_mcp_param_value, _normalize_result, display_tool_name, load_mcp_configs, load_mcp_tools, split_names
 
 
 class McpTest(unittest.IsolatedAsyncioTestCase):
@@ -25,6 +25,9 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "Unknown MCP server fixture field: extra"): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
             path.write_text(json.dumps({"servers": {"fixture": {"url": "https://example.com", "tokenEnv": "TOKEN"}}}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "environment variable is not set"): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
+            with self.assertRaisesRegex(ValueError, "invalid HTTP header characters") as raised:
+                load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path), "TOKEN": "secret\r\nX-Injected: yes"})
+            self.assertNotIn("secret", str(raised.exception))
             for url, error in (("not a URL", "valid URL"), ("http://example.com/mcp", "use HTTPS"), ("https://user:pass@example.com/mcp", "credentials")):
                 path.write_text(json.dumps({"servers": {"fixture": {"url": url}}}), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, error): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})

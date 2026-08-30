@@ -8,20 +8,19 @@ import {
     ENDPOINT,
     MODEL,
     Session,
-    loadMcpConfigs,
-    loadMcpTools,
     displayToolName,
     loadProjectInstructions,
     loadSkills,
     formatToolEvent,
     formatUsage,
-    type LoadedMcpTools,
     type RunEvent,
     type RunResult,
     type SessionStore,
     builtInPlugins,
     closeBackgroundProcesses,
 } from "./index.js";
+import { loadMcpConfigs } from "./mcp-config.js";
+import { loadMcpTools, type LoadedMcpTools } from "./mcp.js";
 
 const activeMcp: LoadedMcpTools[] = [];
 let activeSession: SessionStore | undefined;

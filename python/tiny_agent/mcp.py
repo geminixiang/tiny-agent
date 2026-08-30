@@ -25,7 +25,7 @@ _CLIENT_CAPABILITIES: dict = {}
 
 
 @dataclass(frozen=True)
-class McpConfig:
+class _McpConfig:
     alias: str
     url: str
     headers: dict[str, str] | None = None
@@ -49,7 +49,7 @@ def split_names(values: list[str] | None) -> list[str]:
     return aliases
 
 
-def load_mcp_configs(aliases: list[str], env: Mapping[str, str] | None = None) -> list[McpConfig]:
+def load_mcp_configs(aliases: list[str], env: Mapping[str, str] | None = None) -> list[_McpConfig]:
     if not aliases: return []
     settings = Settings(); env = settings.environment if env is None else env
     configured_path = settings.tiny_mcp_config if env is settings.environment else env.get("TINY_MCP_CONFIG")
@@ -68,7 +68,9 @@ def load_mcp_configs(aliases: list[str], env: Mapping[str, str] | None = None) -
         token_env = server.get("tokenEnv")
         token = env.get(token_env) if token_env else None
         if token_env and not token: raise ValueError(f"MCP token environment variable is not set: {token_env}")
-        configs.append(McpConfig(
+        if token is not None and any(ord(char) < 32 or ord(char) == 127 for char in token):
+            raise ValueError(f"MCP token environment variable contains invalid HTTP header characters: {token_env}")
+        configs.append(_McpConfig(
             alias=alias,
             url=server["url"],
             headers={"Authorization": f"Bearer {token}"} if token else None,
@@ -146,7 +148,7 @@ class _RpcError(RuntimeError):
 
 
 class _McpClient:
-    def __init__(self, config: McpConfig):
+    def __init__(self, config: _McpConfig):
         self.config = config
         self.protocol_version: str | None = None
         self.closed = False
@@ -323,7 +325,7 @@ async def _read_sse(chunks: AsyncIterator[bytes], request_id: int | None) -> obj
     raise RuntimeError("MCP SSE response ended without a matching result")
 
 
-async def load_mcp_tools(config: McpConfig, cancelled: asyncio.Event | None = None, startup_timeout_ms: float = 10_000) -> LoadedMcpTools:
+async def load_mcp_tools(config: _McpConfig, cancelled: asyncio.Event | None = None, startup_timeout_ms: float = 10_000) -> LoadedMcpTools:
     client = _McpClient(config)
     deadline = time.monotonic() + startup_timeout_ms / 1000
     try:

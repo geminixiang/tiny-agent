@@ -350,6 +350,7 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 		client = http.DefaultClient
 	}
 	clone := *client
+	clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	base := clone.Transport
 	if base == nil {
 		base = http.DefaultTransport

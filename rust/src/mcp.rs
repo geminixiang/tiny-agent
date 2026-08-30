@@ -83,11 +83,55 @@ impl LoadedMcp {
 
 #[derive(Clone, Debug)]
 pub struct McpConfig {
-    pub alias: String,
-    pub url: String,
-    pub token: Option<String>,
-    pub allowed_tools: Option<Vec<String>>,
-    pub call_timeout_ms: u64,
+    alias: String,
+    url: String,
+    token: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    call_timeout_ms: u64,
+}
+
+impl McpConfig {
+    pub fn new(
+        alias: String,
+        url: String,
+        token: Option<String>,
+        allowed_tools: Option<Vec<String>>,
+        call_timeout_ms: u64,
+    ) -> Result<Self, String> {
+        if alias.trim().is_empty() {
+            return Err("MCP alias must be a nonempty string".into());
+        }
+        validate_url(&url)?;
+        if call_timeout_ms == 0 {
+            return Err("MCP callTimeoutMs must be a positive number".into());
+        }
+        if token
+            .as_ref()
+            .is_some_and(|token| token.chars().any(char::is_control))
+        {
+            return Err("MCP token contains invalid HTTP header characters".into());
+        }
+        if let Some(tools) = &allowed_tools {
+            let mut seen = HashSet::new();
+            if tools
+                .iter()
+                .any(|tool| tool.is_empty() || !seen.insert(tool))
+            {
+                return Err("MCP allowedTools must contain nonempty, unique strings".into());
+            }
+        }
+        Ok(Self {
+            alias: alias.trim().into(),
+            url,
+            token,
+            allowed_tools,
+            call_timeout_ms,
+        })
+    }
+
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
 }
 
 #[derive(Debug)]
@@ -399,9 +443,6 @@ fn validate_catalog(value: &Value, aliases: &[String]) -> Result<Vec<McpConfig>,
     let allowed_keys = ["url", "tokenEnv", "allowedTools", "callTimeoutMs"];
     let mut validated = HashMap::new();
     for (alias, raw) in servers {
-        if alias.trim().is_empty() {
-            return Err("MCP server alias must not be empty".into());
-        }
         let server = raw
             .as_object()
             .ok_or_else(|| format!("MCP server {alias} must be an object"))?;
@@ -416,7 +457,6 @@ fn validate_catalog(value: &Value, aliases: &[String]) -> Result<Vec<McpConfig>,
             .and_then(Value::as_str)
             .filter(|url| !url.is_empty())
             .ok_or_else(|| format!("MCP server {alias} url must be a string"))?;
-        validate_url(url)?;
         let token_env = match server.get("tokenEnv") {
             None => None,
             Some(Value::String(name)) if valid_env_name(name) => Some(name.clone()),
@@ -426,7 +466,7 @@ fn validate_catalog(value: &Value, aliases: &[String]) -> Result<Vec<McpConfig>,
                 ));
             }
         };
-        let allowed_tools = validate_allowed_tools(alias, server.get("allowedTools"))?;
+        let allowed_tools = parse_allowed_tools(alias, server.get("allowedTools"))?;
         let call_timeout_ms = match server.get("callTimeoutMs") {
             None => 30_000,
             Some(Value::Number(n)) => n.as_u64().filter(|n| *n > 0).ok_or_else(|| {
@@ -458,36 +498,27 @@ fn validate_catalog(value: &Value, aliases: &[String]) -> Result<Vec<McpConfig>,
                         .ok_or_else(|| format!("MCP token environment variable is not set: {name}"))
                 })
                 .transpose()?;
-            Ok(McpConfig {
-                alias: alias.trim().into(),
-                url: url.clone(),
+            McpConfig::new(
+                alias.clone(),
+                url.clone(),
                 token,
-                allowed_tools: allowed_tools.clone(),
-                call_timeout_ms: *call_timeout_ms,
-            })
+                allowed_tools.clone(),
+                *call_timeout_ms,
+            )
         })
         .collect()
 }
 
-fn validate_allowed_tools(
-    alias: &str,
-    value: Option<&Value>,
-) -> Result<Option<Vec<String>>, String> {
+fn parse_allowed_tools(alias: &str, value: Option<&Value>) -> Result<Option<Vec<String>>, String> {
     let Some(value) = value else { return Ok(None) };
     let array = value
         .as_array()
         .ok_or_else(|| format!("MCP server {alias} allowedTools must contain nonempty strings"))?;
-    let mut seen = HashSet::new();
     let mut tools = Vec::new();
     for value in array {
-        let name = value.as_str().filter(|n| !n.is_empty()).ok_or_else(|| {
-            format!("MCP server {alias} allowedTools must contain nonempty strings")
-        })?;
-        if !seen.insert(name.to_string()) {
-            return Err(format!(
-                "MCP server {alias} allowedTools must not contain duplicates"
-            ));
-        }
+        let name = value
+            .as_str()
+            .ok_or_else(|| format!("MCP server {alias} allowedTools must contain strings"))?;
         tools.push(name.to_string());
     }
     Ok(Some(tools))

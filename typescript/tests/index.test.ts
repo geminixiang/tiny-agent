@@ -12,7 +12,6 @@ const {
     MODEL,
     SessionStore,
     builtInTools,
-    loadMcpTools,
     loadProjectInstructions,
     loadSkills,
     executeTool,
@@ -22,6 +21,7 @@ const {
     runFacts,
     SYNTHETIC_CONTENT,
 } = await import("../src/index.js");
+const { loadMcpTools } = await import("../src/mcp.js");
 
 async function openStore(now = new Date()) {
     return SessionStore.create(dir, MODEL, now);

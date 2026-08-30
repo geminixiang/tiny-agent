@@ -7,7 +7,7 @@ const ROOT_KEYS = new Set(["servers"]);
 const SERVER_KEYS = new Set(["url", "tokenEnv", "auth", "allowedTools", "callTimeoutMs"]);
 const AUTH_KEYS = new Set(["type", "tokenEnv"]);
 
-export type McpServerCatalog = {
+type McpServerCatalog = {
     servers: Record<
         string,
         {

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import test from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { displayToolName, loadMcpTools, type McpConfig } from "../src/mcp.js";
@@ -156,6 +159,35 @@ test("loadMcpTools filters tools and propagates cancellation", async (t) => {
     setTimeout(() => controller.abort(), 20);
     await assert.rejects(() => loaded.tools[0].execute({ delayMs: 1_000 }, controller.signal), /abort/i);
     await waitFor(() => server.slowCalls.aborted === 1);
+});
+
+test("loadMcpTools rejects redirects before forwarding credentials", async (t) => {
+    let leaked = false;
+    const target = createServer((request, response) => {
+        leaked = request.headers["x-api-key"] !== undefined || request.headers.authorization !== undefined;
+        response.writeHead(500).end();
+    });
+    target.listen(0, "127.0.0.1");
+    await once(target, "listening");
+    t.after(() => target.close());
+
+    const targetPort = (target.address() as AddressInfo).port;
+    const redirector = createServer((_request, response) => {
+        response.writeHead(307, { Location: `http://127.0.0.1:${targetPort}/mcp` }).end();
+    });
+    redirector.listen(0, "127.0.0.1");
+    await once(redirector, "listening");
+    t.after(() => redirector.close());
+
+    const port = (redirector.address() as AddressInfo).port;
+    await assert.rejects(() =>
+        loadMcpTools(
+            mcpConfig("fixture", `http://127.0.0.1:${port}/mcp`, {
+                headers: { "X-API-Key": "secret" },
+            }),
+        ),
+    );
+    assert.equal(leaked, false);
 });
 
 test("loadMcpTools rejects missing allowed tools", async () => {

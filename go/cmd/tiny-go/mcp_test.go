@@ -129,7 +129,7 @@ func TestModernStatelessMCPNegotiation(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	loaded, err := loadMCPTools(context.Background(), trustedMCPConfig("fixture", server.URL), server.Client())
+	loaded, err := loadMCPTools(context.Background(), mcpTestConfig("fixture", server.URL), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestSDKRejectsUnsupportedLegacyMCP(t *testing.T) {
 		writeRPCError(w, request.ID, -32022, map[string]any{"supported": []string{"2025-03-26"}})
 	}))
 	defer server.Close()
-	if _, err := loadMCPTools(context.Background(), trustedMCPConfig("fixture", server.URL), server.Client()); err == nil {
+	if _, err := loadMCPTools(context.Background(), mcpTestConfig("fixture", server.URL), server.Client()); err == nil {
 		t.Fatal("expected unsupported legacy MCP to fail")
 	}
 }
@@ -168,7 +168,7 @@ func TestMCPSDKTransportErrorsAreSanitized(t *testing.T) {
 		_, _ = fmt.Fprint(w, secret)
 	}))
 	defer server.Close()
-	_, err := loadMCPTools(context.Background(), trustedMCPConfig("x", server.URL), server.Client())
+	_, err := loadMCPTools(context.Background(), mcpTestConfig("x", server.URL), server.Client())
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("error: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestMCPTextResourceAndBinaryResource(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	loaded, err := loadMCPTools(context.Background(), trustedMCPConfig("fixture", server.URL), server.Client())
+	loaded, err := loadMCPTools(context.Background(), mcpTestConfig("fixture", server.URL), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,6 +296,35 @@ func TestMCPTextResourceAndBinaryResource(t *testing.T) {
 	result, err = loaded.tools[2].Execute(context.Background(), map[string]any{})
 	if err != nil || len([]byte(result)) > maxMCPResultBytes || !strings.HasSuffix(result, "[MCP result truncated to 50KB]") || !utf8.ValidString(result) {
 		t.Fatalf("large bytes=%d valid=%v err=%v", len([]byte(result)), utf8.ValidString(result), err)
+	}
+}
+
+func TestMCPRejectsRedirectBeforeForwardingCredentials(t *testing.T) {
+	for _, test := range []struct{ header, token string }{
+		{"Authorization", "bearer-secret"},
+		{"X-API-Key", "api-key-secret"},
+	} {
+		t.Run(test.header, func(t *testing.T) {
+			leaked := false
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				leaked = r.Header.Get(test.header) != ""
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer target.Close()
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL+"/mcp", http.StatusTemporaryRedirect)
+			}))
+			defer redirector.Close()
+			config := mcpTestConfig("fixture", redirector.URL)
+			config.AuthHeader = test.header
+			config.Token = test.token
+			if _, err := loadMCPTools(context.Background(), config, redirector.Client()); err == nil {
+				t.Fatal("redirect should fail")
+			}
+			if leaked {
+				t.Fatal("credential reached redirect target")
+			}
+		})
 	}
 }
 
@@ -321,7 +350,9 @@ func TestMCPTimeoutAndUnsupportedContent(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	loaded, err := loadMCPTools(context.Background(), MCPConfig{Alias: "x", URL: server.URL, CallTimeout: 20 * time.Millisecond}, server.Client())
+	config := mcpTestConfig("x", server.URL)
+	config.CallTimeout = 20 * time.Millisecond
+	loaded, err := loadMCPTools(context.Background(), config, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +365,7 @@ func TestMCPTimeoutAndUnsupportedContent(t *testing.T) {
 	}
 }
 
-func trustedMCPConfig(alias, address string) MCPConfig {
+func mcpTestConfig(alias, address string) MCPConfig {
 	return MCPConfig{Alias: alias, URL: address, CallTimeout: 30 * time.Second}
 }
 

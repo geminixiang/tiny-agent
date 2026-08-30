@@ -134,7 +134,7 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
     let configs = load_mcp_configs(&parsed.mcp)?;
     let mut loaded_mcp = ActiveMcp(Vec::new());
     for config in configs {
-        let alias = config.alias.clone();
+        let alias = config.alias().to_string();
         let loaded =
             load_mcp_tools(config).map_err(|error| format!("MCP {alias} failed: {error}"))?;
         loaded_mcp.0.push(loaded);

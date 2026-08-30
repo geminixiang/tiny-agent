@@ -9,13 +9,34 @@ use serde_json::{Value, json};
 use tiny_agent_rust::mcp::{McpConfig, display_tool_name, load_mcp_tools};
 
 fn config(url: String) -> McpConfig {
-    McpConfig {
-        alias: "fixture".into(),
-        url,
-        token: None,
-        allowed_tools: None,
-        call_timeout_ms: 150,
-    }
+    McpConfig::new("fixture".into(), url, None, None, 150).unwrap()
+}
+
+#[test]
+fn config_rejects_untrusted_values() {
+    assert!(McpConfig::new("".into(), "https://example.com".into(), None, None, 1).is_err());
+    assert!(McpConfig::new("x".into(), "http://example.com".into(), None, None, 1).is_err());
+    assert!(McpConfig::new("x".into(), "https://example.com".into(), None, None, 0).is_err());
+    assert!(
+        McpConfig::new(
+            "x".into(),
+            "https://example.com".into(),
+            Some("secret\r\nX-Injected: yes".into()),
+            None,
+            1,
+        )
+        .is_err()
+    );
+    assert!(
+        McpConfig::new(
+            "x".into(),
+            "https://example.com".into(),
+            None,
+            Some(vec!["echo".into(), "echo".into()]),
+            1,
+        )
+        .is_err()
+    );
 }
 
 fn read_request(stream: &mut TcpStream) -> (String, Value) {
