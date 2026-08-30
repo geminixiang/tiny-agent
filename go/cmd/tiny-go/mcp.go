@@ -236,7 +236,22 @@ func loadMCPConfigs(aliases []string, env map[string]string) ([]MCPConfig, error
 		if rawURL, ok := entry["url"]; !ok || json.Unmarshal(rawURL, &address) != nil || address == "" {
 			return nil, fmt.Errorf("MCP server %s url must be a string", alias)
 		}
-		config := MCPConfig{Alias: alias, URL: address, CallTimeout: 30 * time.Second}
+		parsed, err := url.Parse(address)
+		if err != nil || parsed.Host == "" {
+			return nil, errors.New("MCP URL must be a valid URL")
+		}
+		loopback := parsed.Hostname() == "localhost" || (net.ParseIP(parsed.Hostname()) != nil && net.ParseIP(parsed.Hostname()).IsLoopback())
+		if parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopback) {
+			return nil, errors.New("MCP URL must use HTTPS unless it targets loopback")
+		}
+		if parsed.User != nil {
+			return nil, errors.New("MCP URL must not contain credentials")
+		}
+		endpoint, err := canonicalMCPEndpoint(parsed)
+		if err != nil {
+			return nil, err
+		}
+		config := MCPConfig{Alias: alias, URL: endpoint, CallTimeout: 30 * time.Second}
 		_, tokenSet := entry["tokenEnv"]
 		_, authSet := entry["auth"]
 		if tokenSet && authSet {
@@ -331,27 +346,6 @@ func currentEnvironment() map[string]string {
 }
 
 func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*MCPClient, error) {
-	if strings.TrimSpace(config.Alias) == "" {
-		return nil, errors.New("MCP alias must be a nonempty string")
-	}
-	parsed, err := url.Parse(config.URL)
-	if err != nil || parsed.Host == "" {
-		return nil, errors.New("MCP URL must be a valid URL")
-	}
-	loopback := parsed.Hostname() == "localhost" || (net.ParseIP(parsed.Hostname()) != nil && net.ParseIP(parsed.Hostname()).IsLoopback())
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopback) {
-		return nil, errors.New("MCP URL must use HTTPS unless it targets loopback")
-	}
-	if parsed.User != nil {
-		return nil, errors.New("MCP URL must not contain credentials")
-	}
-	endpoint, err := canonicalMCPEndpoint(parsed)
-	if err != nil {
-		return nil, err
-	}
-	if config.CallTimeout <= 0 {
-		config.CallTimeout = 30 * time.Second
-	}
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -365,7 +359,7 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 		base = mcpAuthTransport{base: base, header: config.AuthHeader, token: config.Token}
 	}
 	clone.Transport = mcpLifecycleTransport{base: base, state: &mcpLifecycleState{}}
-	transport := &sdk.StreamableClientTransport{Endpoint: endpoint, HTTPClient: &clone, DisableStandaloneSSE: true, MaxRetries: -1}
+	transport := &sdk.StreamableClientTransport{Endpoint: config.URL, HTTPClient: &clone, DisableStandaloneSSE: true, MaxRetries: -1}
 	session, err := sdk.NewClient(&sdk.Implementation{Name: "tiny-agent", Version: "0.1.0"}, nil).Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("MCP connect: %w", err)
@@ -376,7 +370,7 @@ func loadMCPTools(ctx context.Context, config MCPConfig, client *http.Client) (*
 	if err != nil {
 		return fail(fmt.Errorf("MCP tools/list: %w", err))
 	}
-	endpointDigest := digestMCPIdentity(map[string]any{"endpoint": endpoint, "auth": config.AuthHeader, "protocol": mcp.protocolVersion})
+	endpointDigest := digestMCPIdentity(map[string]any{"endpoint": config.URL, "auth": config.AuthHeader, "protocol": mcp.protocolVersion})
 	seenRemote := map[string]bool{}
 	seenMapped := map[string]bool{}
 	for _, remote := range listed {

@@ -74,7 +74,7 @@ func TestSDKAutoNegotiatesStatefulLegacyMCP(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	loaded, err := loadMCPTools(context.Background(), MCPConfig{Alias: "legacy", URL: server.URL}, server.Client())
+	loaded, err := loadMCPTools(context.Background(), trustedMCPConfig("legacy", server.URL), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}

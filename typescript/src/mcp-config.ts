@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { requireMcpConfigPath, systemEnv } from "./env.js";
-import { validateNonemptyStringArray, type McpConfig } from "./mcp.js";
+import type { McpConfig } from "./mcp.js";
 
 const ROOT_KEYS = new Set(["servers"]);
 const SERVER_KEYS = new Set(["url", "tokenEnv", "auth", "allowedTools", "callTimeoutMs"]);
@@ -11,7 +11,7 @@ export type McpServerCatalog = {
     servers: Record<
         string,
         {
-            url: string;
+            url: URL;
             tokenEnv?: string;
             auth?: { type: "metabaseApiKey"; tokenEnv: string };
             allowedTools?: string[];
@@ -48,7 +48,7 @@ export async function loadMcpConfigs(aliases: string[], env: NodeJS.ProcessEnv =
                   }
                 : {}),
             ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
-            ...(server.callTimeoutMs ? { callTimeoutMs: server.callTimeoutMs } : {}),
+            callTimeoutMs: server.callTimeoutMs ?? 30_000,
         });
     }
     return configs;
@@ -64,6 +64,7 @@ function validateCatalog(value: unknown): McpServerCatalog {
         const server = assertObject(value, `MCP server ${alias}`);
         assertNoUnknownField(server, SERVER_KEYS, `MCP server ${alias}`);
         if (typeof server.url !== "string" || !server.url) throw Error(`MCP server ${alias} url must be a string`);
+        const url = validateUrl(server.url);
         if (server.tokenEnv !== undefined) validateTokenEnv(server.tokenEnv, `MCP server ${alias} tokenEnv`);
         if (server.tokenEnv !== undefined && server.auth !== undefined) {
             throw Error(`MCP server ${alias} must not set both tokenEnv and auth`);
@@ -88,7 +89,7 @@ function validateCatalog(value: unknown): McpServerCatalog {
             throw Error(`MCP server ${alias} callTimeoutMs must be a positive number`);
         }
         validated[alias] = {
-            url: server.url,
+            url,
             ...(server.tokenEnv === undefined ? {} : { tokenEnv: server.tokenEnv }),
             ...(auth === undefined ? {} : { auth }),
             ...(server.allowedTools === undefined ? {} : { allowedTools: [...server.allowedTools] as string[] }),
@@ -104,6 +105,29 @@ function credential(server: McpServerCatalog["servers"][string], env: NodeJS.Pro
     const token = Object.hasOwn(env, tokenEnv) ? env[tokenEnv] : undefined;
     if (!token) throw Error(`MCP token environment variable is not set: ${tokenEnv}`);
     return token;
+}
+
+function validateUrl(value: string): URL {
+    let url: URL;
+    try {
+        url = new URL(value);
+    } catch {
+        throw Error("MCP URL must be a valid URL");
+    }
+    const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+        throw Error("MCP URL must use HTTPS unless it targets loopback");
+    }
+    if (url.username || url.password) throw Error("MCP URL must not contain credentials");
+    return url;
+}
+
+function validateNonemptyStringArray(value: unknown, subject: string): asserts value is string[] | undefined {
+    if (value === undefined) return;
+    if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item)) {
+        throw Error(`${subject} must contain nonempty strings`);
+    }
+    if (new Set(value).size !== value.length) throw Error(`${subject} must not contain duplicates`);
 }
 
 function validateTokenEnv(value: unknown, name: string): asserts value is string {

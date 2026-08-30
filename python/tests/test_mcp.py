@@ -10,12 +10,12 @@ from unittest.mock import patch
 
 from mcp_fixture import McpFixture
 from tiny_agent.http import read_http_response
-from tiny_agent.mcp import McpConfig, _encode_mcp_param_value, _normalize_result, display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases
+from tiny_agent.mcp import McpConfig, _encode_mcp_param_value, _normalize_result, display_tool_name, load_mcp_configs, load_mcp_tools, split_names
 
 
 class McpTest(unittest.IsolatedAsyncioTestCase):
     async def test_alias_splitting_and_catalog_validation(self):
-        self.assertEqual(split_mcp_aliases([" sentry, public ", "sentry", ""]), ["sentry", "public"])
+        self.assertEqual(split_names([" sentry, public ", "sentry", ""]), ["sentry", "public"])
         with TemporaryDirectory() as root:
             path = Path(root) / "catalog.json"
             path.write_text(json.dumps({"servers": {"fixture": {"url": "https://example.com/mcp", "tokenEnv": "JOB_TOKEN", "allowedTools": ["echo"], "callTimeoutMs": 1234}}}), encoding="utf-8")
@@ -25,6 +25,9 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "Unknown MCP server fixture field: extra"): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
             path.write_text(json.dumps({"servers": {"fixture": {"url": "https://example.com", "tokenEnv": "TOKEN"}}}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "environment variable is not set"): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
+            for url, error in (("not a URL", "valid URL"), ("http://example.com/mcp", "use HTTPS"), ("https://user:pass@example.com/mcp", "credentials")):
+                path.write_text(json.dumps({"servers": {"fixture": {"url": url}}}), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, error): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
 
     async def test_modern_json_and_sse_list_call_auth_normalization_and_errors(self):
         for sse, chunked in ((False, False), (False, True), (True, False), (True, True)):
@@ -224,11 +227,6 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(caller_task.done())
             caller_task.cancel(); await asyncio.gather(caller_task, return_exceptions=True)
         finally: fixture.close()
-
-    async def test_config_rejects_untrusted_urls_and_duplicate_allowlist(self):
-        with self.assertRaisesRegex(ValueError, "use HTTPS"): await load_mcp_tools(McpConfig("x", "http://example.com/mcp"))
-        with self.assertRaisesRegex(ValueError, "credentials"): await load_mcp_tools(McpConfig("x", "https://user:pass@example.com/mcp"))
-        with self.assertRaisesRegex(ValueError, "duplicates"): await load_mcp_tools(McpConfig("x", "https://example.com/mcp", allowed_tools=["a", "a"]))
 
 
 if __name__ == "__main__": unittest.main()

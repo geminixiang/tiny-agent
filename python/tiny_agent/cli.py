@@ -8,7 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from .agent import Agent, TOOL_DEFINITIONS, close_background_processes, format_tool_event, format_usage, load_project_instructions, load_skills, set_root
-from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_mcp_aliases, split_names
+from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_names
 from .session import Session
 from .settings import Settings
 from .terminal import Terminal
@@ -155,7 +155,7 @@ async def run_cli(argv: list[str] | None = None) -> int:
         os.chdir(path)
         set_root(path)
     local_tools = selected_local_tools(args.plugin)
-    aliases = split_mcp_aliases(args.mcp)
+    aliases = split_names(args.mcp)
     loaded_mcp = await connect_mcp(aliases)
     try:
         return await run_session(args, aliases, local_tools, loaded_mcp)

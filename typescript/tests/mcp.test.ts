@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { displayToolName, loadMcpTools } from "../src/mcp.js";
+import { displayToolName, loadMcpTools, type McpConfig } from "../src/mcp.js";
 import { startLegacyTestMcpServer } from "./support/legacy-mcp-server.js";
 import { startTestMcpServer } from "./support/mcp-server.js";
 
@@ -81,12 +81,12 @@ test("official MCP v2 client cancels slow calls at the server and remains usable
 test("loadMcpTools auto-negotiates a stateful legacy server", async (t) => {
     const server = await startLegacyTestMcpServer();
     t.after(async () => server.close());
-    const loaded = await loadMcpTools({
-        alias: "legacy",
-        url: server.url,
-        headers: { "X-API-Key": "fixture-secret" },
-        allowedTools: ["echo"],
-    });
+    const loaded = await loadMcpTools(
+        mcpConfig("legacy", server.url, {
+            headers: { "X-API-Key": "fixture-secret" },
+            allowedTools: ["echo"],
+        }),
+    );
     t.after(async () => loaded.close());
     assert.equal(loaded.protocolVersion, "2025-03-26");
     assert.equal(await loaded.tools[0].execute({ message: "hello" }), "hello");
@@ -107,7 +107,7 @@ test("loadMcpTools auto-negotiates a stateful legacy server", async (t) => {
 
 test("loadMcpTools maps and calls local MCP tools", async (t) => {
     const server = await startTestMcpServer();
-    const loaded = await loadMcpTools({ alias: "fixture", url: server.url });
+    const loaded = await loadMcpTools(mcpConfig("fixture", server.url));
     t.after(async () => {
         await loaded.close();
         await server.close();
@@ -143,12 +143,9 @@ test("loadMcpTools maps and calls local MCP tools", async (t) => {
 
 test("loadMcpTools filters tools and propagates cancellation", async (t) => {
     const server = await startTestMcpServer();
-    const loaded = await loadMcpTools({
-        alias: "fixture",
-        url: server.url,
-        allowedTools: ["slow"],
-        callTimeoutMs: 1_000,
-    });
+    const loaded = await loadMcpTools(
+        mcpConfig("fixture", server.url, { allowedTools: ["slow"], callTimeoutMs: 1_000 }),
+    );
     t.after(async () => {
         await loaded.close();
         await server.close();
@@ -161,30 +158,10 @@ test("loadMcpTools filters tools and propagates cancellation", async (t) => {
     await waitFor(() => server.slowCalls.aborted === 1);
 });
 
-test("loadMcpTools validates trusted config before network access", async () => {
-    const unreachable = "http://127.0.0.1:1/mcp";
-    await assert.rejects(() => loadMcpTools({ alias: "", url: unreachable }), /alias/);
-    await assert.rejects(() => loadMcpTools({ alias: "fixture", url: "file:///tmp/mcp" }), /use HTTPS/);
-    await assert.rejects(() => loadMcpTools({ alias: "fixture", url: "http://example.com/mcp" }), /use HTTPS/);
-    await assert.rejects(() => loadMcpTools({ alias: "fixture", url: unreachable, callTimeoutMs: 0 }), /callTimeoutMs/);
-    await assert.rejects(
-        () => loadMcpTools({ alias: "fixture", url: unreachable, allowedTools: ["echo", "echo"] }),
-        /must not contain duplicates/,
-    );
-    await assert.rejects(
-        () => loadMcpTools({ alias: "fixture", url: unreachable, unexpected: true } as never),
-        /Unknown MCP config field: unexpected/,
-    );
-    await assert.rejects(
-        () => loadMcpTools({ alias: "fixture", url: unreachable, headers: { "bad header": "value" } }),
-        /invalid name or value/,
-    );
-});
-
 test("loadMcpTools rejects missing allowed tools", async () => {
     const server = await startTestMcpServer();
     await assert.rejects(
-        () => loadMcpTools({ alias: "fixture", url: server.url, allowedTools: ["missing"] }),
+        () => loadMcpTools(mcpConfig("fixture", server.url, { allowedTools: ["missing"] })),
         /allowed tools were not found: missing/,
     );
     await server.close();
@@ -193,7 +170,7 @@ test("loadMcpTools rejects missing allowed tools", async () => {
 test("loadMcpTools closes partial startup when discovered names cannot be mapped", async () => {
     const server = await startTestMcpServer({ longToolName: true });
     await assert.rejects(
-        () => loadMcpTools({ alias: "fixture", url: server.url }),
+        () => loadMcpTools(mcpConfig("fixture", server.url)),
         /mapped MCP tool name exceeds 64 characters/,
     );
     await server.close();
@@ -201,17 +178,13 @@ test("loadMcpTools closes partial startup when discovered names cannot be mapped
 
 test("loadMcpTools normalizes embedded text resources and rejects binary content", async () => {
     const resource = await startTestMcpServer({ resourceContent: true });
-    const loaded = await loadMcpTools({ alias: "fixture", url: resource.url, allowedTools: ["resource"] });
+    const loaded = await loadMcpTools(mcpConfig("fixture", resource.url, { allowedTools: ["resource"] }));
     assert.equal(await loaded.tools[0].execute({}), "Resource: file:///README.md\n# tiny-agent");
     await loaded.close();
     await resource.close();
 
     const unsupported = await startTestMcpServer({ unsupportedContent: true });
-    const unsupportedLoaded = await loadMcpTools({
-        alias: "fixture",
-        url: unsupported.url,
-        allowedTools: ["image"],
-    });
+    const unsupportedLoaded = await loadMcpTools(mcpConfig("fixture", unsupported.url, { allowedTools: ["image"] }));
     await assert.rejects(() => unsupportedLoaded.tools[0].execute({}), /Unsupported MCP content type: image/);
     await unsupportedLoaded.close();
     await unsupported.close();
@@ -219,17 +192,17 @@ test("loadMcpTools normalizes embedded text resources and rejects binary content
 
 test("loadMcpTools rejects oversized discovery", async () => {
     const largeSchema = await startTestMcpServer({ largeSchema: true });
-    await assert.rejects(() => loadMcpTools({ alias: "fixture", url: largeSchema.url }), /schema exceeds 50KB/);
+    await assert.rejects(() => loadMcpTools(mcpConfig("fixture", largeSchema.url)), /schema exceeds 50KB/);
     await largeSchema.close();
 
     const tooMany = await startTestMcpServer({ tooManyTools: true });
-    await assert.rejects(() => loadMcpTools({ alias: "fixture", url: tooMany.url }), /more than 64 tools/);
+    await assert.rejects(() => loadMcpTools(mcpConfig("fixture", tooMany.url)), /more than 64 tools/);
     await tooMany.close();
 });
 
 test("loadMcpTools bounds large UTF-8 results", async (t) => {
     const server = await startTestMcpServer({ largeResult: true });
-    const loaded = await loadMcpTools({ alias: "fixture", url: server.url, allowedTools: ["large"] });
+    const loaded = await loadMcpTools(mcpConfig("fixture", server.url, { allowedTools: ["large"] }));
     t.after(async () => {
         await loaded.close();
         await server.close();
@@ -239,6 +212,10 @@ test("loadMcpTools bounds large UTF-8 results", async (t) => {
     assert.match(result, /MCP result truncated to 50KB/);
     assert.doesNotMatch(result, /�/);
 });
+
+function mcpConfig(alias: string, url: string | URL, overrides: Partial<McpConfig> = {}): McpConfig {
+    return { alias, url: new URL(url), callTimeoutMs: 30_000, ...overrides };
+}
 
 async function waitFor(predicate: () => boolean) {
     const deadline = Date.now() + 1_000;

@@ -35,18 +35,19 @@ test("loads the trusted MCP catalog from an explicit TINY_MCP_CONFIG path and re
         [
             {
                 alias: "sentry",
-                url: "https://mcp.example.com/sentry",
+                url: new URL("https://mcp.example.com/sentry"),
                 headers: { Authorization: "Bearer secret" },
                 allowedTools: ["search", "get_issue"],
                 callTimeoutMs: 12_000,
             },
             {
                 alias: "metabase",
-                url: "https://mcp.example.com/metabase",
+                url: new URL("https://mcp.example.com/metabase"),
                 headers: { "X-API-Key": "metabase-secret" },
                 allowedTools: ["execute_question"],
+                callTimeoutMs: 30_000,
             },
-            { alias: "public", url: "https://mcp.example.com/public" },
+            { alias: "public", url: new URL("https://mcp.example.com/public"), callTimeoutMs: 30_000 },
         ],
     );
 });
@@ -65,6 +66,12 @@ test("rejects invalid catalogs, aliases, and missing tokens without leaking secr
 
     await assert.rejects(() => load({ ...fixture, extra: true }), /Unknown MCP catalog field: extra/);
     await assert.rejects(() => load({ servers: { sentry: { url: 42 } } }), /MCP server sentry url must be a string/);
+    await assert.rejects(() => load({ servers: { sentry: { url: "not a URL" } } }), /valid URL/);
+    await assert.rejects(() => load({ servers: { sentry: { url: "http://example.com/mcp" } } }), /use HTTPS/);
+    await assert.rejects(
+        () => load({ servers: { sentry: { url: "https://user:pass@example.com/mcp" } } }),
+        /must not contain credentials/,
+    );
     await assert.rejects(
         () => load({ servers: { sentry: { url: "https://example.com", tokenEnv: 42 } } }),
         /tokenEnv must be an environment variable name/,

@@ -10,7 +10,7 @@ test(
     async () => {
         const loaded = await loadMcpTools({
             alias: "github",
-            url: "https://api.githubcopilot.com/mcp/",
+            url: new URL("https://api.githubcopilot.com/mcp/"),
             headers: { Authorization: `Bearer ${token}` },
             allowedTools: ["get_file_contents"],
             callTimeoutMs: 30_000,

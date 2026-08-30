@@ -49,9 +49,6 @@ def split_names(values: list[str] | None) -> list[str]:
     return aliases
 
 
-split_mcp_aliases = split_names
-
-
 def load_mcp_configs(aliases: list[str], env: Mapping[str, str] | None = None) -> list[McpConfig]:
     if not aliases: return []
     settings = Settings(); env = settings.environment if env is None else env
@@ -91,6 +88,7 @@ def _validate_catalog(value: object) -> dict[str, dict]:
         server = _object(raw, f"MCP server {alias}")
         _unknown_field(server, {"url", "tokenEnv", "allowedTools", "callTimeoutMs"}, f"MCP server {alias}")
         if not isinstance(server.get("url"), str) or not server["url"]: raise ValueError(f"MCP server {alias} url must be a string")
+        _validate_url(server["url"])
         token_env = server.get("tokenEnv")
         if token_env is not None and (not isinstance(token_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token_env)):
             raise ValueError(f"MCP server {alias} tokenEnv must be an environment variable name")
@@ -104,6 +102,16 @@ def _validate_catalog(value: object) -> dict[str, dict]:
             raise ValueError(f"MCP server {alias} callTimeoutMs must be a positive number")
         validated[alias] = dict(server)
     return validated
+
+
+def _validate_url(value: str) -> None:
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.hostname: raise ValueError("MCP URL must be a valid URL")
+    try: parsed.port
+    except ValueError: raise ValueError("MCP URL must be a valid URL") from None
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")):
+        raise ValueError("MCP URL must use HTTPS unless it targets loopback")
+    if parsed.username or parsed.password: raise ValueError("MCP URL must not contain credentials")
 
 
 def _object(value: object, name: str) -> dict:
@@ -139,7 +147,7 @@ class _RpcError(RuntimeError):
 
 class _McpClient:
     def __init__(self, config: McpConfig):
-        self.config = _validate_config(config)
+        self.config = config
         self.protocol_version: str | None = None
         self.closed = False
         self.next_id = 1
@@ -383,32 +391,6 @@ async def load_mcp_tools(config: McpConfig, cancelled: asyncio.Event | None = No
         await client.close()
         raise
 
-
-def _validate_config(config: McpConfig) -> McpConfig:
-    if not isinstance(config, McpConfig): raise ValueError("MCP config must be an object")
-    alias = config.alias.strip() if isinstance(config.alias, str) else ""
-    if not alias: raise ValueError("MCP alias must be a nonempty string")
-    if not isinstance(config.url, str): raise ValueError("MCP URL must be a valid URL")
-    parsed = urlsplit(config.url)
-    if not parsed.scheme or not parsed.hostname: raise ValueError("MCP URL must be a valid URL")
-    try: port = parsed.port
-    except ValueError: raise ValueError("MCP URL must be a valid URL") from None
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")):
-        raise ValueError("MCP URL must use HTTPS unless it targets loopback")
-    if parsed.username or parsed.password: raise ValueError("MCP URL must not contain credentials")
-    timeout = config.call_timeout_ms
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0: raise ValueError("MCP callTimeoutMs must be a positive number")
-    if config.headers is not None and (not isinstance(config.headers, dict) or any(
-        not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key) or
-        not isinstance(value, str) or any(ord(char) < 32 and char != "\t" or ord(char) == 127 for char in value)
-        for key, value in config.headers.items()
-    )):
-        raise ValueError("MCP headers contain an invalid name or value")
-    allowed = config.allowed_tools
-    if allowed is not None:
-        if not isinstance(allowed, list) or any(not isinstance(name, str) or not name for name in allowed): raise ValueError("MCP allowedTools must contain nonempty strings")
-        if len(set(allowed)) != len(allowed): raise ValueError("MCP allowedTools must not contain duplicates")
-    return McpConfig(alias, config.url, config.headers, list(allowed) if allowed is not None else None, timeout)
 
 
 def _validate_schema(schema: object, tool_name: str) -> None:

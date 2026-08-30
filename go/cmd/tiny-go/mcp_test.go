@@ -66,6 +66,10 @@ func TestLoadMCPConfigsStrictCatalogAndToken(t *testing.T) {
 		{`{"servers":{"fixture":{"url":"https://x","header":"secret"}}}`, "Unknown MCP server fixture field"},
 		{`{"servers":{"fixture":{"url":"https://x","allowedTools":null}}}`, "allowedTools must contain nonempty strings"},
 		{`{"servers":{"fixture":{"url":"https://x","allowedTools":["x","x"]}}}`, "allowedTools must contain nonempty, unique strings"},
+		{`{"servers":{"fixture":{"url":"not a URL"}}}`, "valid URL"},
+		{`{"servers":{"fixture":{"url":"http://example.com/mcp"}}}`, "use HTTPS"},
+		{`{"servers":{"fixture":{"url":"https://user:pass@example.com/mcp"}}}`, "must not contain credentials"},
+		{`{"servers":{"fixture":{"url":"https://example.com/mcp#fragment"}}}`, "must not contain a fragment"},
 		{catalog, "environment variable is not set"},
 	} {
 		if err := os.WriteFile(path, []byte(test.body), 0o644); err != nil {
@@ -125,7 +129,7 @@ func TestModernStatelessMCPNegotiation(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	loaded, err := loadMCPTools(context.Background(), MCPConfig{Alias: "fixture", URL: server.URL}, server.Client())
+	loaded, err := loadMCPTools(context.Background(), trustedMCPConfig("fixture", server.URL), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +156,7 @@ func TestSDKRejectsUnsupportedLegacyMCP(t *testing.T) {
 		writeRPCError(w, request.ID, -32022, map[string]any{"supported": []string{"2025-03-26"}})
 	}))
 	defer server.Close()
-	if _, err := loadMCPTools(context.Background(), MCPConfig{Alias: "fixture", URL: server.URL}, server.Client()); err == nil {
+	if _, err := loadMCPTools(context.Background(), trustedMCPConfig("fixture", server.URL), server.Client()); err == nil {
 		t.Fatal("expected unsupported legacy MCP to fail")
 	}
 }
@@ -164,7 +168,7 @@ func TestMCPSDKTransportErrorsAreSanitized(t *testing.T) {
 		_, _ = fmt.Fprint(w, secret)
 	}))
 	defer server.Close()
-	_, err := loadMCPTools(context.Background(), MCPConfig{Alias: "x", URL: server.URL}, server.Client())
+	_, err := loadMCPTools(context.Background(), trustedMCPConfig("x", server.URL), server.Client())
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("error: %v", err)
 	}
@@ -277,7 +281,7 @@ func TestMCPTextResourceAndBinaryResource(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	loaded, err := loadMCPTools(context.Background(), MCPConfig{Alias: "fixture", URL: server.URL}, server.Client())
+	loaded, err := loadMCPTools(context.Background(), trustedMCPConfig("fixture", server.URL), server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,10 +299,7 @@ func TestMCPTextResourceAndBinaryResource(t *testing.T) {
 	}
 }
 
-func TestMCPValidationTimeoutAndUnsupportedContent(t *testing.T) {
-	if _, err := loadMCPTools(context.Background(), MCPConfig{Alias: "x", URL: "http://example.com/mcp"}, nil); err == nil || !strings.Contains(err.Error(), "HTTPS") {
-		t.Fatalf("insecure URL: %v", err)
-	}
+func TestMCPTimeoutAndUnsupportedContent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			ID     int            `json:"id"`
@@ -331,6 +332,10 @@ func TestMCPValidationTimeoutAndUnsupportedContent(t *testing.T) {
 	if _, err := loaded.tools[1].Execute(context.Background(), map[string]any{}); err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout: %v", err)
 	}
+}
+
+func trustedMCPConfig(alias, address string) MCPConfig {
+	return MCPConfig{Alias: alias, URL: address, CallTimeout: 30 * time.Second}
 }
 
 func writeRPC(w http.ResponseWriter, id int, result any) {

@@ -7,13 +7,12 @@ const MAX_SCHEMA_BYTES = 50 * 1024;
 const MAX_DESCRIPTION_BYTES = 8 * 1024;
 const MAX_SCHEMA_DEPTH = 20;
 const MAX_TOOLS = 64;
-const CONFIG_KEYS = new Set(["alias", "url", "headers", "callTimeoutMs", "allowedTools"]);
 
 export type McpConfig = {
     alias: string;
-    url: string | URL;
+    url: URL;
     headers?: Record<string, string>;
-    callTimeoutMs?: number;
+    callTimeoutMs: number;
     allowedTools?: string[];
 };
 
@@ -24,7 +23,6 @@ export type LoadedMcpTools = {
 };
 
 export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Promise<LoadedMcpTools> {
-    const validated = validateConfig(config);
     const client = new Client({ name: "tiny-agent", version: "0.1.0" }, { versionNegotiation: { mode: "auto" } });
     let closed = false;
     let transport: StreamableHTTPClientTransport | undefined;
@@ -39,21 +37,21 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
     };
 
     try {
-        transport = new StreamableHTTPClientTransport(validated.url, {
-            requestInit: validated.headers ? { headers: validated.headers } : undefined,
+        transport = new StreamableHTTPClientTransport(config.url, {
+            requestInit: config.headers ? { headers: config.headers } : undefined,
         });
         await client.connect(transport, { signal });
         const listed = await client.listTools(undefined, { signal });
         if (listed.tools.length > MAX_TOOLS) throw Error(`MCP server returned more than ${MAX_TOOLS} tools`);
         const remoteNames = new Set<string>();
         const mappedNames = new Set<string>();
-        const allowed = validated.allowedTools && new Set(validated.allowedTools);
+        const allowed = config.allowedTools && new Set(config.allowedTools);
         const tools: Tool[] = [];
         const protocolVersion = client.getNegotiatedProtocolVersion();
         if (!protocolVersion) throw Error("MCP server did not negotiate a protocol version");
         const adapterIdentity = canonicalDigest({
-            url: validated.url.toString(),
-            auth: mcpAuthType(validated.headers),
+            url: config.url.toString(),
+            auth: mcpAuthType(config.headers),
             protocolVersion,
         });
 
@@ -65,12 +63,12 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
             if (remote.description && Buffer.byteLength(remote.description) > MAX_DESCRIPTION_BYTES) {
                 throw Error(`MCP tool description exceeds 8KB: ${remote.name}`);
             }
-            const name = mapToolName(validated.alias, remote.name);
+            const name = mapToolName(config.alias, remote.name);
             if (mappedNames.has(name)) throw Error(`duplicate mapped MCP tool name: ${name}`);
             mappedNames.add(name);
             tools.push({
                 name,
-                description: remote.description ?? `MCP tool ${remote.name} from ${validated.alias}.`,
+                description: remote.description ?? `MCP tool ${remote.name} from ${config.alias}.`,
                 parameters: remote.inputSchema as Record<string, unknown>,
                 definitionIdentity: `${adapterIdentity}:${remote.name}`,
                 async execute(args, callSignal) {
@@ -82,8 +80,8 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
                         { name: remote.name, arguments: args },
                         {
                             signal: callSignal,
-                            timeout: validated.callTimeoutMs,
-                            maxTotalTimeout: validated.callTimeoutMs,
+                            timeout: config.callTimeoutMs,
+                            maxTotalTimeout: config.callTimeoutMs,
                             allowInputRequired: true,
                         },
                     );
@@ -110,58 +108,6 @@ export async function loadMcpTools(config: McpConfig, signal?: AbortSignal): Pro
 
 // prettier-ignore
 function mcpAuthType(headers?: Record<string, string>) { const h = new Headers(headers); return h.has("x-api-key") ? "metabaseApiKey" : h.has("authorization") ? "bearer" : "none"; }
-
-function validateConfig(config: McpConfig) {
-    if (!config || typeof config !== "object" || Array.isArray(config)) throw Error("MCP config must be an object");
-    const unknown = Object.keys(config).find((key) => !CONFIG_KEYS.has(key));
-    if (unknown) throw Error(`Unknown MCP config field: ${unknown}`);
-    if (typeof config.alias !== "string" || !config.alias.trim()) throw Error("MCP alias must be a nonempty string");
-    let url: URL;
-    try {
-        url = new URL(config.url);
-    } catch {
-        throw Error("MCP URL must be a valid URL");
-    }
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url.hostname))) {
-        throw Error("MCP URL must use HTTPS unless it targets loopback");
-    }
-    if (url.username || url.password) throw Error("MCP URL must not contain credentials");
-    if (config.callTimeoutMs !== undefined && (!Number.isFinite(config.callTimeoutMs) || config.callTimeoutMs <= 0)) {
-        throw Error("MCP callTimeoutMs must be a positive number");
-    }
-    if (config.headers !== undefined) {
-        if (config.headers === null || typeof config.headers !== "object" || Array.isArray(config.headers)) {
-            throw Error("MCP headers must be an object");
-        }
-        try {
-            new Headers(config.headers);
-        } catch {
-            throw Error("MCP headers contain an invalid name or value");
-        }
-        for (const [name, value] of Object.entries(config.headers)) {
-            if (!name || typeof value !== "string") throw Error("MCP headers must contain string values");
-        }
-    }
-    validateNonemptyStringArray(config.allowedTools, "MCP allowedTools");
-    return {
-        alias: config.alias.trim(),
-        url,
-        headers: config.headers,
-        callTimeoutMs: config.callTimeoutMs ?? 30_000,
-        allowedTools: config.allowedTools,
-    };
-}
-
-function isLoopback(hostname: string) {
-    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
-}
-
-export function validateNonemptyStringArray(value: unknown, subject: string): asserts value is string[] | undefined {
-    if (value === undefined) return;
-    if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item))
-        throw Error(`${subject} must contain nonempty strings`);
-    if (new Set(value).size !== value.length) throw Error(`${subject} must not contain duplicates`);
-}
 
 function validateSchema(schema: unknown, toolName: string) {
     let encoded: string;

@@ -169,13 +169,15 @@ test("MCP adapter identity changes durable tool definitions without exposing end
     t.after(async () => server.close());
     const first = await loadMcpTools({
         alias: "fixture",
-        url: server.url,
+        url: new URL(server.url),
         headers: { authorization: "Bearer one" },
+        callTimeoutMs: 30_000,
     });
     const second = await loadMcpTools({
         alias: "fixture",
-        url: server.url,
+        url: new URL(server.url),
         headers: { "x-api-key": "two" },
+        callTimeoutMs: 30_000,
     });
     t.after(async () => Promise.all([first.close(), second.close()]));
     const firstConfiguration = buildConfiguration("system", first.tools);
