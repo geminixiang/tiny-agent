@@ -220,10 +220,8 @@ fn never_replay_tool_crash_leaves_no_effect_and_recovery_does_not_replay() {
     let session_id = session.id.clone();
     session.close().unwrap();
 
-    let bash_call = format!(
-        r#"{{"command":"sleep 5 && echo hi > {marker}"}}"#,
-        marker = format!("{cwd_for_cmd}/should-not-exist.txt")
-    );
+    let bash_call =
+        format!(r#"{{"command":"sleep 5 && echo hi > {cwd_for_cmd}/should-not-exist.txt"}}"#);
     let response = tool_call_response("crash-bash", "bash", &bash_call);
     let server = start_serving_forever(response);
 

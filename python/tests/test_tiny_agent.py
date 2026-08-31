@@ -73,7 +73,7 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         await tiny.close_background_processes()
 
     async def test_file_tools_do_not_block_event_loop(self):
-        original = Path.read_text
+        original = Path.read_bytes
         started = threading.Event()
         release = threading.Event()
 
@@ -84,7 +84,7 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
 
         path = tiny.ROOT / "slow.txt"
         path.write_text("ready", encoding="utf-8")
-        with patch.object(Path, "read_text", slow_read):
+        with patch.object(Path, "read_bytes", slow_read):
             task = asyncio.create_task(tiny.execute_tool("read", {"path": "slow.txt"}))
             self.assertTrue(await asyncio.to_thread(started.wait, 1))
             await asyncio.sleep(0)
@@ -93,12 +93,12 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await task, "ready")
 
     async def test_tools_paths_and_large_bash_output(self):
-        self.assertEqual(await tiny.execute_tool("write", {"path": "a.txt", "content": "hello"}), "ok")
+        self.assertEqual(await tiny.execute_tool("write", {"path": "a.txt", "content": "hello"}), "Successfully wrote 5 bytes to a.txt.")
         self.assertEqual(await tiny.execute_tool("read", {"path": str(tiny.ROOT / "a.txt")}), "hello")
-        self.assertEqual(await tiny.execute_tool("edit", {"path": "a.txt", "oldText": "hello", "newText": "hi"}), "ok")
+        self.assertEqual(await tiny.execute_tool("edit", {"path": "a.txt", "edits": [{"oldText": "hello", "newText": "hi"}]}), "Successfully replaced 1 block(s) in a.txt.")
         outside = Path(self.temp.name).resolve().parent / "tiny-agent-outside.txt"
         try:
-            self.assertEqual(await tiny.execute_tool("write", {"path": str(outside), "content": "secret"}), "ok")
+            self.assertEqual(await tiny.execute_tool("write", {"path": str(outside), "content": "secret"}), f"Successfully wrote 6 bytes to {outside}.")
             self.assertEqual(await tiny.execute_tool("read", {"path": str(outside)}), "secret")
         finally: outside.unlink(missing_ok=True)
         result = await tiny.execute_tool(
@@ -107,6 +107,29 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         path = Path(re.search(r"Full output: (.*\.log)\]", result).group(1))
         self.assertTrue(path.read_text(encoding="utf-8").startswith("begin")); self.assertTrue(path.read_text(encoding="utf-8").endswith("end"))
         self.assertLess(len(result), path.stat().st_size)
+
+    async def test_read_pagination_and_atomic_multi_edit(self):
+        path = tiny.ROOT / "lines.txt"
+        path.write_text("one\n二\nthree\nfour", encoding="utf-8")
+        self.assertEqual(
+            await tiny.execute_tool("read", {"path": "lines.txt", "offset": 2, "limit": 2}),
+            "二\nthree\n\n[Showing lines 2-3 of 4. Use offset=4 to continue.]",
+        )
+        edit_path = tiny.ROOT / "edit.txt"
+        edit_path.write_bytes("\ufeffalpha\r\nbeta\r\ngamma".encode())
+        result = await tiny.execute_tool("edit", {"path": "edit.txt", "edits": [
+            {"oldText": "alpha", "newText": "A"},
+            {"oldText": "gamma", "newText": "G"},
+        ]})
+        self.assertEqual(result, "Successfully replaced 2 block(s) in edit.txt.")
+        self.assertEqual(edit_path.read_bytes(), "\ufeffA\r\nbeta\r\nG".encode())
+        before = edit_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            await tiny.execute_tool("edit", {"path": "edit.txt", "edits": [
+                {"oldText": "A\r\nbeta", "newText": "x"},
+                {"oldText": "beta\r\nG", "newText": "y"},
+            ]})
+        self.assertEqual(edit_path.read_bytes(), before)
 
     async def test_bash_error_preserves_output_and_cancel_kills_children(self):
         self.assertIn("captured", await tiny.execute_tool("bash", {"command": "printf captured; exit 7"}))
@@ -309,8 +332,12 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         reply = lambda text: iter([{"choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}], "usage": {}}])
         with patch.dict(os.environ, {"TINY_AGENT_ENVIRONMENT_IDENTITY": "fixture"}):
             safe, safe_session = self.recovery_agent("pending-safe-tool.jsonl", reply("safe done"))
+            tool_events, lifecycle = [], []
+            safe.on_tool, safe.on_event = tool_events.append, lifecycle.append
             self.assertEqual(await safe.resume_session(), "safe done")
             self.assertIn({"role": "tool", "content": "evidence", "tool_call_id": "call_1"}, safe.messages)
+            self.assertEqual([event["phase"] for event in tool_events], ["start", "end"])
+            self.assertEqual([event["type"] for event in lifecycle], ["tool.started", "tool.completed", "model.completed"])
             safe_session.close()
 
             never, never_session = self.recovery_agent("pending-never-tool.jsonl", reply("never done"))
@@ -672,6 +699,30 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["terminal", "terminal.run", "resume", "terminal.run", "run:continue"])
         self.assertLess(output.getvalue().index("session: session-id"), output.getvalue().index("recovered answer"))
         self.assertIn("recovered answer\x1b[0m\n\x1b[2m↑7 ↓3", output.getvalue())
+
+    async def test_json_mode_emits_one_shot_lifecycle_without_tui_output(self):
+        session = SimpleNamespace(id="session-id", path=Path("session.jsonl"), close=lambda: None)
+
+        class FakeAgent:
+            def __init__(self, *_args, on_event=lambda event: None, **_kwargs):
+                self.usage = {"input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4}
+                self.on_event = on_event
+            async def run_agent_loop(self, _text):
+                self.on_event({"type": "model.completed", "timestamp": "now", "durationMs": 1, "usage": self.usage})
+                return "done"
+
+        output = io.StringIO()
+        with patch.object(cli, "load_mcp_configs", return_value=[]), \
+             patch.object(cli, "load_skills", return_value=[]), \
+             patch.object(cli, "load_project_instructions", return_value=""), \
+             patch.object(cli.Session, "create", return_value=session), \
+             patch.object(cli, "Agent", FakeAgent), redirect_stdout(output):
+            self.assertEqual(await cli.run_cli(["--json", "hello"]), 0)
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([event["type"] for event in events], ["run.started", "model.completed", "run.completed"])
+        self.assertEqual(events[-1]["result"]["status"], "succeeded")
+        self.assertNotIn("tiny-agent", output.getvalue())
 
     async def test_plugin_selection_deduplicates_assembles_mcp_and_rejects_unknown_early(self):
         remote = {"type": "function", "function": {"name": "mcp_remote", "description": "remote", "parameters": {}}}

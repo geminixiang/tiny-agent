@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +24,44 @@ func inTempDir(t *testing.T) string {
 	cwd = t.TempDir()
 	t.Cleanup(func() { cwd = old })
 	return cwd
+}
+
+func TestJSONModeEmitsOneShotLifecycleWithoutTUIOutput(t *testing.T) {
+	inTempDir(t)
+	t.Setenv("OPENROUTER_API_KEY", "test")
+	t.Setenv("TINY_ENDPOINT", "http://127.0.0.1:1")
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	runErr := runCLI([]string{"--json", "hello"})
+	_ = writer.Close()
+	os.Stdout = original
+	output, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if _, ok := runErr.(silentCLIError); !ok {
+		t.Fatalf("expected silent CLI failure, got %v", runErr)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected two JSON events, got %q", output)
+	}
+	var started, completed map[string]any
+	if json.Unmarshal([]byte(lines[0]), &started) != nil || json.Unmarshal([]byte(lines[1]), &completed) != nil {
+		t.Fatalf("invalid JSON output: %q", output)
+	}
+	if started["type"] != "run.started" || completed["type"] != "run.completed" {
+		t.Fatalf("unexpected lifecycle: %v %v", started["type"], completed["type"])
+	}
+	result := completed["result"].(map[string]any)
+	if result["status"] != "failed" || result["cause"] != "agent_error" {
+		t.Fatalf("unexpected result: %v", result)
+	}
 }
 
 func TestCRLFWriter(t *testing.T) {
@@ -249,27 +288,66 @@ func TestBackgroundProcessLifecycleAndStaleMetadata(t *testing.T) {
 func TestToolsAndPathGuard(t *testing.T) {
 	inTempDir(t)
 	ctx := context.Background()
-	if got, err := executeTool(ctx, "write", map[string]string{"path": "a.txt", "content": "hello"}); err != nil || got != "ok" {
+	if got, err := executeTool(ctx, "write", map[string]any{"path": "a.txt", "content": "hello"}); err != nil || got != "Successfully wrote 5 bytes to a.txt." {
 		t.Fatalf("write: %q %v", got, err)
 	}
-	if got, _ := executeTool(ctx, "read", map[string]string{"path": "a.txt"}); got != "hello" {
+	if got, _ := executeTool(ctx, "read", map[string]any{"path": "a.txt"}); got != "hello" {
 		t.Fatalf("read: %q", got)
 	}
-	if got, err := executeTool(ctx, "edit", map[string]string{"path": "a.txt", "oldText": "hello", "newText": "hi"}); err != nil || got != "ok" {
+	if got, err := executeTool(ctx, "edit", map[string]any{"path": "a.txt", "edits": []any{map[string]any{"oldText": "hello", "newText": "hi"}}}); err != nil || got != "Successfully replaced 1 block(s) in a.txt." {
 		t.Fatalf("edit: %q %v", got, err)
 	}
-	if _, err := executeTool(ctx, "edit", map[string]string{"path": "a.txt", "oldText": "missing", "newText": "x"}); err == nil {
-		t.Fatal("edit accepted a non-unique match")
+	if _, err := executeTool(ctx, "edit", map[string]any{"path": "a.txt", "edits": []any{map[string]any{"oldText": "missing", "newText": "x"}}}); err == nil {
+		t.Fatal("edit accepted a missing match")
 	}
 	if got, _ := executeTool(ctx, "read", map[string]string{"path": filepath.Join(cwd, "a.txt")}); got != "hi" {
 		t.Fatalf("absolute read: %q", got)
 	}
 	outside := filepath.Join(t.TempDir(), "tiny-agent-outside.txt")
-	if got, err := executeTool(ctx, "write", map[string]string{"path": outside, "content": "secret"}); err != nil || got != "ok" {
+	if got, err := executeTool(ctx, "write", map[string]string{"path": outside, "content": "secret"}); err != nil || got != "Successfully wrote 6 bytes to "+outside+"." {
 		t.Fatalf("outside write: %q %v", got, err)
 	}
 	if got, err := executeTool(ctx, "read", map[string]string{"path": outside}); err != nil || got != "secret" {
 		t.Fatalf("outside read: %q %v", got, err)
+	}
+}
+
+func TestReadPaginationAndAtomicMultiEdit(t *testing.T) {
+	dir := inTempDir(t)
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(dir, "lines.txt"), []byte("one\n二\nthree\nfour"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := executeTool(ctx, "read", map[string]any{"path": "lines.txt", "offset": 2, "limit": 2})
+	if err != nil || got != "二\nthree\n\n[Showing lines 2-3 of 4. Use offset=4 to continue.]" {
+		t.Fatalf("paginated read: %q %v", got, err)
+	}
+	original := "\ufeffalpha\r\nbeta\r\ngamma"
+	if err := os.WriteFile(filepath.Join(dir, "edit.txt"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edits := []any{
+		map[string]any{"oldText": "alpha", "newText": "A"},
+		map[string]any{"oldText": "gamma", "newText": "G"},
+	}
+	if got, err := executeTool(ctx, "edit", map[string]any{"path": "edit.txt", "edits": edits}); err != nil || got != "Successfully replaced 2 block(s) in edit.txt." {
+		t.Fatalf("multi-edit: %q %v", got, err)
+	}
+	content, _ := os.ReadFile(filepath.Join(dir, "edit.txt"))
+	if string(content) != "\ufeffA\r\nbeta\r\nG" {
+		t.Fatalf("edit changed encoding or line endings: %q", content)
+	}
+	before := string(content)
+	overlap := []any{
+		map[string]any{"oldText": "A\r\nbeta", "newText": "x"},
+		map[string]any{"oldText": "beta\r\nG", "newText": "y"},
+	}
+	if _, err := executeTool(ctx, "edit", map[string]any{"path": "edit.txt", "edits": overlap}); err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("overlapping edit error: %v", err)
+	}
+	content, _ = os.ReadFile(filepath.Join(dir, "edit.txt"))
+	if string(content) != before {
+		t.Fatal("failed atomic edit changed the file")
 	}
 }
 
@@ -285,13 +363,13 @@ func TestFilesystemToolsOperateOutsideCwdIncludingSymlinks(t *testing.T) {
 		t.Fatalf("outside read: %q %v", got, err)
 	}
 	newPath := filepath.Join(outside, "nested", "new.txt")
-	if got, err := executeTool(ctx, "write", map[string]string{"path": newPath, "content": "new"}); err != nil || got != "ok" {
+	if got, err := executeTool(ctx, "write", map[string]string{"path": newPath, "content": "new"}); err != nil || got != "Successfully wrote 3 bytes to "+newPath+"." {
 		t.Fatalf("outside write: %q %v", got, err)
 	}
 	if err := os.Symlink(outside, filepath.Join(dir, "outside-link")); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := executeTool(ctx, "edit", map[string]string{"path": "outside-link/secret.txt", "oldText": "outside", "newText": "edited"}); err != nil || got != "ok" {
+	if got, err := executeTool(ctx, "edit", map[string]any{"path": "outside-link/secret.txt", "edits": []any{map[string]any{"oldText": "outside", "newText": "edited"}}}); err != nil || got != "Successfully replaced 1 block(s) in outside-link/secret.txt." {
 		t.Fatalf("outside edit: %q %v", got, err)
 	}
 	if content, err := os.ReadFile(secret); err != nil || string(content) != "edited" {

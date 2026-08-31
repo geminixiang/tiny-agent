@@ -255,7 +255,11 @@ pub fn format_usage(u: UsageState) -> String {
 
 pub fn format_tool_event(event: ToolEvent) -> String {
     if event.phase == "end" {
-        return if event.result == "ok" || event.result == "(no output)" {
+        return if event.result.starts_with("Error:")
+            || event.result == "Operation aborted"
+            || event.result == "ok"
+            || event.result == "(no output)"
+        {
             format!("  └ {}", event.result)
         } else {
             format!("  └ {} chars", event.result.len())
@@ -448,6 +452,11 @@ impl AbortHandle {
     }
 }
 
+struct DurableExecution {
+    content: String,
+    aborted: bool,
+}
+
 pub struct Agent {
     pub messages: Vec<Message>,
     pub usage: UsageState,
@@ -457,6 +466,7 @@ pub struct Agent {
     pub endpoint: String,
     pub client: Arc<ureq::Agent>,
     pub on_tool: Arc<dyn Fn(ToolEvent) + Send + Sync>,
+    pub on_event: Arc<dyn Fn(serde_json::Value) + Send + Sync>,
     pub cwd: String,
     pub local_tools: Vec<String>,
     pub mcp_tools: Vec<mcp::McpTool>,
@@ -501,6 +511,7 @@ pub fn new_agent(
         endpoint: chat_completions_url(&endpoint()),
         client: Arc::new(open_router_agent()),
         on_tool: Arc::new(|_| {}),
+        on_event: Arc::new(|_| {}),
         cwd: cwd.to_string(),
         local_tools: local_tool_names()
             .iter()
@@ -536,6 +547,38 @@ fn api_key() -> String {
         Ok(v) if !v.is_empty() => v,
         _ => String::new(),
     }
+}
+
+pub fn timestamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let seconds = now.as_secs() as i64;
+    let days = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_date(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        day_seconds / 3_600,
+        day_seconds / 60 % 60,
+        day_seconds % 60,
+        now.subsec_millis(),
+    )
+}
+
+fn civil_date(days_since_epoch: i64) -> (i64, i64, i64) {
+    let days = days_since_epoch + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_piece = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_piece + 2) / 5 + 1;
+    let month = month_piece + if month_piece < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
 }
 
 impl Agent {
@@ -954,41 +997,18 @@ impl Agent {
                 self.session.as_ref().unwrap().append(facts)?;
                 return Ok((true, result_id));
             }
-            (self.on_tool.as_ref())(ToolEvent {
-                phase: "start".into(),
-                name: call.function.name.clone(),
-                args: args.clone(),
-                result: String::new(),
-            });
-            let result = if let Some(tool) = self
-                .mcp_tools
-                .iter()
-                .find(|tool| tool.name == call.function.name)
-            {
-                tool.execute(serde_json::Value::Object(arguments), &self.cancel)
-            } else {
-                self.execute_tool(&call.function.name, &args)
-            };
-            if self.cancel.load(Ordering::SeqCst) {
+            let execution = self.execute_durable_tool(
+                operation_id,
+                step_id,
+                &started_id,
+                &result_id,
+                &call.id,
+                &call.function.name,
+                arguments,
+                args,
+            )?;
+            if execution.aborted {
                 let mut facts = Vec::new();
-                if !self.abort_was_requested()? {
-                    facts.push(abort_requested(
-                        &uuid7(),
-                        operation_id,
-                        "run",
-                        "tool",
-                        Some(&call.id),
-                    ));
-                }
-                facts.push(tool_result(
-                    &result_id,
-                    step_id,
-                    &started_id,
-                    &call.id,
-                    &call.function.name,
-                    crate::session_recovery::SYNTHETIC_INTERRUPTED,
-                    "synthetic",
-                ));
                 for (pending_index, pending) in calls.iter().enumerate().skip(index + 1) {
                     facts.push(synthetic_tool_result(
                         &uuid7(),
@@ -1012,34 +1032,88 @@ impl Agent {
                 self.session.as_ref().unwrap().append(facts)?;
                 return Ok((true, result_id));
             }
-            let (content, result_type) = match result {
-                Ok(content) => (content, "success"),
-                Err(error) => (format!("Error: {error}"), "error"),
-            };
-            (self.on_tool.as_ref())(ToolEvent {
-                phase: "end".into(),
-                name: call.function.name.clone(),
-                args,
-                result: content.clone(),
-            });
-            self.session.as_ref().unwrap().append(vec![tool_result(
-                &result_id,
-                step_id,
-                &started_id,
-                &call.id,
-                &call.function.name,
-                &content,
-                result_type,
-            )])?;
             result_entry_id = result_id;
             self.messages.push(Message {
                 role: "tool".into(),
-                content: Some(content),
+                content: Some(execution.content),
                 tool_call_id: call.id.clone(),
                 tool_calls: Vec::new(),
             });
         }
         Ok((false, result_entry_id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_durable_tool(
+        &mut self,
+        operation_id: &str,
+        step_id: &str,
+        started_id: &str,
+        result_id: &str,
+        tool_call_id: &str,
+        name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        args: ToolArgs,
+    ) -> Result<DurableExecution, String> {
+        let started = Instant::now();
+        (self.on_event.as_ref())(serde_json::json!({
+            "type":"tool.started", "timestamp":timestamp(),
+            "toolCallId":tool_call_id, "tool":name,
+        }));
+        (self.on_tool.as_ref())(ToolEvent {
+            phase: "start".into(),
+            name: name.into(),
+            args: args.clone(),
+            result: String::new(),
+        });
+        let result = if let Some(tool) = self.mcp_tools.iter().find(|tool| tool.name == name) {
+            tool.execute(serde_json::Value::Object(arguments), &self.cancel)
+        } else {
+            self.execute_tool(name, &args)
+        };
+        let aborted = self.cancel.load(Ordering::SeqCst);
+        if aborted && !self.abort_was_requested()? {
+            self.session.as_ref().unwrap().append(vec![abort_requested(
+                &uuid7(),
+                operation_id,
+                "run",
+                "tool",
+                Some(tool_call_id),
+            )])?;
+        }
+        let (content, result_type, ok) = if aborted {
+            (
+                crate::session_recovery::SYNTHETIC_INTERRUPTED.to_string(),
+                "synthetic",
+                false,
+            )
+        } else {
+            match result {
+                Ok(content) => (content, "success", true),
+                Err(error) => (format!("Error: {error}"), "error", false),
+            }
+        };
+        (self.on_tool.as_ref())(ToolEvent {
+            phase: "end".into(),
+            name: name.into(),
+            args,
+            result: content.clone(),
+        });
+        (self.on_event.as_ref())(serde_json::json!({
+            "type":"tool.completed", "timestamp":timestamp(),
+            "toolCallId":tool_call_id, "tool":name,
+            "durationMs":started.elapsed().as_secs_f64() * 1000.0, "ok":ok,
+        }));
+        self.session.as_ref().unwrap().append(vec![tool_result(
+            result_id,
+            step_id,
+            started_id,
+            tool_call_id,
+            name,
+            &content,
+            result_type,
+        )])?;
+        Ok(DurableExecution { content, aborted })
     }
 
     fn append_pre_execution_result(
@@ -1298,26 +1372,16 @@ impl Agent {
                     if self.abort_was_requested()? {
                         continue;
                     }
-                    let result = if let Some(mcp_tool) =
-                        self.mcp_tools.iter().find(|tool| tool.name == name)
-                    {
-                        mcp_tool.execute(serde_json::Value::Object(arguments), &self.cancel)
-                    } else {
-                        self.execute_tool(name, &args)
-                    };
-                    let (content, result_type) = match result {
-                        Ok(content) => (content, "success"),
-                        Err(error) => (format!("Error: {error}"), "error"),
-                    };
-                    self.session.as_ref().unwrap().append(vec![tool_result(
-                        &result_id,
+                    self.execute_durable_tool(
+                        operation_id,
                         &tool.0,
                         &started_id,
+                        &result_id,
                         &tool.1,
                         name,
-                        &content,
-                        result_type,
-                    )])?;
+                        arguments,
+                        args,
+                    )?;
                 }
                 "startStep" => {
                     if operation_kind == "compaction" {
@@ -1468,9 +1532,23 @@ impl Agent {
         }
         let body_str =
             serde_json::to_string(&serde_json::Value::Object(body)).map_err(|e| e.to_string())?;
+        let started = Instant::now();
         let text = request_text_cancellable(&self.client, &self.endpoint, body_str, &self.cancel)?;
         let data = parse_model_body(&text)?;
         let prompt = data.usage.input + data.usage.cache_read + data.usage.cache_write;
+        let mut event_usage = serde_json::json!({
+            "input":data.usage.input, "output":data.usage.output,
+            "cacheRead":data.usage.cache_read, "cacheWrite":data.usage.cache_write,
+        });
+        if prompt > 0 {
+            event_usage["cacheHitRate"] =
+                serde_json::json!(data.usage.cache_read as f64 / prompt as f64 * 100.0);
+        }
+        (self.on_event.as_ref())(serde_json::json!({
+            "type":"model.completed", "timestamp":timestamp(),
+            "durationMs":started.elapsed().as_secs_f64() * 1000.0,
+            "usage":event_usage,
+        }));
         self.add_usage(data.usage, update_cache_rate && prompt > 0);
         if update_cache_rate && prompt > 0 {
             self.usage.cache_hit_rate = data.usage.cache_read as f64 / prompt as f64 * 100.0;
@@ -2440,13 +2518,13 @@ fn execute_bg(cwd: &str, args: &ToolArgs) -> Result<String, String> {
                     if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                         continue;
                     }
-                    if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
-                        if let Ok(mut meta) = read_bg_meta(cwd, id) {
-                            refresh_bg_meta(cwd, &mut meta);
-                            meta.status = current_bg_status(&meta);
-                            if status == "all" || meta.status == status {
-                                metas.push(meta);
-                            }
+                    if let Some(id) = path.file_stem().and_then(|stem| stem.to_str())
+                        && let Ok(mut meta) = read_bg_meta(cwd, id)
+                    {
+                        refresh_bg_meta(cwd, &mut meta);
+                        meta.status = current_bg_status(&meta);
+                        if status == "all" || meta.status == status {
+                            metas.push(meta);
                         }
                     }
                 }
@@ -2787,7 +2865,7 @@ fn apply_edit_file(path: &str, display_path: &str, edits: &[ToolEdit]) -> Result
             index,
         ));
     }
-    ranges.sort_by(|a, b| a.0.cmp(&b.0));
+    ranges.sort_by_key(|range| range.0);
     for i in 1..ranges.len() {
         if ranges[i].0 < ranges[i - 1].1 {
             return Err(format!(

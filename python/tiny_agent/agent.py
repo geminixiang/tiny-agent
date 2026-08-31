@@ -9,6 +9,7 @@ import ssl
 import subprocess
 import time
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
@@ -34,6 +35,9 @@ def set_root(path: Path) -> None:
     ROOT = path.resolve()
 
 
+def timestamp() -> str: return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def format_tokens(n: int) -> str: return str(n) if n < 1_000 else f"{n / 1_000:.1f}k" if n < 10_000 else f"{n // 1_000}k" if n < 1_000_000 else f"{n / 1_000_000:.1f}M" if n < 10_000_000 else f"{n // 1_000_000}M"
 
 def format_usage(usage: dict) -> str:
@@ -47,11 +51,13 @@ def format_usage(usage: dict) -> str:
 def format_tool_event(event: dict) -> str:
     if event["phase"] == "end":
         result = event.get("result", "")
-        return f"  └ {result}" if result in ("ok", "(no output)") else f"  └ {len(result)} chars"
+        if result.startswith("Error:") or result in ("Operation aborted", "ok", "(no output)"):
+            return f"  └ {result}"
+        return f"  └ {len(result)} chars"
     name, args = event["name"], event["args"]
     target = args.get("command" if name in ("bash", "bg") else "path", "") or args.get("id", "")
     target = target if len(target) <= 80 else target[:77] + "..."
-    suffix = f" ({len(args.get('content', ''))} chars)" if name == "write" else f" ({len(args.get('oldText', ''))}→{len(args.get('newText', ''))} chars)" if name == "edit" else ""
+    suffix = f" ({len(args.get('content', ''))} chars)" if name == "write" else f" ({len(args.get('edits', []))} blocks)" if name == "edit" else ""
     return f"◆ {name}{f' {target}' if target else ''}{suffix}"
 
 
@@ -75,16 +81,13 @@ def load_skills(extra: list[str] | None = None) -> list[dict]:
     return skills
 
 
-TOOL_DEFINITIONS = []
-for name, description, properties in [
-    ("bash", "Run a shell command in the working directory", {"command": {"type": "string"}}),
-    ("read", "Read a UTF-8 text file", {"path": {"type": "string"}}),
-    ("write", "Create or overwrite a UTF-8 text file", {"path": {"type": "string"}, "content": {"type": "string"}}),
-    ("edit", "Replace one unique exact string in a UTF-8 text file", {"path": {"type": "string"}, "oldText": {"type": "string"}, "newText": {"type": "string"}}),
-    ("bg", "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands. List shows running processes by default; use status=all or a specific status to inspect history in the same cwd.", {"action": {"type": "string", "enum": ["start", "list", "status", "logs", "stop"]}, "command": {"type": "string"}, "id": {"type": "string"}, "tail": {"type": "integer", "minimum": 1}, "status": {"type": "string", "enum": ["running", "exited", "stopped", "stale", "all"], "description": "Filter for action=list. Defaults to running."}}),
-]:
-    required = ["action"] if name == "bg" else list(properties)
-    TOOL_DEFINITIONS.append({"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required}}})
+TOOL_DEFINITIONS = [
+    {"type": "function", "function": {"name": "bash", "description": "Run a shell command in the working directory", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "read", "description": "Read a UTF-8 text file. Prefer this over cat or sed. Returns at most 2,000 complete lines or 50KB and includes an offset hint when more lines remain.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Path to the UTF-8 text file."}, "offset": {"type": "integer", "minimum": 1, "description": "1-indexed line number to start reading from."}, "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines to return."}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "write", "description": "Create a new UTF-8 text file or completely rewrite an existing file. Parent directories are created automatically. Use edit for partial changes.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Path to create or completely rewrite."}, "content": {"type": "string", "description": "Complete UTF-8 file content."}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit", "description": "Make precise replacements in an existing UTF-8 text file. Every oldText must match exactly once in the original file, and edits must not overlap. All edits are validated before writing.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Path to the existing UTF-8 text file."}, "edits": {"type": "array", "minItems": 1, "description": "Atomic replacement blocks validated against the original file.", "items": {"type": "object", "properties": {"oldText": {"type": "string", "minLength": 1, "description": "Exact text that must occur exactly once in the original file."}, "newText": {"type": "string", "description": "Replacement text."}}, "required": ["oldText", "newText"]}}}, "required": ["path", "edits"]}}},
+    {"type": "function", "function": {"name": "bg", "description": "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands. List shows running processes by default; use status=all or a specific status to inspect history in the same cwd.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["start", "list", "status", "logs", "stop"]}, "command": {"type": "string"}, "id": {"type": "string"}, "tail": {"type": "integer", "minimum": 1}, "status": {"type": "string", "enum": ["running", "exited", "stopped", "stale", "all"], "description": "Filter for action=list. Defaults to running."}}, "required": ["action"]}}},
+]
 
 
 def _tls_context() -> ssl.SSLContext:
@@ -413,37 +416,135 @@ async def close_background_processes() -> None:
         with suppress(Exception): await execute_bg({"action": "stop", "id": pid}, asyncio.Event())
 
 
-async def execute_tool(name: str, args: dict[str, str], cancelled: asyncio.Event | None = None) -> str:
-    cancelled = cancelled or asyncio.Event()
-    if cancelled.is_set(): raise InterruptedError("Operation aborted")
-    if name == "bash": return await execute_bash(args["command"], cancelled)
-    if name == "bg": return await execute_bg(args, cancelled)
+def _required_string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a nonempty string")
+    return value
 
-    def execute_file_tool() -> str:
-        path = Path(args["path"])
-        path = path if path.is_absolute() else ROOT / path
-        if name == "read": return path.read_text(encoding="utf-8")[:100_000]
-        if name == "write":
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(args["content"], encoding="utf-8")
-            return "ok"
-        if name == "edit":
-            text, old = path.read_text(encoding="utf-8"), args["oldText"]
-            count = text.count(old)
-            if count != 1: raise ValueError(f"oldText must occur exactly once (found {count})")
-            path.write_text(text.replace(old, args["newText"], 1), encoding="utf-8")
-            return "ok"
+
+def _optional_positive_integer(value: object, name: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"{name} must be an integer >= 1")
+    return value
+
+
+def _required_edits(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("edits must be a nonempty array")
+    edits = []
+    for index, edit in enumerate(value):
+        if not isinstance(edit, dict):
+            raise ValueError(f"edits[{index}] must be an object")
+        old_text, new_text = edit.get("oldText"), edit.get("newText")
+        if not isinstance(old_text, str):
+            raise ValueError(f"edits[{index}].oldText must be a string")
+        if not old_text:
+            raise ValueError(f"edits[{index}].oldText must not be empty")
+        if not isinstance(new_text, str):
+            raise ValueError(f"edits[{index}].newText must be a string")
+        edits.append({"oldText": old_text, "newText": new_text})
+    return edits
+
+
+def _resolve_path(requested_path: str) -> Path:
+    path = Path(requested_path)
+    return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
+
+
+def _read_lines(text: str, offset: int = 1, limit: int = 2_000) -> str:
+    lines = [] if text == "" else text.replace("\r\n", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    if not lines:
+        if offset == 1:
+            return ""
+        raise ValueError(f"Offset {offset} is beyond end of file (0 lines total).")
+    if offset > len(lines):
+        raise ValueError(f"Offset {offset} is beyond end of file ({len(lines)} lines total).")
+    selected = []
+    for line in lines[offset - 1:offset - 1 + min(limit, 2_000)]:
+        candidate = "\n".join([*selected, line])
+        if len(candidate.encode()) > MAX_TOOL_OUTPUT:
+            break
+        selected.append(line)
+    if not selected:
+        return f"Line {offset} exceeds 50KB. Use bash with a byte-oriented command to inspect this line."
+    end = offset + len(selected) - 1
+    result = "\n".join(selected)
+    if end < len(lines):
+        result += f"\n\n[Showing lines {offset}-{end} of {len(lines)}. Use offset={end + 1} to continue.]"
+    return result
+
+
+def _execute_file_tool(name: str, args: dict) -> str:
+    requested_path = _required_string(args.get("path"), "path")
+    path = _resolve_path(requested_path)
+    if name == "read":
+        offset = _optional_positive_integer(args.get("offset"), "offset") or 1
+        limit = _optional_positive_integer(args.get("limit"), "limit") or 2_000
+        return _read_lines(path.read_bytes().decode("utf-8"), offset, limit)
+    if name == "write":
+        content = args.get("content")
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content.encode("utf-8"))
+        return f"Successfully wrote {len(content.encode('utf-8'))} bytes to {requested_path}."
+    if name != "edit":
         raise ValueError(f"unknown tool: {name}")
 
-    result = await asyncio.to_thread(execute_file_tool)
+    edits = _required_edits(args.get("edits"))
+    original = path.read_bytes().decode("utf-8")
+    bom = original.startswith("\ufeff")
+    text = original[1:] if bom else original
+    first_newline = text.find("\n")
+    newline = "\r\n" if first_newline > 0 and text[first_newline - 1] == "\r" else "\n"
+    normalized, positions, source = "", [0], 0
+    while source < len(text):
+        if text.startswith("\r\n", source):
+            normalized += "\n"
+            source += 2
+        else:
+            normalized += text[source]
+            source += 1
+        positions.append(source)
+    ranges = []
+    for index, edit in enumerate(edits):
+        old_text = edit["oldText"].replace("\r\n", "\n")
+        start = normalized.find(old_text)
+        second = normalized.find(old_text, start + 1) if start >= 0 else -1
+        if start < 0:
+            raise ValueError(f"edits[{index}].oldText was not found in {requested_path}.")
+        if second >= 0:
+            raise ValueError(f"edits[{index}].oldText occurs more than once in {requested_path}; add more context.")
+        ranges.append({"index": index, "start": positions[start], "end": positions[start + len(old_text)], "newText": edit["newText"].replace("\r\n", "\n").replace("\n", newline)})
+    ordered = sorted(ranges, key=lambda item: item["start"])
+    for previous, current in zip(ordered, ordered[1:]):
+        if current["start"] < previous["end"]:
+            raise ValueError(f"edits[{previous['index']}] and edits[{current['index']}] overlap in {requested_path}.")
+    edited = text
+    for edit in sorted(ranges, key=lambda item: item["start"], reverse=True):
+        edited = edited[:edit["start"]] + edit["newText"] + edited[edit["end"]:]
+    path.write_bytes((("\ufeff" if bom else "") + edited).encode("utf-8"))
+    return f"Successfully replaced {len(edits)} block(s) in {requested_path}."
+
+
+async def execute_tool(name: str, args: dict, cancelled: asyncio.Event | None = None) -> str:
+    cancelled = cancelled or asyncio.Event()
+    if cancelled.is_set(): raise InterruptedError("Operation aborted")
+    if name == "bash": return await execute_bash(_required_string(args.get("command"), "command"), cancelled)
+    if name == "bg": return await execute_bg(args, cancelled)
+    result = await asyncio.to_thread(_execute_file_tool, name, args)
     if cancelled.is_set(): raise InterruptedError("Operation aborted")
     return result
 
 
 
 class Agent:
-    def __init__(self, skills: list[dict] | None = None, session: Session | None = None, instructions: str = "", requester: Callable | None = None, on_tool: Callable = lambda event: None, tools: list[dict] | None = None):
-        self.skills, self.session, self.requester, self.on_tool = skills or [], session, requester, on_tool
+    def __init__(self, skills: list[dict] | None = None, session: Session | None = None, instructions: str = "", requester: Callable | None = None, on_tool: Callable = lambda event: None, on_event: Callable = lambda event: None, tools: list[dict] | None = None):
+        self.skills, self.session, self.requester, self.on_tool, self.on_event = skills or [], session, requester, on_tool, on_event
         self.tools = tools if tools is not None else TOOL_DEFINITIONS
         self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
         self.cancelled: asyncio.Event | None = None
@@ -613,56 +714,83 @@ class Agent:
         self.session.append(*facts)
 
     async def _execute_recovered_tool(self, operation_id: str, action: dict) -> None:
-        state = self.session.load(); step_id = state["operation"]["step"]["stepId"]
+        state = self.session.load()
+        step_id = state["operation"]["step"]["stepId"]
         tool = next((item for item in self.tools if item["function"]["name"] == action["toolName"]), None)
-        if not tool: raise RuntimeError(f"Recovery tool unavailable: {action['toolName']}")
+        if not tool:
+            raise RuntimeError(f"Recovery tool unavailable: {action['toolName']}")
         if action["mode"] == "start":
             call = next(message for message in reversed(state["activeContext"]) if message["role"] == "assistant")["tool_calls"][action["toolIndex"]]
+            await self._execute_durable_tool(operation_id, step_id, action["assistantEntryId"], action["toolIndex"], call, tool, action["arguments"])
+            return
+        pending = next(item for item in state["operation"]["toolCalls"] if item["toolStartedId"] == action["toolStartedId"])
+        call = {"id": pending["toolCallId"]}
+        await self._execute_durable_tool(
+            operation_id, step_id, pending["assistantEntryId"], pending["toolIndex"], call, tool,
+            action["arguments"], pending["toolStartedId"], pending["resultEntryId"],
+        )
+
+    async def _execute_durable_tool(
+        self, operation_id: str, step_id: str, assistant_entry_id: str, tool_index: int,
+        call: dict, tool: dict, args: dict, started_id: str | None = None, result_id: str | None = None,
+    ) -> tuple[dict, str, bool]:
+        name = tool["function"]["name"]
+        if started_id is None:
             started_id, result_id = uuid7(), uuid7()
             replay, replay_key = self._replay_declaration(tool)
             record = {
                 "type": "toolStarted", "operationId": operation_id, "stepId": step_id,
-                "assistantEntryId": action["assistantEntryId"], "toolIndex": action["toolIndex"],
-                "toolCallId": call["id"], "toolName": action["toolName"], "arguments": action["arguments"],
+                "assistantEntryId": assistant_entry_id, "toolIndex": tool_index,
+                "toolCallId": call["id"], "toolName": name, "arguments": args,
                 "replay": replay, "replayKey": replay_key,
                 "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id,
             }
             self.session.append(record_fact(record, started_id))
-        else:
-            started_id = action["toolStartedId"]
-            pending = next(item for item in state["operation"]["toolCalls"] if item["toolStartedId"] == started_id)
-            result_id, call = pending["resultEntryId"], {"id": pending["toolCallId"]}
+        assert result_id is not None
+
+        started = time.monotonic()
+        self.on_event({"type": "tool.started", "timestamp": timestamp(), "toolCallId": call["id"], "tool": name})
+        self.on_tool({"phase": "start", "name": name, "args": args})
         cancelled = self.begin(operation_id, "tool", call["id"])
-        aborted = False
+        aborted, ok = False, False
         try:
-            self.on_tool({"phase": "start", "name": action["toolName"], "args": action["arguments"]})
-            content = await tool["execute"](action["arguments"], cancelled) if "execute" in tool else await execute_tool(action["toolName"], action["arguments"], cancelled)
-            result = {"type": "success"}
+            content = await tool["execute"](args, cancelled) if "execute" in tool else await execute_tool(name, args, cancelled)
+            ok = True
         except asyncio.CancelledError:
             aborted = self._is_aborted(operation_id, cancelled)
-            if not aborted: raise
+            if not aborted:
+                self.end()
+                raise
             content = "Operation interrupted after execution status became unknown; the tool was not replayed."
-            result = {"type": "synthetic", "reason": "interrupted"}
         except Exception as error:
             aborted = self._is_aborted(operation_id, cancelled)
             content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
-            result = {"type": "synthetic", "reason": "interrupted"} if aborted else {"type": "error"}
-        entry = lambda value, meta: entry_fact(result_id, {
-            "type": "message", "stepId": step_id,
-            "message": {"role": "tool", "content": value, "tool_call_id": call["id"]},
-            "toolName": action["toolName"], "toolStartedId": started_id, "result": meta,
-        })
-        if not aborted and self.session.append_if_active(operation_id, cancelled, entry(content, result)) is None:
-            aborted = True
+
+        if not aborted:
+            message = {"role": "tool", "content": content, "tool_call_id": call["id"]}
+            result_type = "success" if ok else "error"
+            entry = {"type": "message", "stepId": step_id, "message": message, "toolName": name, "toolStartedId": started_id, "result": {"type": result_type}}
+            aborted = self.session.append_if_active(operation_id, cancelled, entry_fact(result_id, entry)) is None
         if aborted:
             content = "Operation interrupted after execution status became unknown; the tool was not replayed."
-            self.session.append(entry(content, {"type": "synthetic", "reason": "interrupted"}))
-        self.end(); self.on_tool({"phase": "end", "name": action["toolName"], "args": action["arguments"], "result": content})
+            message = {"role": "tool", "content": content, "tool_call_id": call["id"]}
+            entry = {"type": "message", "stepId": step_id, "message": message, "toolName": name, "toolStartedId": started_id, "result": {"type": "synthetic", "reason": "interrupted"}}
+            self.session.append(entry_fact(result_id, entry))
+            ok = False
+
+        self.end()
+        self.on_tool({"phase": "end", "name": name, "args": args, "result": content})
+        self.on_event({
+            "type": "tool.completed", "timestamp": timestamp(), "toolCallId": call["id"], "tool": name,
+            "durationMs": (time.monotonic() - started) * 1000, "ok": ok,
+        })
+        return message, result_id, aborted
 
     async def _continue_operation(self, operation_id: str, action: dict) -> str:
         return await self._run_operation(operation_id, action["contextThroughEntryId"], action)
 
     async def call_model(self, messages: list[dict], tools: list | None, cancelled: asyncio.Event) -> tuple[dict, dict, str]:
+        started = time.monotonic()
         settings = Settings(); key = settings.openrouter_api_key
         if not key: raise RuntimeError("Set OPENROUTER_API_KEY")
         body = {"model": settings.tiny_model, "messages": messages, **({"tools": tools} if tools else {})}
@@ -678,6 +806,11 @@ class Agent:
         usage = {"input": max(0, raw_usage.get("prompt_tokens", 0) - cache_read - cache_write), "output": raw_usage.get("completion_tokens", 0), "cacheRead": cache_read, "cacheWrite": cache_write}
         answer = normalize_assistant_message(data["choices"][0]["message"])
         finish = data["choices"][0].get("finish_reason")
+        event_usage = {**usage}
+        prompt_tokens = sum(usage.get(key, 0) for key in ("input", "cacheRead", "cacheWrite"))
+        if prompt_tokens:
+            event_usage["cacheHitRate"] = usage.get("cacheRead", 0) / prompt_tokens * 100
+        self.on_event({"type": "model.completed", "timestamp": timestamp(), "durationMs": (time.monotonic() - started) * 1000, "usage": event_usage})
         return answer, usage, provider_stop_reason(finish, answer)
 
     def _attempt(self, operation_id: str, context_id: str, kind: str = "assistant", attempt: int = 1, step_id: str | None = None) -> tuple[str, str]:
@@ -778,36 +911,9 @@ class Agent:
                     entry = {"type": "message", "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "message": result, "toolName": name, "result": {"type": "synthetic", "reason": reason}}
                     self.session.append(entry_fact(result_id, entry))
                 else:
-                    started_id, result_id = uuid7(), uuid7()
-                    replay, replay_key = self._replay_declaration(tool)
-                    record = {"type": "toolStarted", "operationId": operation_id, "stepId": step_id, "assistantEntryId": answer_id, "toolIndex": index, "toolCallId": call["id"], "toolName": name, "arguments": args, "replay": replay, "replayKey": replay_key, "environmentIdentity": environment_identity(ROOT), "resultEntryId": result_id}
-                    self.session.append(record_fact(record, started_id))
-                    cancelled = self.begin(operation_id, "tool", call["id"]); aborted = False
-                    try:
-                        self.on_tool({"phase": "start", "name": name, "args": args})
-                        content = await tool["execute"](args, cancelled) if "execute" in tool else await execute_tool(name, args, cancelled)
-                        result_type = "success"
-                    except asyncio.CancelledError:
-                        aborted = self._is_aborted(operation_id, cancelled)
-                        if not aborted: raise
-                        content = "Operation interrupted after execution status became unknown; the tool was not replayed."
-                        result_type = "synthetic"
-                    except Exception as error:
-                        aborted = self._is_aborted(operation_id, cancelled); content = "Operation interrupted after execution status became unknown; the tool was not replayed." if aborted else f"Error: {error}"
-                        result_type = "synthetic" if aborted else "error"
-                    if not aborted:
-                        success = {"role": "tool", "content": content, "tool_call_id": call["id"]}
-                        entry = {"type": "message", "stepId": step_id, "message": success, "toolName": name, "toolStartedId": started_id, "result": {"type": result_type}}
-                        committed = self.session.append_if_active(operation_id, cancelled, entry_fact(result_id, entry))
-                        aborted = committed is None
-                    if aborted:
-                        content = "Operation interrupted after execution status became unknown; the tool was not replayed."
-                        result = {"role": "tool", "content": content, "tool_call_id": call["id"]}
-                        entry = {"type": "message", "stepId": step_id, "message": result, "toolName": name, "toolStartedId": started_id, "result": {"type": "synthetic", "reason": "interrupted"}}
-                        self.session.append(entry_fact(result_id, entry))
-                    else:
-                        result = success
-                    self.end(); self.on_tool({"phase": "end", "name": name, "args": args, "result": content})
+                    result, result_id, aborted = await self._execute_durable_tool(
+                        operation_id, step_id, answer_id, index, call, tool, args,
+                    )
                 self.messages.append(result); context_id = result_id
                 if not aborted: continue
                 for pending_index, pending in enumerate(calls[index + 1:], index + 1):

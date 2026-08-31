@@ -328,18 +328,23 @@ func (a *Agent) executeDurableTool(run *durableRun, index int, call ToolCall, se
 			startedID, resultID = replay.ToolStartedID, replay.ResultEntryID
 		}
 	}
-	a.OnTool(ToolEvent{Phase: "start", Name: call.Function.Name, Args: stringifyArgs(args)})
+	started := time.Now()
+	a.OnEvent(RunEvent{"type": "tool.started", "timestamp": started.UTC().Format(time.RFC3339Nano), "toolCallId": call.ID, "tool": call.Function.Name})
+	a.OnTool(ToolEvent{Phase: "start", Name: call.Function.Name, Args: args})
 	ctx := a.beginOperation(run.OperationID, "run", "tool", call.ID)
 	result, toolErr := selected.Execute(ctx, args)
 	aborted := a.endOperation(ctx)
+	resultType, ok := "success", toolErr == nil
+	if aborted {
+		result, resultType, ok = "Operation interrupted after execution status became unknown; the tool was not replayed.", "synthetic", false
+	} else if toolErr != nil {
+		result, resultType = "Error: "+toolErr.Error(), "error"
+	}
+	a.OnTool(ToolEvent{Phase: "end", Name: call.Function.Name, Args: args, Result: result})
+	a.OnEvent(RunEvent{"type": "tool.completed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "toolCallId": call.ID, "tool": call.Function.Name, "durationMs": float64(time.Since(started).Microseconds()) / 1000, "ok": ok})
 	if aborted {
 		return a.reconcileAbort()
 	}
-	resultType := "success"
-	if toolErr != nil {
-		result, resultType = "Error: "+toolErr.Error(), "error"
-	}
-	a.OnTool(ToolEvent{Phase: "end", Name: call.Function.Name, Result: result})
 	message := toolResultMessage(call.ID, result)
 	if a.Session != nil {
 		entry := map[string]any{
@@ -353,16 +358,6 @@ func (a *Agent) executeDurableTool(run *durableRun, index int, call ToolCall, se
 	}
 	a.Messages = append(a.Messages, message)
 	return nil
-}
-
-func stringifyArgs(args map[string]any) map[string]string {
-	out := map[string]string{}
-	for key, value := range args {
-		if text, ok := value.(string); ok {
-			out[key] = text
-		}
-	}
-	return out
 }
 
 func (a *Agent) beginOperation(operationID, kind, phase, toolCallID string) context.Context {

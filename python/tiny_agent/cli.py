@@ -1,13 +1,15 @@
 import argparse
 import asyncio
+import json
 import os
 import sys
 import termios
+import time
 import tty
 from contextlib import suppress
 from pathlib import Path
 
-from .agent import Agent, TOOL_DEFINITIONS, close_background_processes, format_tool_event, format_usage, load_project_instructions, load_skills, set_root
+from .agent import Agent, TOOL_DEFINITIONS, close_background_processes, format_tool_event, format_usage, load_project_instructions, load_skills, set_root, timestamp
 from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_names
 from .session import Session
 from .settings import Settings
@@ -23,6 +25,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument("--plugin", action="append", default=[])
     parser.add_argument("--mcp", action="append", default=[])
+    parser.add_argument("--json", action="store_true")
     parser.add_argument("prompt", nargs="*")
     return parser.parse_args(argv)
 
@@ -33,18 +36,6 @@ def selected_local_tools(raw_plugins: list[str]) -> list[dict]:
     if unknown:
         raise ValueError(f"Unknown plugin: {unknown}. Available plugins: {', '.join(PLUGIN_NAMES)}")
     return [tool for name in selected for tool in TOOL_DEFINITIONS if tool["function"]["name"] == name]
-
-
-async def connect_mcp(aliases: list[str]) -> list:
-    loaded = []
-    for config in load_mcp_configs(aliases):
-        try:
-            tools = await load_mcp_tools(config)
-        except (ValueError, RuntimeError, OSError, TimeoutError) as error:
-            raise RuntimeError(f"MCP {config.alias} failed: {error}") from error
-        loaded.append(tools)
-        print(f"MCP {config.alias}: connected ({tools.protocol_version}, {len(tools.tools)} tools)")
-    return loaded
 
 
 async def close_mcp(loaded_mcp: list) -> None:
@@ -130,13 +121,64 @@ async def run_terminal(args: argparse.Namespace, agent: Agent, skills: list[dict
         await run_repl(terminal, agent, skills)
 
 
-async def run_session(args: argparse.Namespace, aliases: list[str], local_tools: list[dict], loaded_mcp: list) -> int:
+def emit_json(event: dict) -> None:
+    print(json.dumps(event, separators=(",", ":")), flush=True)
+
+
+def mcp_failure_cause(error: BaseException) -> str:
+    return "timeout" if isinstance(error, TimeoutError) or "timeout" in str(error).lower() else "connection_failed"
+
+
+async def run_session(args: argparse.Namespace, aliases: list[str], local_tools: list[dict], configs: list) -> int:
     cwd = Path.cwd().resolve()
     session = Session.open(args.session, cwd) if args.session else Session.create(cwd)
+    loaded_mcp = []
+    run_started = time.monotonic()
+    if args.json:
+        emit_json({
+            "type": "run.started", "timestamp": timestamp(),
+            "sessionId": session.id, "model": Settings().tiny_model, "endpoint": Settings().tiny_endpoint,
+            "plugins": split_names(args.plugin) or list(PLUGIN_NAMES), "mcp": aliases,
+        })
     try:
+        for config in configs:
+            started = time.monotonic()
+            try:
+                loaded = await load_mcp_tools(config)
+            except (ValueError, RuntimeError, OSError, TimeoutError) as error:
+                cause = mcp_failure_cause(error)
+                if not args.json:
+                    raise RuntimeError(f"MCP {config.alias} failed: {error}") from error
+                emit_json({"type": "mcp.failed", "timestamp": timestamp(), "server": config.alias, "stage": "connect", "cause": cause})
+                emit_json({
+                    "type": "run.completed", "timestamp": timestamp(),
+                    "durationMs": (time.monotonic() - run_started) * 1000,
+                    "result": {"status": "failed", "cause": "mcp_setup_error", "message": f"MCP {config.alias} failed: {cause}", "sessionId": session.id, "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}},
+                })
+                return 1
+            loaded_mcp.append(loaded)
+            if args.json:
+                emit_json({"type": "mcp.connected", "timestamp": timestamp(), "server": config.alias, "protocolVersion": loaded.protocol_version, "toolCount": len(loaded.tools), "durationMs": (time.monotonic() - started) * 1000})
+            else:
+                print(f"MCP {config.alias}: connected ({loaded.protocol_version}, {len(loaded.tools)} tools)")
+
         skills = load_skills(args.skill)
         tools = [*local_tools, *(tool for loaded in loaded_mcp for tool in loaded.tools)]
-        agent = Agent(skills, session, load_project_instructions(), tools=tools)
+        agent = (
+            Agent(skills, session, load_project_instructions(), on_event=emit_json, tools=tools)
+            if args.json else Agent(skills, session, load_project_instructions(), tools=tools)
+        )
+        if args.json:
+            try:
+                if args.session:
+                    await agent.resume_session()
+                answer = await agent.run_agent_loop(" ".join(args.prompt))
+                result = {"status": "cancelled" if answer == "Operation aborted." else "succeeded", "answer": answer, "sessionId": session.id, "usage": agent.usage}
+            except Exception as error:
+                result = {"status": "failed", "cause": "agent_error", "message": str(error), "sessionId": session.id, "usage": agent.usage}
+            emit_json({"type": "run.completed", "timestamp": timestamp(), "durationMs": (time.monotonic() - run_started) * 1000, "result": result})
+            return 0 if result["status"] != "failed" else 1
+
         install_tool_printer(agent)
         print_banner(session, tools, aliases, bool(args.session))
         with suppress(KeyboardInterrupt):
@@ -145,6 +187,7 @@ async def run_session(args: argparse.Namespace, aliases: list[str], local_tools:
         return 0
     finally:
         session.close()
+        await close_mcp(loaded_mcp)
 
 
 async def run_cli(argv: list[str] | None = None) -> int:
@@ -154,14 +197,15 @@ async def run_cli(argv: list[str] | None = None) -> int:
         if not path.is_dir(): raise ValueError(f"--cwd must be a directory: {args.cwd}")
         os.chdir(path)
         set_root(path)
+    if args.json and not args.prompt:
+        raise ValueError("--json requires a one-shot prompt.")
     local_tools = selected_local_tools(args.plugin)
     aliases = split_names(args.mcp)
-    loaded_mcp = await connect_mcp(aliases)
+    configs = load_mcp_configs(aliases)
     try:
-        return await run_session(args, aliases, local_tools, loaded_mcp)
+        return await run_session(args, aliases, local_tools, configs)
     finally:
         await close_background_processes()
-        await close_mcp(loaded_mcp)
 
 
 def main() -> None:

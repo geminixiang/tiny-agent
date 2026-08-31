@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -328,6 +329,10 @@ func TestRecoverySafeReplaySucceedsThenPlainStopFinishesIdly(t *testing.T) {
 
 	restored := newAgent(nil, session, "")
 	restored.Endpoint, restored.Client = agent.Endpoint, agent.Client
+	var events []RunEvent
+	var toolEvents []ToolEvent
+	restored.OnEvent = func(event RunEvent) { events = append(events, event) }
+	restored.OnTool = func(event ToolEvent) { toolEvents = append(toolEvents, event) }
 	if err := restored.restoreSession(); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
@@ -338,6 +343,16 @@ func TestRecoverySafeReplaySucceedsThenPlainStopFinishesIdly(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("expected exactly one model request for the post-replay step, got %d", requests)
+	}
+	if len(toolEvents) != 2 || toolEvents[0].Phase != "start" || toolEvents[1].Phase != "end" {
+		t.Fatalf("expected recovered tool callbacks, got %+v", toolEvents)
+	}
+	var eventTypes []any
+	for _, event := range events {
+		eventTypes = append(eventTypes, event["type"])
+	}
+	if !slices.Equal(eventTypes, []any{"tool.started", "tool.completed", "model.completed"}) {
+		t.Fatalf("unexpected recovery lifecycle: %v", eventTypes)
 	}
 	last := state.Transcript[len(state.Transcript)-1]
 	if last["content"] != "done after replay" {

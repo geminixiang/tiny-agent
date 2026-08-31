@@ -1014,7 +1014,23 @@ fn pending_safe_read_replays_once_then_closes_and_finishes_idempotently() {
     ]);
     let reopened = Session::open(&id, std::path::Path::new(&cwd)).unwrap();
     let mut agent = test_agent(&cwd, &server.url, Some(reopened));
+    let tool_events = Arc::new(Mutex::new(Vec::new()));
+    let captured_tools = tool_events.clone();
+    agent.on_tool = Arc::new(move |event| captured_tools.lock().unwrap().push(event.phase));
+    let lifecycle = Arc::new(Mutex::new(Vec::new()));
+    let captured_lifecycle = lifecycle.clone();
+    agent.on_event = Arc::new(move |event| {
+        captured_lifecycle
+            .lock()
+            .unwrap()
+            .push(event["type"].as_str().unwrap().to_string());
+    });
     agent.resume_session().unwrap();
+    assert_eq!(*tool_events.lock().unwrap(), ["start", "end"]);
+    assert_eq!(
+        *lifecycle.lock().unwrap(),
+        ["tool.started", "tool.completed", "model.completed"]
+    );
     let state = agent.session.as_ref().unwrap().load().unwrap();
     assert!(matches!(
         state.operation,

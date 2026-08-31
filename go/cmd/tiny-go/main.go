@@ -22,7 +22,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -55,14 +54,19 @@ type ToolFunction struct {
 
 type Skill struct{ Name, Description, Path string }
 type Usage struct {
-	Input, Output, CacheRead, CacheWrite int
-	CacheHitRate                         *float64
+	Input        int      `json:"input"`
+	Output       int      `json:"output"`
+	CacheRead    int      `json:"cacheRead"`
+	CacheWrite   int      `json:"cacheWrite"`
+	CacheHitRate *float64 `json:"cacheHitRate,omitempty"`
 }
 type ToolEvent struct {
 	Phase, Name string
-	Args        map[string]string
+	Args        map[string]any
 	Result      string
 }
+
+type RunEvent map[string]any
 
 type Tool struct {
 	Name        string
@@ -122,24 +126,29 @@ func formatUsage(u Usage) string {
 
 func formatToolEvent(e ToolEvent) string {
 	if e.Phase == "end" {
-		if e.Result == "ok" || e.Result == "(no output)" {
+		if strings.HasPrefix(e.Result, "Error:") || e.Result == "Operation aborted" || e.Result == "ok" || e.Result == "(no output)" {
 			return "  └ " + e.Result
 		}
 		return fmt.Sprintf("  └ %d chars", len(e.Result))
 	}
-	target := e.Args["path"]
-	if e.Name == "bash" {
-		target = e.Args["command"]
+	stringArg := func(name string) string {
+		value, _ := e.Args[name].(string)
+		return value
+	}
+	target := stringArg("path")
+	if e.Name == "bash" || e.Name == "bg" {
+		target = cmp.Or(stringArg("command"), stringArg("id"))
 	}
 	if len(target) > 80 {
 		target = target[:77] + "..."
 	}
 	suffix := ""
 	if e.Name == "write" {
-		suffix = fmt.Sprintf(" (%d chars)", len(e.Args["content"]))
+		suffix = fmt.Sprintf(" (%d chars)", len(stringArg("content")))
 	}
 	if e.Name == "edit" {
-		suffix = fmt.Sprintf(" (%d→%d chars)", len(e.Args["oldText"]), len(e.Args["newText"]))
+		edits, _ := e.Args["edits"].([]any)
+		suffix = fmt.Sprintf(" (%d blocks)", len(edits))
 	}
 	if target != "" {
 		target = " " + target
@@ -198,18 +207,19 @@ func frontmatter(s, key string) string {
 }
 
 var toolDefinitions = []map[string]any{
-	toolDefinition("bash", "Run a shell command in the working directory", map[string]any{"command": map[string]string{"type": "string"}}),
-	toolDefinition("read", "Read a UTF-8 text file", map[string]any{"path": map[string]string{"type": "string"}}),
-	toolDefinition("write", "Create or overwrite a UTF-8 text file", map[string]any{"path": map[string]string{"type": "string"}, "content": map[string]string{"type": "string"}}),
-	toolDefinition("edit", "Replace one unique exact string in a UTF-8 text file", map[string]any{"path": map[string]string{"type": "string"}, "oldText": map[string]string{"type": "string"}, "newText": map[string]string{"type": "string"}}),
-	toolDefinition("bg", "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands. List shows running processes by default; use status=all or a specific status to inspect history in the same cwd.", map[string]any{"action": map[string]any{"type": "string", "enum": []string{"start", "list", "status", "logs", "stop"}}, "command": map[string]string{"type": "string"}, "id": map[string]string{"type": "string"}, "tail": map[string]any{"type": "integer", "minimum": 1}, "status": map[string]any{"type": "string", "enum": []string{"running", "exited", "stopped", "stale", "all"}, "description": "Filter for action=list. Defaults to running."}}),
+	toolDefinition("bash", "Run a shell command in the working directory", map[string]any{"command": map[string]string{"type": "string"}}, []string{"command"}),
+	toolDefinition("read", "Read a UTF-8 text file. Prefer this over cat or sed. Returns at most 2,000 complete lines or 50KB and includes an offset hint when more lines remain.", map[string]any{
+		"path": map[string]string{"type": "string", "description": "Path to the UTF-8 text file."}, "offset": map[string]any{"type": "integer", "minimum": 1, "description": "1-indexed line number to start reading from."}, "limit": map[string]any{"type": "integer", "minimum": 1, "description": "Maximum number of lines to return."},
+	}, []string{"path"}),
+	toolDefinition("write", "Create a new UTF-8 text file or completely rewrite an existing file. Parent directories are created automatically. Use edit for partial changes.", map[string]any{"path": map[string]string{"type": "string", "description": "Path to create or completely rewrite."}, "content": map[string]string{"type": "string", "description": "Complete UTF-8 file content."}}, []string{"path", "content"}),
+	toolDefinition("edit", "Make precise replacements in an existing UTF-8 text file. Every oldText must match exactly once in the original file, and edits must not overlap. All edits are validated before writing.", map[string]any{
+		"path":  map[string]string{"type": "string", "description": "Path to the existing UTF-8 text file."},
+		"edits": map[string]any{"type": "array", "minItems": 1, "description": "Atomic replacement blocks validated against the original file.", "items": map[string]any{"type": "object", "properties": map[string]any{"oldText": map[string]any{"type": "string", "minLength": 1, "description": "Exact text that must occur exactly once in the original file."}, "newText": map[string]string{"type": "string", "description": "Replacement text."}}, "required": []string{"oldText", "newText"}}},
+	}, []string{"path", "edits"}),
+	toolDefinition("bg", "Manage background processes in the working directory. The id is the process pid; metadata and logs live in .tiny-agent/bg/<pid>.json and .log. Use for servers and other long-running commands. List shows running processes by default; use status=all or a specific status to inspect history in the same cwd.", map[string]any{"action": map[string]any{"type": "string", "enum": []string{"start", "list", "status", "logs", "stop"}}, "command": map[string]string{"type": "string"}, "id": map[string]string{"type": "string"}, "tail": map[string]any{"type": "integer", "minimum": 1}, "status": map[string]any{"type": "string", "enum": []string{"running", "exited", "stopped", "stale", "all"}, "description": "Filter for action=list. Defaults to running."}}, []string{"action"}),
 }
 
-func toolDefinition(name, description string, properties map[string]any) map[string]any {
-	required := slices.Sorted(maps.Keys(properties))
-	if name == "bg" {
-		required = []string{"action"}
-	}
+func toolDefinition(name, description string, properties map[string]any, required []string) map[string]any {
 	return map[string]any{"type": "function", "function": map[string]any{"name": name, "description": description, "parameters": map[string]any{"type": "object", "properties": properties, "required": required}}}
 }
 
@@ -487,21 +497,171 @@ func closeBackgroundProcesses() {
 	}
 }
 
-func executeTool(ctx context.Context, name string, args map[string]string) (string, error) {
+func requiredToolString(args map[string]any, name string) (string, error) {
+	value, ok := args[name].(string)
+	if !ok || value == "" {
+		return "", fmt.Errorf("%s must be a nonempty string", name)
+	}
+	return value, nil
+}
+
+func optionalToolInteger(args map[string]any, name string, fallback int) (int, error) {
+	value, ok := args[name]
+	if !ok {
+		return fallback, nil
+	}
+	var number int
+	switch value := value.(type) {
+	case int:
+		number = value
+	case float64:
+		if value != float64(int(value)) {
+			return 0, fmt.Errorf("%s must be an integer >= 1", name)
+		}
+		number = int(value)
+	default:
+		return 0, fmt.Errorf("%s must be an integer >= 1", name)
+	}
+	if number < 1 {
+		return 0, fmt.Errorf("%s must be an integer >= 1", name)
+	}
+	return number, nil
+}
+
+func readToolLines(text string, offset, limit int) (string, error) {
+	lines := []string{}
+	if text != "" {
+		lines = strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+		if lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+	}
+	if len(lines) == 0 {
+		if offset == 1 {
+			return "", nil
+		}
+		return "", fmt.Errorf("Offset %d is beyond end of file (0 lines total).", offset)
+	}
+	if offset > len(lines) {
+		return "", fmt.Errorf("Offset %d is beyond end of file (%d lines total).", offset, len(lines))
+	}
+	selected := make([]string, 0, min(limit, 2000))
+	for _, line := range lines[offset-1 : min(len(lines), offset-1+min(limit, 2000))] {
+		next := line
+		if len(selected) > 0 {
+			next = strings.Join(selected, "\n") + "\n" + line
+		}
+		if len([]byte(next)) > maxToolOutput {
+			break
+		}
+		selected = append(selected, line)
+	}
+	if len(selected) == 0 {
+		return fmt.Sprintf("Line %d exceeds 50KB. Use bash with a byte-oriented command to inspect this line.", offset), nil
+	}
+	end := offset + len(selected) - 1
+	result := strings.Join(selected, "\n")
+	if end < len(lines) {
+		result += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Use offset=%d to continue.]", offset, end, len(lines), end+1)
+	}
+	return result, nil
+}
+
+type textEdit struct {
+	oldText, newText  string
+	index, start, end int
+}
+
+func requiredToolEdits(value any) ([]textEdit, error) {
+	raw, ok := value.([]any)
+	if !ok || len(raw) == 0 {
+		return nil, errors.New("edits must be a nonempty array")
+	}
+	edits := make([]textEdit, len(raw))
+	for index, item := range raw {
+		edit, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("edits[%d] must be an object", index)
+		}
+		oldText, ok := edit["oldText"].(string)
+		if !ok {
+			return nil, fmt.Errorf("edits[%d].oldText must be a string", index)
+		}
+		if oldText == "" {
+			return nil, fmt.Errorf("edits[%d].oldText must not be empty", index)
+		}
+		newText, ok := edit["newText"].(string)
+		if !ok {
+			return nil, fmt.Errorf("edits[%d].newText must be a string", index)
+		}
+		edits[index] = textEdit{oldText: oldText, newText: newText, index: index}
+	}
+	return edits, nil
+}
+
+func normalizeEditText(text string) (string, []int) {
+	normalized := strings.Builder{}
+	positions := []int{0}
+	for source := 0; source < len(text); {
+		if strings.HasPrefix(text[source:], "\r\n") {
+			normalized.WriteByte('\n')
+			source += 2
+		} else {
+			normalized.WriteByte(text[source])
+			source++
+		}
+		positions = append(positions, source)
+	}
+	return normalized.String(), positions
+}
+
+func executeTool[T any](ctx context.Context, name string, rawArgs map[string]T) (string, error) {
+	args := make(map[string]any, len(rawArgs))
+	for key, value := range rawArgs {
+		args[key] = value
+	}
+	return executeToolArgs(ctx, name, args)
+}
+
+func executeToolArgs(ctx context.Context, name string, args map[string]any) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if name == "bash" {
-		return executeBash(ctx, args["command"])
+	if name == "bash" || name == "bg" {
+		stringsOnly := map[string]string{}
+		for key, value := range args {
+			if text, ok := value.(string); ok {
+				stringsOnly[key] = text
+			} else if number, ok := value.(float64); ok {
+				stringsOnly[key] = strconv.Itoa(int(number))
+			}
+		}
+		if name == "bash" {
+			command, err := requiredToolString(args, "command")
+			if err != nil {
+				return "", err
+			}
+			return executeBash(ctx, command)
+		}
+		return executeBG(ctx, stringsOnly)
 	}
-	if name == "bg" {
-		return executeBG(ctx, args)
+	requestedPath, err := requiredToolString(args, "path")
+	if err != nil {
+		return "", err
 	}
-	path, err := resolveToolPath(args["path"])
+	path, err := resolveToolPath(requestedPath)
 	if err != nil {
 		return "", err
 	}
 	if name == "read" {
+		offset, err := optionalToolInteger(args, "offset", 1)
+		if err != nil {
+			return "", err
+		}
+		limit, err := optionalToolInteger(args, "limit", 2000)
+		if err != nil {
+			return "", err
+		}
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return "", err
@@ -509,44 +669,83 @@ func executeTool(ctx context.Context, name string, args map[string]string) (stri
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if len(b) > 100_000 {
-			b = b[:100_000]
-			for !utf8.Valid(b) {
-				b = b[:len(b)-1]
-			}
-		}
-		return string(b), nil
+		return readToolLines(string(b), offset, limit)
 	}
 	if name == "write" {
+		content, ok := args["content"].(string)
+		if !ok {
+			return "", errors.New("content must be a string")
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return "", err
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if err := os.WriteFile(path, []byte(args["content"]), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			return "", err
 		}
-		return "ok", nil
+		return fmt.Sprintf("Successfully wrote %d bytes to %s.", len([]byte(content)), requestedPath), nil
 	}
-	if name == "edit" {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return "", err
-		}
-		count := strings.Count(string(b), args["oldText"])
-		if count != 1 {
-			return "", fmt.Errorf("oldText must occur exactly once (found %d)", count)
-		}
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(path, []byte(strings.Replace(string(b), args["oldText"], args["newText"], 1)), 0o644); err != nil {
-			return "", err
-		}
-		return "ok", nil
+	if name != "edit" {
+		return "", fmt.Errorf("unknown tool: %s", name)
 	}
-	return "", fmt.Errorf("unknown tool: %s", name)
+	edits, err := requiredToolEdits(args["edits"])
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	original := string(b)
+	bom := strings.HasPrefix(original, "\ufeff")
+	text := strings.TrimPrefix(original, "\ufeff")
+	ending := "\n"
+	if index := strings.Index(text, "\n"); index > 0 && text[index-1] == '\r' {
+		ending = "\r\n"
+	}
+	normalized, positions := normalizeEditText(text)
+	for index := range edits {
+		oldText := strings.ReplaceAll(edits[index].oldText, "\r\n", "\n")
+		start := strings.Index(normalized, oldText)
+		second := -1
+		if start >= 0 {
+			second = strings.Index(normalized[start+1:], oldText)
+		}
+		if start < 0 {
+			return "", fmt.Errorf("edits[%d].oldText was not found in %s.", index, requestedPath)
+		}
+		if second >= 0 {
+			return "", fmt.Errorf("edits[%d].oldText occurs more than once in %s; add more context.", index, requestedPath)
+		}
+		edits[index].start = positions[start]
+		edits[index].end = positions[start+len(oldText)]
+		edits[index].newText = strings.ReplaceAll(strings.ReplaceAll(edits[index].newText, "\r\n", "\n"), "\n", ending)
+	}
+	sorted := slices.Clone(edits)
+	slices.SortFunc(sorted, func(a, b textEdit) int { return cmp.Compare(a.start, b.start) })
+	for index := 1; index < len(sorted); index++ {
+		if sorted[index].start >= sorted[index-1].end {
+			continue
+		}
+		return "", fmt.Errorf("edits[%d] and edits[%d] overlap in %s.", sorted[index-1].index, sorted[index].index, requestedPath)
+	}
+	slices.SortFunc(edits, func(a, b textEdit) int { return cmp.Compare(b.start, a.start) })
+	edited := text
+	for _, edit := range edits {
+		edited = edited[:edit.start] + edit.newText + edited[edit.end:]
+	}
+	if bom {
+		edited = "\ufeff" + edited
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Successfully replaced %d block(s) in %s.", len(edits), requestedPath), nil
 }
 
 type cappedWriter struct {
@@ -650,6 +849,7 @@ type Agent struct {
 	Client   *http.Client
 	Endpoint string
 	OnTool   func(ToolEvent)
+	OnEvent  func(RunEvent)
 	Tools    []Tool
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -670,7 +870,7 @@ func newAgent(skills []Skill, session *SessionStore, instructions string) *Agent
 		project = fmt.Sprintf("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"%s\">\n%s\n</project_instructions>\n\n</project_context>", filepath.Join(cwd, "AGENTS.md"), instructions)
 	}
 	prompt := fmt.Sprintf("You are tiny-agent, a concise coding agent in %s. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.\n\nFor implementation tasks, inspect only what is needed, then make the changes and run focused tests. Do not keep researching the same uncertainty when a mature dependency or direct implementation is available.\nUse the provided tool descriptions to choose the right capability. Not every run enables file access, shell access, or file modification.\nPrefer completing a small working implementation over exhaustively researching every option. If repeated experiments fail, reconsider the approach instead of making another similar attempt.%s\n\n<available_skills>\n%s\n</available_skills>", cwd, project, list)
-	return &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: chatCompletionsURL(endpoint()), OnTool: func(ToolEvent) {}, Tools: localTools()}
+	return &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: chatCompletionsURL(endpoint()), OnTool: func(ToolEvent) {}, OnEvent: func(RunEvent) {}, Tools: localTools()}
 }
 
 func localTools(names ...string) []Tool {
@@ -693,15 +893,7 @@ func localTools(names ...string) []Tool {
 			replay = "safe"
 		}
 		tools = append(tools, Tool{Name: name, Description: description, Parameters: parameters, Replay: replay, ReplayKey: replayKey, Execute: func(ctx context.Context, args map[string]any) (string, error) {
-			stringsOnly := map[string]string{}
-			for key, value := range args {
-				text, ok := value.(string)
-				if !ok {
-					text = fmt.Sprint(value)
-				}
-				stringsOnly[key] = text
-			}
-			return executeTool(ctx, toolName, stringsOnly)
+			return executeTool(ctx, toolName, args)
 		}})
 	}
 	return tools
@@ -748,6 +940,7 @@ func (a *Agent) setLatestCacheHitRate(usage Usage) {
 }
 
 func (a *Agent) callModel(ctx context.Context, messages []Message, tools any) (ModelResponse, error) {
+	started := time.Now()
 	key := os.Getenv("OPENROUTER_API_KEY")
 	if key == "" {
 		return ModelResponse{}, errors.New("Set OPENROUTER_API_KEY")
@@ -800,7 +993,13 @@ func (a *Agent) callModel(ctx context.Context, messages []Message, tools any) (M
 	}
 	cacheWrite := data.Usage.PromptTokensDetails.CacheWriteTokens
 	usage := Usage{Input: max(0, data.Usage.PromptTokens-cacheRead-cacheWrite), Output: data.Usage.CompletionTokens, CacheRead: cacheRead, CacheWrite: cacheWrite}
+	prompt := usage.Input + usage.CacheRead + usage.CacheWrite
+	if prompt > 0 {
+		rate := float64(usage.CacheRead) / float64(prompt) * 100
+		usage.CacheHitRate = &rate
+	}
 	a.addUsage(usage)
+	a.OnEvent(RunEvent{"type": "model.completed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "durationMs": float64(time.Since(started).Microseconds()) / 1000, "usage": usage})
 	reason := data.Choices[0].FinishReason
 	if reason == "" {
 		if len(data.Choices[0].Message.ToolCalls) > 0 {
@@ -990,10 +1189,29 @@ func parseArgs(args []string) (sessionID, workingDirectory string, extras, plugi
 	return sessionID, workingDirectory, extras, splitList(plugins), splitList(mcp), strings.Join(words, " "), nil
 }
 
+type silentCLIError struct{}
+
+func (silentCLIError) Error() string { return "" }
+
+func emitJSON(event any) { _ = json.NewEncoder(os.Stdout).Encode(event) }
+
 func runCLI(args []string) error {
+	jsonMode := slices.Contains(args, "--json")
+	if jsonMode {
+		filtered := args[:0]
+		for _, arg := range args {
+			if arg != "--json" {
+				filtered = append(filtered, arg)
+			}
+		}
+		args = filtered
+	}
 	sessionID, workingDirectory, extras, plugins, mcpAliases, oneShot, err := parseArgs(args)
 	if err != nil {
 		return err
+	}
+	if jsonMode && oneShot == "" {
+		return errors.New("--json requires a one-shot prompt.")
 	}
 	if workingDirectory != "" {
 		path, resolveErr := filepath.Abs(workingDirectory)
@@ -1040,6 +1258,10 @@ func runCLI(args []string) error {
 	}
 	defer session.Close()
 	defer closeBackgroundProcesses()
+	runStarted := time.Now()
+	if jsonMode {
+		emitJSON(RunEvent{"type": "run.started", "timestamp": runStarted.UTC().Format(time.RFC3339Nano), "sessionId": session.ID, "model": model(), "endpoint": endpoint(), "plugins": selectedPlugins, "mcp": mcpAliases})
+	}
 	agent := newAgent(skills, session, loadProjectInstructions())
 	agent.Tools = localTools(selectedPlugins...)
 	loadedMCP := []*MCPClient{}
@@ -1049,18 +1271,34 @@ func runCLI(args []string) error {
 		}
 	}()
 	for _, config := range configs {
+		connectionStarted := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		loaded, loadErr := loadMCPTools(ctx, config, http.DefaultClient)
 		cancel()
 		if loadErr != nil {
+			if jsonMode {
+				emitJSON(RunEvent{"type": "mcp.failed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "server": config.Alias, "stage": "connect", "cause": "connection_failed"})
+				emitJSON(RunEvent{"type": "run.completed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "durationMs": float64(time.Since(runStarted).Microseconds()) / 1000, "result": map[string]any{"status": "failed", "cause": "mcp_setup_error", "message": fmt.Sprintf("MCP %s failed: connection_failed", config.Alias), "sessionId": session.ID, "usage": Usage{}}})
+				return silentCLIError{}
+			}
 			return fmt.Errorf("MCP %s failed: %w", config.Alias, loadErr)
 		}
 		loadedMCP = append(loadedMCP, loaded)
 		agent.Tools = append(agent.Tools, loaded.tools...)
-		fmt.Printf("MCP %s: connected (%s, %d tools)\n", config.Alias, loaded.protocolVersion, len(loaded.tools))
+		if jsonMode {
+			emitJSON(RunEvent{"type": "mcp.connected", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "server": config.Alias, "protocolVersion": loaded.protocolVersion, "toolCount": len(loaded.tools), "durationMs": float64(time.Since(connectionStarted).Microseconds()) / 1000})
+		} else {
+			fmt.Printf("MCP %s: connected (%s, %d tools)\n", config.Alias, loaded.protocolVersion, len(loaded.tools))
+		}
 	}
 	out := io.Writer(os.Stdout)
+	if jsonMode {
+		agent.OnEvent = func(event RunEvent) { emitJSON(event) }
+	}
 	agent.OnTool = func(event ToolEvent) {
+		if jsonMode {
+			return
+		}
 		color := "\x1b[2m"
 		if event.Phase == "start" {
 			color = "\x1b[33m"
@@ -1071,6 +1309,23 @@ func runCLI(args []string) error {
 		if err := agent.restoreSession(); err != nil {
 			return err
 		}
+	}
+	if jsonMode {
+		answer, runErr := agent.runAgentLoop(oneShot)
+		result := map[string]any{"sessionId": session.ID, "usage": agent.Usage}
+		if runErr != nil {
+			result["status"], result["cause"], result["message"] = "failed", "agent_error", runErr.Error()
+		} else {
+			result["status"], result["answer"] = "succeeded", answer
+			if answer == "Operation aborted." {
+				result["status"] = "cancelled"
+			}
+		}
+		emitJSON(RunEvent{"type": "run.completed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "durationMs": float64(time.Since(runStarted).Microseconds()) / 1000, "result": result})
+		if runErr != nil {
+			return silentCLIError{}
+		}
+		return nil
 	}
 	resume := func() { fmt.Fprintf(out, "\nResume: tiny-go --session %s\n", session.ID) }
 	fmt.Printf("\x1b[36mtiny-agent\x1b[0m\nprovider: openrouter\nendpoint: %s\nmodel: %s\nsession: %s\npath: %s\ntools: %s\nmcp: %s", endpoint(), model(), session.ID, session.Path, displayToolList(agent.Tools), emptyList(mcpAliases))
@@ -1169,7 +1424,9 @@ func runSkill(tty *terminal, agent *Agent, input string) (string, error) {
 
 func main() {
 	if err := runCLI(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		if _, silent := err.(silentCLIError); !silent {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 }

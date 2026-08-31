@@ -1,10 +1,11 @@
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tiny_agent_rust::mcp::{LoadedMcp, display_tool_name, load_mcp_configs, load_mcp_tools};
 use tiny_agent_rust::terminal::{TermError, Terminal};
 use tiny_agent_rust::{
     Session, close_background_processes, endpoint, format_tool_event, format_usage,
-    load_project_instructions, load_skills, local_tool_names, model_name, new_agent,
+    load_project_instructions, load_skills, local_tool_names, model_name, new_agent, timestamp,
 };
 
 struct CliArgs {
@@ -13,6 +14,7 @@ struct CliArgs {
     extras: Vec<String>,
     mcp: Vec<String>,
     plugins: Vec<String>,
+    json: bool,
     prompt: String,
 }
 
@@ -22,10 +24,14 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
     let mut extras = Vec::new();
     let mut mcp = Vec::new();
     let mut plugins: Option<Vec<String>> = None;
+    let mut json = false;
     let mut words: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--session"
+        if args[i] == "--json" {
+            json = true;
+            i += 1;
+        } else if args[i] == "--session"
             || args[i] == "--cwd"
             || args[i] == "--skill"
             || args[i] == "--mcp"
@@ -87,6 +93,7 @@ fn parse_args(args: Vec<String>) -> Result<CliArgs, String> {
                     .map(|name| (*name).to_string())
                     .collect()
             }),
+        json,
         prompt: words.join(" "),
     })
 }
@@ -100,6 +107,24 @@ fn term_err_to_string(e: TermError) -> String {
         TermError::Error(s) => s,
         TermError::Exit | TermError::Eof => String::new(),
     }
+}
+
+fn emit_json(event: serde_json::Value) {
+    println!("{}", serde_json::to_string(&event).unwrap());
+}
+
+fn usage_json(usage: tiny_agent_rust::UsageState) -> serde_json::Value {
+    serde_json::json!({
+        "input":usage.input, "output":usage.output,
+        "cacheRead":usage.cache_read, "cacheWrite":usage.cache_write,
+    })
+}
+
+fn mcp_failure_cause(error: &str) -> &'static str {
+    if error.to_ascii_lowercase().contains("timeout") {
+        return "timeout";
+    }
+    "connection_failed"
 }
 
 struct ActiveMcp(Vec<LoadedMcp>);
@@ -122,6 +147,94 @@ impl Drop for ActiveBg {
     }
 }
 
+fn run_json_cli(parsed: CliArgs) -> Result<i32, String> {
+    if parsed.prompt.is_empty() {
+        return Err("--json requires a one-shot prompt.".into());
+    }
+    let configs = load_mcp_configs(&parsed.mcp)?;
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = cwd.to_string_lossy().to_string();
+    let _active_bg = ActiveBg { cwd: cwd.clone() };
+    let session = if parsed.session_id.is_empty() {
+        Session::create_new(std::path::Path::new(&cwd), &model_name())?
+    } else {
+        Session::open(&parsed.session_id, std::path::Path::new(&cwd))?
+    };
+    let session_id = session.id.clone();
+    let started = Instant::now();
+    emit_json(serde_json::json!({
+        "type":"run.started", "timestamp":timestamp(), "sessionId":session_id,
+        "model":model_name(), "endpoint":endpoint(), "plugins":parsed.plugins, "mcp":parsed.mcp,
+    }));
+
+    let mut loaded_mcp = ActiveMcp(Vec::new());
+    for config in configs {
+        let alias = config.alias().to_string();
+        let connection_started = Instant::now();
+        match load_mcp_tools(config) {
+            Ok(loaded) => {
+                emit_json(serde_json::json!({
+                    "type":"mcp.connected", "timestamp":timestamp(), "server":alias,
+                    "protocolVersion":loaded.protocol_version, "toolCount":loaded.tools.len(),
+                    "durationMs":connection_started.elapsed().as_secs_f64() * 1000.0,
+                }));
+                loaded_mcp.0.push(loaded);
+            }
+            Err(error) => {
+                let cause = mcp_failure_cause(&error);
+                emit_json(serde_json::json!({
+                    "type":"mcp.failed", "timestamp":timestamp(), "server":alias,
+                    "stage":"connect", "cause":cause,
+                }));
+                emit_json(serde_json::json!({
+                    "type":"run.completed", "timestamp":timestamp(),
+                    "durationMs":started.elapsed().as_secs_f64() * 1000.0,
+                    "result":{
+                        "status":"failed", "cause":"mcp_setup_error",
+                        "message":format!("MCP {alias} failed: {cause}"), "sessionId":session_id,
+                        "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+                    },
+                }));
+                return Ok(1);
+            }
+        }
+    }
+
+    let skills = load_skills(parsed.extras, &cwd)?;
+    let instructions = load_project_instructions(&cwd);
+    let mut agent = new_agent(skills, Some(session), instructions, &cwd);
+    agent.local_tools = parsed.plugins;
+    agent.mcp_tools = loaded_mcp
+        .0
+        .iter()
+        .flat_map(|loaded| loaded.tools.clone())
+        .collect();
+    agent.on_event = Arc::new(emit_json);
+    let outcome = (|| {
+        if !parsed.session_id.is_empty() {
+            agent.resume_session()?;
+        }
+        agent.run_agent_loop(&parsed.prompt)
+    })();
+    let usage = usage_json(agent.usage);
+    let result = match outcome {
+        Ok(answer) => serde_json::json!({
+            "status":if answer == "Operation aborted." { "cancelled" } else { "succeeded" },
+            "answer":answer, "sessionId":session_id, "usage":usage,
+        }),
+        Err(error) => serde_json::json!({
+            "status":"failed", "cause":"agent_error", "message":error,
+            "sessionId":session_id, "usage":usage,
+        }),
+    };
+    let failed = result["status"] == "failed";
+    emit_json(serde_json::json!({
+        "type":"run.completed", "timestamp":timestamp(),
+        "durationMs":started.elapsed().as_secs_f64() * 1000.0, "result":result,
+    }));
+    Ok(if failed { 1 } else { 0 })
+}
+
 fn run_cli(args: Vec<String>) -> Result<i32, String> {
     let parsed = parse_args(args)?;
     if !parsed.cwd.is_empty() {
@@ -130,6 +243,9 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
             return Err(format!("--cwd must be a directory: {}", parsed.cwd));
         }
         std::env::set_current_dir(path).map_err(|error| error.to_string())?;
+    }
+    if parsed.json {
+        return run_json_cli(parsed);
     }
     let configs = load_mcp_configs(&parsed.mcp)?;
     let mut loaded_mcp = ActiveMcp(Vec::new());
@@ -162,10 +278,6 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
         .flat_map(|loaded| loaded.tools.clone())
         .collect();
     let agent = Arc::new(Mutex::new(agent));
-    if is_restored {
-        agent.lock().unwrap().resume_session()?;
-    }
-
     let mut term = Terminal::from_stdin(Box::new(std::io::stdout()));
     let out = term.output();
     let tool_out = out.clone();
@@ -180,6 +292,9 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
             })
         ));
     });
+    if is_restored {
+        agent.lock().unwrap().resume_session()?;
+    }
 
     let tool_names = {
         let agent = agent.lock().unwrap();
