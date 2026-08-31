@@ -257,6 +257,23 @@ type ActiveOperation = {
     aborting?: Promise<void>;
 };
 
+type DurableToolCall = {
+    operationId: string;
+    stepId: string;
+    assistantEntryId: string;
+    toolIndex: number;
+    toolCallId: string;
+    tool: Tool;
+    args: ToolArgs;
+    environmentIdentity: string;
+} & ({ mode: "start" } | { mode: "replay"; toolStartedId: string; resultEntryId: string });
+
+type DurableToolResult = {
+    message: Message;
+    resultEntryId: string;
+    aborted: boolean;
+};
+
 export class Agent {
     messages: Message[];
     usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -604,75 +621,118 @@ ${list}
             this.tools.find((candidate) => candidate.name === plan.toolName),
             `Missing recovery tool: ${plan.toolName}`,
         );
-        let toolStartedId = plan.toolStartedId;
-        let resultEntryId: string;
-        if (plan.mode === "start") {
-            toolStartedId = this.session.allocateId();
-            resultEntryId = this.session.allocateId();
-            await this.session.append({
-                kind: "record",
-                id: toolStartedId,
-                record: {
-                    type: "toolStarted",
-                    operationId: state.operation.operationId,
-                    stepId: state.operation.step.stepId,
-                    assistantEntryId: plan.assistantEntryId,
-                    toolIndex: plan.toolIndex,
-                    toolCallId: this.recoveryToolCallId(state, plan.assistantEntryId, plan.toolIndex),
-                    toolName: plan.toolName,
-                    arguments: plan.arguments,
-                    ...durableToolReplay(tool),
-                    environmentIdentity: state.header.environmentIdentity,
-                    resultEntryId,
-                },
-            });
-        } else {
-            const pending = expect(
-                state.operation.toolCalls.find((call) => call.toolStartedId === toolStartedId),
-                `Missing pending recovery tool call: ${toolStartedId}`,
-            );
-            resultEntryId = pending.resultEntryId;
-        }
-        const toolCallId = this.recoveryToolCallId(state, plan.assistantEntryId, plan.toolIndex);
-        let content: string;
-        let result: { type: "success" } | { type: "error" } | { type: "synthetic"; reason: "interrupted" } = {
-            type: "success",
+        const call = {
+            operationId: state.operation.operationId,
+            stepId: state.operation.step.stepId,
+            assistantEntryId: plan.assistantEntryId,
+            toolIndex: plan.toolIndex,
+            tool,
+            args: plan.arguments,
+            environmentIdentity: state.header.environmentIdentity,
         };
-        const active = this.beginOperation("tool", state.operation.operationId, toolCallId);
-        const signal = active.controller.signal;
-        try {
-            content = await executeDurableTool(tool, plan.arguments, signal);
-        } catch (error) {
-            content = `Error: ${error instanceof Error ? error.message : String(error)}`;
-            result = { type: "error" };
+        if (plan.mode === "start") {
+            await this.executeDurableToolCall({
+                ...call,
+                mode: "start",
+                toolCallId: this.currentRecoveryToolCallId(state, plan.assistantEntryId, plan.toolIndex),
+            });
+            return;
         }
-        if (await this.settleOperation(active)) {
-            content = SYNTHETIC_CONTENT.interrupted;
-            result = { type: "synthetic", reason: "interrupted" };
-        }
-        await this.session.append({
-            kind: "entry",
-            id: resultEntryId,
-            entry: {
-                type: "message",
-                stepId: state.operation.step.stepId,
-                message: { role: "tool", tool_call_id: toolCallId, content },
-                toolName: plan.toolName,
-                toolStartedId,
-                result,
-            },
+        const toolStartedId = expect(plan.toolStartedId, "Replay plan is missing its durable tool identity");
+        const pending = expect(
+            state.operation.toolCalls.find((candidate) => candidate.toolStartedId === toolStartedId),
+            `Missing pending recovery tool call: ${toolStartedId}`,
+        );
+        await this.executeDurableToolCall({
+            ...call,
+            mode: "replay",
+            toolCallId: pending.toolCallId,
+            toolStartedId,
+            resultEntryId: pending.resultEntryId,
         });
     }
-    private recoveryToolCallId(
+    private currentRecoveryToolCallId(
         state: Awaited<ReturnType<SessionStore["load"]>>,
         assistantEntryId: string,
         toolIndex: number,
     ) {
-        for (const message of state.transcript.toReversed()) {
-            const calls = message.role === "assistant" ? message.tool_calls : undefined;
-            if (calls?.[toolIndex]) return calls[toolIndex].id;
+        if (state.operation.kind !== "run" || state.operation.step?.settledEntryId !== assistantEntryId)
+            throw Error(`Recovery assistant is not the current settled step: ${assistantEntryId}`);
+        const assistant = state.transcript.findLast((message) => message.role === "assistant");
+        const call = assistant?.role === "assistant" ? assistant.tool_calls?.[toolIndex] : undefined;
+        return expect(call, `Missing recovery tool call ${assistantEntryId}:${toolIndex}`).id;
+    }
+    private async executeDurableToolCall(call: DurableToolCall): Promise<DurableToolResult> {
+        if (!this.session) throw Error("Session is required");
+        const session = this.session;
+        const toolStartedId = call.mode === "start" ? session.allocateId() : call.toolStartedId;
+        const resultEntryId = call.mode === "start" ? session.allocateId() : call.resultEntryId;
+        if (call.mode === "start") {
+            await session.append({
+                kind: "record",
+                id: toolStartedId,
+                record: {
+                    type: "toolStarted",
+                    operationId: call.operationId,
+                    stepId: call.stepId,
+                    assistantEntryId: call.assistantEntryId,
+                    toolIndex: call.toolIndex,
+                    toolCallId: call.toolCallId,
+                    toolName: call.tool.name,
+                    arguments: call.args,
+                    ...durableToolReplay(call.tool),
+                    environmentIdentity: call.environmentIdentity,
+                    resultEntryId,
+                },
+            });
         }
-        throw Error(`Missing recovery tool call ${assistantEntryId}`);
+
+        const started = performance.now();
+        this.onEvent({
+            type: "tool.started",
+            timestamp: new Date().toISOString(),
+            toolCallId: call.toolCallId,
+            tool: call.tool.name,
+        });
+        this.onTool({ phase: "start", name: call.tool.name, args: call.args });
+        const active = this.beginOperation("tool", call.operationId, call.toolCallId);
+        let content: string;
+        let ok = false;
+        try {
+            content = await executeDurableTool(call.tool, call.args, active.controller.signal);
+            ok = true;
+        } catch (error) {
+            content = `Error: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        const aborted = await this.settleOperation(active);
+        if (aborted) {
+            content = SYNTHETIC_CONTENT.interrupted;
+            ok = false;
+        }
+        this.onTool({ phase: "end", name: call.tool.name, args: call.args, result: content });
+        this.onEvent({
+            type: "tool.completed",
+            timestamp: new Date().toISOString(),
+            toolCallId: call.toolCallId,
+            tool: call.tool.name,
+            durationMs: performance.now() - started,
+            ok,
+        });
+
+        const message: Message = { role: "tool", tool_call_id: call.toolCallId, content };
+        await session.append({
+            kind: "entry",
+            id: resultEntryId,
+            entry: {
+                type: "message",
+                stepId: call.stepId,
+                message,
+                toolName: call.tool.name,
+                toolStartedId,
+                result: aborted ? { type: "synthetic", reason: "interrupted" } : { type: ok ? "success" : "error" },
+            },
+        });
+        return { message, resultEntryId, aborted };
     }
     async callModel(messages = this.messages, tools: unknown = toolDefinitions(this.tools), signal?: AbortSignal) {
         const key = requireOpenRouterApiKey();
@@ -858,77 +918,20 @@ ${list}
                     await synthetic("unknownTool");
                     continue;
                 }
-                const toolStartedId = session.allocateId();
-                const resultEntryId = session.allocateId();
-                const environment = (await session.load()).header.environmentIdentity;
-                await session.append({
-                    kind: "record",
-                    id: toolStartedId,
-                    record: {
-                        type: "toolStarted",
-                        operationId,
-                        stepId,
-                        assistantEntryId,
-                        toolIndex: i,
-                        toolCallId: call.id,
-                        toolName: tool.name,
-                        arguments: args,
-                        ...durableToolReplay(tool),
-                        environmentIdentity: environment,
-                        resultEntryId,
-                    },
-                });
-                const started = performance.now();
-                let content: string;
-                let aborted = false;
-                let ok = false;
-                this.onEvent({
-                    type: "tool.started",
-                    timestamp: new Date().toISOString(),
+                const result = await this.executeDurableToolCall({
+                    mode: "start",
+                    operationId,
+                    stepId,
+                    assistantEntryId,
+                    toolIndex: i,
                     toolCallId: call.id,
-                    tool: tool.name,
+                    tool,
+                    args,
+                    environmentIdentity: (await session.load()).header.environmentIdentity,
                 });
-                this.onTool({ phase: "start", name: tool.name, args });
-                const active = this.beginOperation("tool", operationId, call.id);
-                const signal = active.controller.signal;
-                try {
-                    content = await tool.execute(args, signal);
-                    ok = true;
-                } catch (error) {
-                    content = `Error: ${error instanceof Error ? error.message : error}`;
-                }
-                aborted = await this.settleOperation(active);
-                if (aborted) {
-                    content = SYNTHETIC_CONTENT.interrupted;
-                    ok = false;
-                }
-                this.onTool({ phase: "end", name: tool.name, args, result: content });
-                this.onEvent({
-                    type: "tool.completed",
-                    timestamp: new Date().toISOString(),
-                    toolCallId: call.id,
-                    tool: tool.name,
-                    durationMs: performance.now() - started,
-                    ok,
-                });
-                const result: Message = { role: "tool", tool_call_id: call.id, content };
-                await session.append({
-                    kind: "entry",
-                    id: resultEntryId,
-                    entry: {
-                        type: "message",
-                        stepId,
-                        message: result,
-                        toolName: tool.name,
-                        toolStartedId,
-                        result: aborted
-                            ? { type: "synthetic", reason: "interrupted" }
-                            : { type: ok ? "success" : "error" },
-                    },
-                });
-                this.messages.push(result);
-                contextThroughEntryId = resultEntryId;
-                if (!aborted) continue;
+                this.messages.push(result.message);
+                contextThroughEntryId = result.resultEntryId;
+                if (!result.aborted) continue;
                 for (let pendingIndex = i + 1; pendingIndex < answer.tool_calls.length; pendingIndex++) {
                     i = pendingIndex;
                     await synthetic("aborted");

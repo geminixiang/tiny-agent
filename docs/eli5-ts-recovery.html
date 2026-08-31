@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ELI5：tiny-agent 的恢復執行</title>
+    <style>
+        :root {
+            --paper: #f5eedf;
+            --ink: #17211b;
+            --live: #ffb703;
+            --recovery: #4cc9a4;
+            --pipe: #3a67d8;
+            --danger: #e95454;
+            --muted: #6b716c;
+            --line: 3px solid var(--ink);
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            color: var(--ink);
+            background:
+                linear-gradient(rgba(23, 33, 27, .045) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(23, 33, 27, .045) 1px, transparent 1px),
+                var(--paper);
+            background-size: 24px 24px;
+            font-family: "Noto Sans TC", "PingFang TC", sans-serif;
+        }
+        main { width: min(1100px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 72px; }
+        header { border-bottom: 6px solid var(--ink); padding-bottom: 28px; }
+        .eyebrow { font-weight: 900; letter-spacing: .18em; color: var(--pipe); }
+        h1 { max-width: 850px; margin: 12px 0 8px; font-size: clamp(44px, 8vw, 88px); line-height: .98; letter-spacing: -.05em; }
+        header p { margin: 16px 0 0; font-size: clamp(20px, 3vw, 30px); font-weight: 700; }
+        section { padding: 56px 0; border-bottom: 3px dashed rgba(23, 33, 27, .35); }
+        h2 { margin: 0 0 28px; font-size: clamp(31px, 5vw, 55px); line-height: 1.08; }
+        .before, .after { display: grid; gap: 20px; align-items: stretch; }
+        .before { grid-template-columns: 1fr auto 1fr; }
+        .after { grid-template-columns: 1fr auto 1fr; }
+        .card, .machine, .rule {
+            border: var(--line);
+            box-shadow: 8px 8px 0 var(--ink);
+            padding: 26px;
+            background: #fffaf0;
+        }
+        .card.live { background: var(--live); transform: rotate(-1deg); }
+        .card.recovery { background: var(--recovery); transform: rotate(1deg); }
+        .machine { background: var(--pipe); color: white; text-align: center; }
+        .icon { display: block; margin: 0 auto 14px; width: 120px; height: 120px; }
+        .card h3, .machine h3 { margin: 0; font-size: clamp(27px, 3vw, 38px); }
+        .card p, .machine p, .rule p { font-size: 20px; line-height: 1.45; font-weight: 700; }
+        .arrow { align-self: center; font-size: 58px; font-weight: 1000; }
+        .bad { margin-top: 30px; padding: 22px; color: white; background: var(--danger); border: var(--line); font-size: 23px; font-weight: 900; transform: rotate(-.5deg); }
+        .funnel { display: grid; grid-template-columns: 1fr; gap: 18px; }
+        .sources { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+        .down { text-align: center; font-size: 64px; line-height: .7; }
+        .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; counter-reset: step; }
+        .step { min-height: 190px; padding: 20px; border: var(--line); background: #fffaf0; position: relative; }
+        .step::before {
+            counter-increment: step;
+            content: counter(step);
+            display: grid;
+            place-items: center;
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            color: white;
+            background: var(--ink);
+            font-size: 25px;
+            font-weight: 900;
+        }
+        .step h3 { margin: 18px 0 8px; font-size: 25px; }
+        .step p { margin: 0; color: var(--muted); font-size: 17px; font-weight: 700; }
+        .identity { display: flex; align-items: center; justify-content: center; gap: 24px; flex-wrap: wrap; }
+        .ticket { min-width: 260px; padding: 25px; border: 4px dashed var(--ink); background: white; text-align: center; font-size: 21px; font-weight: 900; }
+        .ticket strong { display: block; margin-bottom: 9px; color: var(--pipe); font-size: 31px; }
+        .not-equal { font-size: 50px; font-weight: 1000; }
+        .tests { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .rule { min-height: 185px; box-shadow: 6px 6px 0 var(--ink); }
+        .rule b { display: block; font-size: 26px; }
+        .rule span { display: block; margin-top: 12px; color: var(--muted); font-size: 18px; line-height: 1.4; font-weight: 700; }
+        .result { background: var(--ink); color: white; text-align: center; padding: 50px 24px; border: 5px solid var(--ink); }
+        .result strong { display: block; color: var(--live); font-size: clamp(44px, 7vw, 84px); line-height: 1; }
+        .result p { margin: 18px auto 0; max-width: 750px; font-size: 24px; font-weight: 800; }
+        code { padding: 2px 7px; color: white; background: var(--ink); font-family: "SFMono-Regular", Consolas, monospace; font-size: .88em; }
+        @media (max-width: 780px) {
+            .before, .after { grid-template-columns: 1fr; }
+            .arrow { transform: rotate(90deg); text-align: center; }
+            .sources, .steps, .tests { grid-template-columns: 1fr; }
+            .card { transform: none !important; }
+        }
+    </style>
+</head>
+<body>
+<main>
+    <header>
+        <div class="eyebrow">ELI5 · TYPE­SCRIPT RECOVERY</div>
+        <h1>兩條路，改成走同一台機器</h1>
+        <p>正常執行和當機恢復，不再各做各的。</p>
+    </header>
+
+    <section>
+        <h2>以前：兩套很像、但不完全一樣的流程</h2>
+        <div class="before">
+            <article class="card live">
+                <svg class="icon" viewBox="0 0 120 120" aria-hidden="true"><circle cx="60" cy="60" r="52" fill="#fffaf0" stroke="#17211b" stroke-width="5"/><path d="M37 64l16 16 32-39" fill="none" stroke="#17211b" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <h3>正常執行</h3>
+                <p>自己記錄工具開始、執行工具、處理取消、保存結果。</p>
+            </article>
+            <div class="arrow">≠</div>
+            <article class="card recovery">
+                <svg class="icon" viewBox="0 0 120 120" aria-hidden="true"><circle cx="60" cy="60" r="52" fill="#fffaf0" stroke="#17211b" stroke-width="5"/><path d="M34 51a30 30 0 1 1 4 28M34 51V27m0 24h24" fill="none" stroke="#17211b" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <h3>恢復執行</h3>
+                <p>又寫一次類似流程，但少了 monitoring，找 tool call 的方法也較鬆散。</p>
+            </article>
+        </div>
+        <div class="bad">危險：修好左邊時，很容易忘記同步修右邊。</div>
+    </section>
+
+    <section>
+        <h2>現在：兩邊都交給同一個執行器</h2>
+        <div class="funnel">
+            <div class="sources">
+                <article class="card live"><h3>☀️ Live</h3><p>「請開始一個新工具」</p></article>
+                <article class="card recovery"><h3>🛟 Recovery</h3><p>「請開始，或安全重播工具」</p></article>
+            </div>
+            <div class="down">↓</div>
+            <article class="machine">
+                <svg class="icon" viewBox="0 0 120 120" aria-hidden="true"><rect x="19" y="25" width="82" height="70" rx="8" fill="#fffaf0" stroke="#17211b" stroke-width="5"/><circle cx="43" cy="60" r="11" fill="#ffb703" stroke="#17211b" stroke-width="4"/><circle cx="77" cy="60" r="11" fill="#4cc9a4" stroke="#17211b" stroke-width="4"/><path d="M35 91v14m50-14v14M60 25V12" stroke="#17211b" stroke-width="6" stroke-linecap="round"/></svg>
+                <h3><code>executeDurableToolCall()</code></h3>
+                <p>唯一一台負責 durable tool execution 的機器。</p>
+            </article>
+        </div>
+    </section>
+
+    <section>
+        <h2>這台機器固定做四件事</h2>
+        <div class="steps">
+            <article class="step"><h3>先記下意圖</h3><p>新工具先保存 <code>toolStarted</code>，之後才真的執行。</p></article>
+            <article class="step"><h3>執行或重播</h3><p>正常工具直接執行；安全工具在恢復時可以 replay。</p></article>
+            <article class="step"><h3>處理取消</h3><p>如果使用者中止，就把結果改成 interrupted。</p></article>
+            <article class="step"><h3>保存結果</h3><p>成功、失敗或 interrupted，都寫成 durable result。</p></article>
+        </div>
+    </section>
+
+    <section>
+        <h2>新執行 vs. 安全重播</h2>
+        <div class="identity">
+            <div class="ticket"><strong>START</strong>發新的兩張票<br>toolStartedId<br>resultEntryId</div>
+            <div class="not-equal">↔</div>
+            <div class="ticket"><strong>REPLAY</strong>沿用原本的票<br>不製造第二份 identity</div>
+        </div>
+        <div class="bad" style="background: var(--pipe)">TypeScript 型別會強迫 replay 一定帶著舊 IDs；不用等到執行時才猜。</div>
+    </section>
+
+    <section>
+        <h2>我用測試鎖住三個承諾</h2>
+        <div class="tests">
+            <article class="rule"><b>① 只做一次</b><span>恢復後工具只執行一次；再次 resume 不會重做。</span></article>
+            <article class="rule"><b>② 都有通知</b><span>Live、recovery start、recovery replay 都會送出 started/completed。</span></article>
+            <article class="rule"><b>③ 記錄不再變</b><span>第二次 resume 後，session bytes 完全不變。</span></article>
+        </div>
+    </section>
+
+    <section style="border-bottom: 0">
+        <div class="result">
+            <strong>152 / 152</strong>
+            <p>Type check、lint、format 和全部測試通過。Pi reviewer 複查後也沒有新的 correctness 問題。</p>
+        </div>
+    </section>
+</main>
+</body>
+</html>

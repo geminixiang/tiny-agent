@@ -866,6 +866,8 @@ test("replays the immutable builtin read implementation once and repeated resume
         await writeFile("replay.txt", "replayed");
         let injectedExecutions = 0;
         let requests = 0;
+        const toolEvents: any[] = [];
+        const runEvents: any[] = [];
         const readTool = builtInTools.find((tool) => tool.name === "read")!;
         const injectedExecute = async () => {
             injectedExecutions++;
@@ -884,9 +886,9 @@ test("replays the immutable builtin read implementation once and repeated resume
                 throw Error("stop after replay");
             }) as typeof fetch,
             session,
-            () => {},
+            (event) => toolEvents.push(event),
             "",
-            () => {},
+            (event) => runEvents.push(event),
             [readTool],
         );
         const settled = await appendSettledToolStep(session, agent, [
@@ -918,11 +920,103 @@ test("replays the immutable builtin read implementation once and repeated resume
 
         assert.equal(requests, 1);
         assert.equal(injectedExecutions, 0);
+        assert.deepEqual(
+            toolEvents.map(({ phase, name, result }) => ({ phase, name, result })),
+            [
+                { phase: "start", name: "read", result: undefined },
+                { phase: "end", name: "read", result: "replayed" },
+            ],
+        );
+        assert.deepEqual(
+            runEvents
+                .filter((event) => event.type.startsWith("tool."))
+                .map(({ type, tool, toolCallId, ok }) => ({
+                    type,
+                    tool,
+                    toolCallId,
+                    ok,
+                })),
+            [
+                { type: "tool.started", tool: "read", toolCallId: "safe-call", ok: undefined },
+                { type: "tool.completed", tool: "read", toolCallId: "safe-call", ok: true },
+            ],
+        );
         assert.deepEqual(await readFile(session.path), afterFirstResume);
         assert.equal((await session.load()).operation.kind, "idle");
         const replayed = (await facts(session)).find((fact) => fact.id === resultEntryId);
         assert.equal(replayed.entry.message.content, "replayed");
         assert.deepEqual(replayed.entry.result, { type: "success" });
+    } finally {
+        await session.close();
+    }
+});
+
+test("starts an untouched recovery tool through the shared monitored execution path", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore(new Date("2026-08-06T02:10:00Z"));
+    try {
+        let executions = 0;
+        let requests = 0;
+        const toolEvents: any[] = [];
+        const runEvents: any[] = [];
+        const tools = [
+            {
+                name: "lookup",
+                description: "Look up a value.",
+                parameters: { type: "object", properties: {} },
+                async execute() {
+                    executions++;
+                    return "recovered";
+                },
+            },
+        ];
+        const agent = new Agent(
+            [],
+            (async () => {
+                requests++;
+                throw Error("stop after recovered tool");
+            }) as typeof fetch,
+            session,
+            (event) => toolEvents.push(event),
+            "",
+            (event) => runEvents.push(event),
+            tools,
+        );
+        await appendSettledToolStep(session, agent, [{ id: "untouched-call", name: "lookup", arguments: "{}" }]);
+
+        await assert.rejects(() => agent.resumeSession(), /stop after recovered tool/);
+        const afterFirstResume = await readFile(session.path);
+        await agent.resumeSession();
+
+        assert.equal(executions, 1);
+        assert.equal(requests, 1);
+        assert.deepEqual(
+            toolEvents.map(({ phase, name, result }) => ({ phase, name, result })),
+            [
+                { phase: "start", name: "lookup", result: undefined },
+                { phase: "end", name: "lookup", result: "recovered" },
+            ],
+        );
+        assert.deepEqual(
+            runEvents
+                .filter((event) => event.type.startsWith("tool."))
+                .map(({ type, tool, toolCallId, ok }) => ({
+                    type,
+                    tool,
+                    toolCallId,
+                    ok,
+                })),
+            [
+                { type: "tool.started", tool: "lookup", toolCallId: "untouched-call", ok: undefined },
+                { type: "tool.completed", tool: "lookup", toolCallId: "untouched-call", ok: true },
+            ],
+        );
+        assert.deepEqual(await readFile(session.path), afterFirstResume);
+        assert.equal((await session.load()).operation.kind, "idle");
+        const started = (await facts(session)).find((fact) => fact.record?.type === "toolStarted");
+        const recovered = (await facts(session)).find((fact) => fact.id === started.record.resultEntryId);
+        assert.equal(recovered.entry.message.content, "recovered");
+        assert.deepEqual(recovered.entry.result, { type: "success" });
     } finally {
         await session.close();
     }
