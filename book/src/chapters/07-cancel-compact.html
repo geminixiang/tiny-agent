@@ -107,8 +107,8 @@
         </li>
         <li class="anim-arrow a3" aria-hidden="true">→</li>
         <li class="anim-node s4">
-            <span class="anim-title">寫入 compaction entry</span>
-            <span class="anim-data">summary + <span class="chip">compactedEntryIds</span><span class="chip">retainedEntryIds</span><span class="chip">sourceDigest</span>（原始 facts 仍在 append-only log）</span>
+            <span class="anim-title">寫入 durable facts</span>
+            <span class="anim-data"><code>compactionStarted</code> 記錄 partition/digest；<code>compaction</code> entry 保存 summary + retainedTail（原始 facts 仍在 append-only log）</span>
         </li>
         <li class="anim-arrow a4" aria-hidden="true">→</li>
         <li class="anim-node s5">
@@ -122,13 +122,16 @@
 </figure>
 
 <h2 id="two-boundaries">雙切點（Two-Cut）的嚴格定義</h2>
+<p>
+    Schema 上刻意把「開始時鎖定的來源 partition」和「成功後產生的 checkpoint」分開：<code>compactionStarted</code> 是 durable intent 與 source digest；<code>compaction</code> entry 是 summary 結果與可直接重建 Active Context 的 retained tail。這讓每個欄位都有明確用途，也避免把審計欄位和模型摘要結果混在同一個節點。
+</p>
 <table>
     <thead>
         <tr><th>切點維度</th><th>主要服務對象</th><th>運作機制與邊界保證</th></tr>
     </thead>
     <tbody>
         <tr><td><strong>Track 1: Active-Context Cut</strong></td><td><strong>LLM 大腦（推論視窗）</strong></td><td>保留最近至少 6 則訊息，並自動向前尋找 <code>user</code> 邊界（避免拆散單次完整問答）。前次產生的舊 Summary 會參與本次新摘要的計算。</td></tr>
-        <tr><td><strong>Track 2: Durable Source Partition</strong></td><td><strong>一致性稽核與 Crash Recovery</strong></td><td>記錄 <code>compactedEntryIds</code>、<code>retainedEntryIds</code> 與 <code>sourceDigest</code>。Reducer 可偵測內容、順序或 partition 未同步更新；但未加密 SHA-256 不是 MAC/signature，能寫檔的攻擊者仍可重算，因此不構成 tamper-proof audit log。</td></tr>
+        <tr><td><strong>Track 2: Durable Source Partition</strong></td><td><strong>一致性稽核與 Crash Recovery</strong></td><td><code>compactionStarted</code> 記錄 <code>compactedEntryIds</code>、<code>retainedEntryIds</code> 與 <code>sourceDigest</code>；<code>compaction</code> entry 則記錄 <code>summary</code>、<code>compactedThroughEntryId</code> 與 materialized <code>retainedTail</code>。Reducer 可偵測內容、順序或 partition 未同步更新；但未加密 SHA-256 不是 MAC/signature，能寫檔的攻擊者仍可重算，因此不構成 tamper-proof audit log。</td></tr>
     </tbody>
 </table>
 
