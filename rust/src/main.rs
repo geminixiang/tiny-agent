@@ -114,10 +114,14 @@ fn emit_json(event: serde_json::Value) {
 }
 
 fn usage_json(usage: tiny_agent_rust::UsageState) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "input":usage.input, "output":usage.output,
         "cacheRead":usage.cache_read, "cacheWrite":usage.cache_write,
-    })
+    });
+    if usage.input + usage.cache_read + usage.cache_write > 0 {
+        value["cacheHitRate"] = serde_json::json!(usage.cache_hit_rate);
+    }
+    value
 }
 
 fn mcp_failure_cause(error: &str) -> &'static str {

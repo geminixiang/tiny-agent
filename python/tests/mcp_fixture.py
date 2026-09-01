@@ -18,10 +18,12 @@ class McpFixture:
         rpc_errors: dict[str, dict] | None = None,
         pages: list[list[dict]] | None = None,
         sse_terminal_delay: float = 0,
+        legacy: bool = False,
     ):
         self.sse = sse
         self.chunked = chunked
         self.sse_terminal_delay = sse_terminal_delay
+        self.legacy = legacy
         self.token = token
         self.http_error = http_error
         self.error_body = error_body
@@ -61,7 +63,33 @@ class McpFixture:
                     error = errors[index]
                     if error is not None:
                         self._rpc_error(request, error.get("code", -32603), error.get("message", "canary"), error.get("data")); return
+                if fixture.legacy:
+                    self._handle_legacy(request); return
                 self._handle_modern(request)
+
+            def do_DELETE(self):
+                self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
+
+            def _handle_legacy(self, request):
+                method = request.get("method")
+                params = request.get("params", {})
+                if method == "server/discover":
+                    self._rpc_error(request, -32601, "method not found"); return
+                if method == "initialize":
+                    self._rpc_result(request, {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "fixture", "version": "1"},
+                    }, "fixture-session"); return
+                if method == "notifications/initialized":
+                    self.send_response(202); self.send_header("Content-Length", "0"); self.end_headers(); return
+                if self.headers.get("Mcp-Session-Id") != "fixture-session":
+                    self._rpc_error(request, -32000, "missing session"); return
+                if method == "tools/list":
+                    self._rpc_result(request, {"tools": fixture.tools}); return
+                if method == "tools/call":
+                    self._rpc_result(request, self._tool_result(params)); return
+                self._rpc_error(request, -32601, "method not found")
 
             def _handle_modern(self, request):
                 method = request.get("method")
@@ -88,10 +116,10 @@ class McpFixture:
                         "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "fixture", "version": "1"}},
                     }
                 elif method == "tools/list":
-                    if fixture.pages is None: result = {"resultType": "complete", "tools": fixture.tools}
+                    if fixture.pages is None: result = {"resultType": "complete", "tools": fixture.tools, "ttlMs": 0, "cacheScope": "private"}
                     else:
                         page = int(params.get("cursor", "0"))
-                        result = {"resultType": "complete", "tools": fixture.pages[page]}
+                        result = {"resultType": "complete", "tools": fixture.pages[page], "ttlMs": 0, "cacheScope": "private"}
                         if page + 1 < len(fixture.pages): result["nextCursor"] = str(page + 1)
                 elif method == "tools/call": result = {"resultType": "complete", **self._tool_result(params)}
                 else:
@@ -104,16 +132,16 @@ class McpFixture:
                 if name == "echo": return {"content": [{"type": "text", "text": args["message"]}]}
                 if name == "structured": return {"content": [{"type": "text", "text": "count: 2"}], "structuredContent": {"count": 2}}
                 if name == "fail": return {"content": [{"type": "text", "text": "not found"}], "isError": True}
-                if name == "image": return {"content": [{"type": "image", "data": "AA=="}]}
+                if name == "image": return {"content": [{"type": "image", "data": "AA==", "mimeType": "image/png"}]}
                 if name == "slow":
                     time.sleep(args.get("delay", 1)); return {"content": [{"type": "text", "text": "done"}]}
                 if name == "text_resource": return {"content": [{"type": "resource", "resource": {"uri": "file:///README.md", "mimeType": "text/markdown", "text": args.get("text", "resource body")}}]}
                 if name == "binary_resource": return {"content": [{"type": "resource", "resource": {"uri": "file:///image.png", "mimeType": "image/png", "blob": "AA=="}}]}
                 raise AssertionError(f"unknown tool {name}")
 
-            def _rpc_result(self, request, result):
+            def _rpc_result(self, request, result, session_id=None):
                 response = {"jsonrpc": "2.0", "id": request["id"], "result": result}
-                self._send_json(response)
+                self._send_json(response, session_id)
 
             def _rpc_error(self, request, code, message, data=None):
                 error = {"code": code, "message": message}
@@ -121,9 +149,10 @@ class McpFixture:
                 response = {"jsonrpc": "2.0", "id": request.get("id"), "error": error}
                 self._send_json(response)
 
-            def _send_json(self, response):
+            def _send_json(self, response, session_id=None):
                 raw = json.dumps(response, separators=(",", ":")).encode()
                 self.send_response(200)
+                if session_id is not None: self.send_header("Mcp-Session-Id", session_id)
                 if fixture.sse:
                     raw = b"event: message\ndata: " + raw + b"\n\n"
                     self.send_header("Content-Type", "text/event-stream")

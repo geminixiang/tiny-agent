@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "no-output",
+      "command": "true",
+      "result": "(no output)"
+    },
+    {
+      "name": "failed-with-output",
+      "command": "printf captured; exit 7",
+      "result": "captured\n\nCommand exited with code 7"
+    },
+    {
+      "name": "failed-without-output",
+      "command": "exit 7",
+      "result": "Command exited with code 7"
+    },
+    {
+      "name": "timeout-with-output",
+      "command": "printf partial; sleep 2",
+      "timeout": 0.05,
+      "result": "partial\n\nCommand timed out after 0.05 seconds."
+    }
+  ],
+  "lineTruncation": {
+    "command": "i=1; while [ $i -le 2001 ]; do echo $i; i=$((i+1)); done",
+    "firstTailLine": "3",
+    "showingStart": 2,
+    "lastTailLine": "2001",
+    "totalLines": 2001,
+    "separatorNewlines": 3,
+    "label": "Full output"
+  }
+}

@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -61,6 +64,121 @@ func TestJSONModeEmitsOneShotLifecycleWithoutTUIOutput(t *testing.T) {
 	result := completed["result"].(map[string]any)
 	if result["status"] != "failed" || result["cause"] != "agent_error" {
 		t.Fatalf("unexpected result: %v", result)
+	}
+}
+
+func TestJSONModeMatchesSharedSuccessfulLifecycle(t *testing.T) {
+	contractData, err := os.ReadFile(filepath.Join("..", "..", "..", "schemas", "monitoring", "json-lifecycle-contract.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract struct {
+		Prompt, Model string
+		Plugins       []string
+		Responses     []map[string]any
+		Events        []struct {
+			Type           string
+			Required       []string
+			Usage          map[string]any
+			ToolCallID     string `json:"toolCallId"`
+			Tool           string
+			OK             *bool
+			Result         map[string]any
+			ResultRequired []string
+			ResultUsage    map[string]any
+		}
+	}
+	if err := json.Unmarshal(contractData, &contract); err != nil {
+		t.Fatal(err)
+	}
+	responses := slices.Clone(contract.Responses)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if len(responses) == 0 {
+			t.Fatal("unexpected model request")
+		}
+		_ = json.NewEncoder(w).Encode(responses[0])
+		responses = responses[1:]
+	}))
+	defer server.Close()
+	dir := inTempDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "contract-read.txt"), []byte("fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENROUTER_API_KEY", "test")
+	t.Setenv("TINY_MODEL", contract.Model)
+	t.Setenv("TINY_ENDPOINT", server.URL)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	runErr := runCLI([]string{"--json", "--plugin", "read", contract.Prompt})
+	_ = writer.Close()
+	os.Stdout = original
+	output, _ := io.ReadAll(reader)
+	_ = reader.Close()
+	if runErr != nil {
+		t.Fatalf("run: %v\n%s", runErr, output)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) != len(contract.Events) {
+		t.Fatalf("events: %s", output)
+	}
+	for index, line := range lines {
+		var actual map[string]any
+		if err := json.Unmarshal([]byte(line), &actual); err != nil {
+			t.Fatal(err)
+		}
+		expected := contract.Events[index]
+		if actual["type"] != expected.Type {
+			t.Fatalf("event %d type: %v", index, actual["type"])
+		}
+		for _, key := range expected.Required {
+			if _, ok := actual[key]; !ok {
+				t.Fatalf("event %d missing %s", index, key)
+			}
+		}
+		if expected.Usage != nil && !reflect.DeepEqual(actual["usage"], expected.Usage) {
+			t.Fatalf("event %d usage: %v", index, actual["usage"])
+		}
+		if expected.ToolCallID != "" && actual["toolCallId"] != expected.ToolCallID {
+			t.Fatalf("event %d toolCallId: %v", index, actual["toolCallId"])
+		}
+		if expected.Tool != "" && actual["tool"] != expected.Tool {
+			t.Fatalf("event %d tool: %v", index, actual["tool"])
+		}
+		if expected.OK != nil && actual["ok"] != *expected.OK {
+			t.Fatalf("event %d ok: %v", index, actual["ok"])
+		}
+		if expected.Result != nil {
+			result := actual["result"].(map[string]any)
+			for key, value := range expected.Result {
+				if !reflect.DeepEqual(result[key], value) {
+					t.Fatalf("event %d result.%s: %v", index, key, result[key])
+				}
+			}
+			for _, key := range expected.ResultRequired {
+				if _, ok := result[key]; !ok {
+					t.Fatalf("event %d missing result.%s", index, key)
+				}
+			}
+			if expected.ResultUsage != nil && !reflect.DeepEqual(result["usage"], expected.ResultUsage) {
+				t.Fatalf("event %d result usage: %v", index, result["usage"])
+			}
+		}
+		if duration, ok := actual["durationMs"]; ok && duration.(float64) < 0 {
+			t.Fatalf("event %d duration: %v", index, duration)
+		}
+		if !strings.Contains(actual["timestamp"].(string), "T") {
+			t.Fatalf("event %d timestamp: %v", index, actual["timestamp"])
+		}
+		if index == 0 {
+			if actual["model"] != contract.Model || !reflect.DeepEqual(actual["plugins"], []any{"read"}) || !reflect.DeepEqual(actual["mcp"], []any{}) {
+				t.Fatalf("run.started: %v", actual)
+			}
+		}
 	}
 }
 
@@ -159,10 +277,54 @@ func TestTerminalCtrlCAbortsAndExits(t *testing.T) {
 	}
 }
 
+func TestSharedBashContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "schemas", "tools", "bash-contract.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract struct {
+		Cases []struct {
+			Name, Command, Result string
+			Timeout               *float64
+		}
+		LineTruncation struct {
+			Command, FirstTailLine, LastTailLine, Label string
+			ShowingStart, TotalLines, SeparatorNewlines int
+		}
+	}
+	if err := json.Unmarshal(data, &contract); err != nil {
+		t.Fatal(err)
+	}
+	inTempDir(t)
+	for _, scenario := range contract.Cases {
+		timeout := bashTimeout.Seconds()
+		if scenario.Timeout != nil {
+			timeout = *scenario.Timeout
+		}
+		result, err := executeBashTimeout(context.Background(), scenario.Command, timeout)
+		if err != nil || result != scenario.Result {
+			t.Fatalf("%s: %q %v", scenario.Name, result, err)
+		}
+	}
+	result, err := executeBash(context.Background(), contract.LineTruncation.Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pattern := fmt.Sprintf(`(?s)^%s\n.*%s\n{%d}\[Showing lines %d-%d of %d\. %s: (.*\.log)\]$`, contract.LineTruncation.FirstTailLine, contract.LineTruncation.LastTailLine, contract.LineTruncation.SeparatorNewlines, contract.LineTruncation.ShowingStart, contract.LineTruncation.TotalLines, contract.LineTruncation.TotalLines, contract.LineTruncation.Label)
+	match := regexp.MustCompile(pattern).FindStringSubmatch(result)
+	if len(match) != 2 {
+		t.Fatalf("truncated result: %q", result)
+	}
+	content, err := os.ReadFile(match[1])
+	if err != nil || len(strings.Fields(string(content))) != contract.LineTruncation.TotalLines {
+		t.Fatalf("stored output: %v %v", len(strings.Fields(string(content))), err)
+	}
+}
+
 func TestBashErrorPreservesOutput(t *testing.T) {
 	inTempDir(t)
 	result, err := executeBash(context.Background(), "printf captured; exit 7")
-	if err == nil || result != "captured" {
+	if err != nil || result != "captured\n\nCommand exited with code 7" {
 		t.Fatalf("result=%q err=%v", result, err)
 	}
 }
@@ -170,11 +332,13 @@ func TestBashErrorPreservesOutput(t *testing.T) {
 func TestBashOutputLimit(t *testing.T) {
 	inTempDir(t)
 	result, err := executeBash(context.Background(), "yes x | head -n 5242881")
-	if err == nil || !strings.Contains(err.Error(), "10MB limit") {
+	if err != nil || !strings.Contains(result, "Bash output exceeded the 10MB safety cap; complete output was not captured.") || !strings.Contains(result, "Captured output; command exceeded the 10MB safety cap") {
 		t.Fatalf("result bytes=%d err=%v", len(result), err)
 	}
-	if len(result) > maxBashOutput {
-		t.Fatalf("buffered %d bytes", len(result))
+	path := regexp.MustCompile(`Captured output; command exceeded the 10MB safety cap: (.*\.log)\]`).FindStringSubmatch(result)[1]
+	content, readErr := os.ReadFile(path)
+	if readErr != nil || len(content) <= maxToolOutput {
+		t.Fatalf("captured bytes=%d err=%v", len(content), readErr)
 	}
 }
 
@@ -282,6 +446,71 @@ func TestBackgroundProcessLifecycleAndStaleMetadata(t *testing.T) {
 	exited, _ := executeTool(context.Background(), "bg", map[string]string{"action": "list", "status": "exited"})
 	if listed != "[]" || !strings.Contains(exited, `"id":"`+failed.ID+`"`) {
 		t.Fatalf("running=%s exited=%s", listed, exited)
+	}
+}
+
+func TestSharedLocalToolContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "schemas", "tools", "local-tool-contract.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract struct {
+		Write struct{ Path, Content, Result string }
+		Read  struct {
+			Path, Content, Result, BeyondError string
+			Arguments                          map[string]any
+			BeyondOffset                       int
+		}
+		Edit struct {
+			Path, Content, Result, ContentAfter string
+			Edits                               []any
+			Failures                            []struct {
+				Edits []any
+				Error string
+			}
+		}
+	}
+	if err := json.Unmarshal(data, &contract); err != nil {
+		t.Fatal(err)
+	}
+	inTempDir(t)
+	ctx := context.Background()
+	if got, err := executeTool(ctx, "write", map[string]any{"path": contract.Write.Path, "content": contract.Write.Content}); err != nil || got != contract.Write.Result {
+		t.Fatalf("write: %q %v", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, contract.Read.Path), []byte(contract.Read.Content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	readArgs := map[string]any{"path": contract.Read.Path}
+	for key, value := range contract.Read.Arguments {
+		readArgs[key] = value
+	}
+	if got, err := executeTool(ctx, "read", readArgs); err != nil || got != contract.Read.Result {
+		t.Fatalf("read: %q %v", got, err)
+	}
+	if _, err := executeTool(ctx, "read", map[string]any{"path": contract.Read.Path, "offset": contract.Read.BeyondOffset}); err == nil || err.Error() != contract.Read.BeyondError {
+		t.Fatalf("read boundary: %v", err)
+	}
+	editPath := filepath.Join(cwd, contract.Edit.Path)
+	if err := os.WriteFile(editPath, []byte(contract.Edit.Content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := executeTool(ctx, "edit", map[string]any{"path": contract.Edit.Path, "edits": contract.Edit.Edits}); err != nil || got != contract.Edit.Result {
+		t.Fatalf("edit: %q %v", got, err)
+	}
+	if content, _ := os.ReadFile(editPath); string(content) != contract.Edit.ContentAfter {
+		t.Fatalf("edited content: %q", content)
+	}
+	for _, failure := range contract.Edit.Failures {
+		before, _ := os.ReadFile(editPath)
+		_, err := executeTool(ctx, "edit", map[string]any{"path": contract.Edit.Path, "edits": failure.Edits})
+		if err == nil || err.Error() != failure.Error {
+			t.Fatalf("edit failure: %v", err)
+		}
+		after, _ := os.ReadFile(editPath)
+		if !slices.Equal(before, after) {
+			t.Fatal("failed edit changed the file")
+		}
 	}
 }
 

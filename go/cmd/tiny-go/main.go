@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,7 +27,7 @@ import (
 
 const (
 	defaultModel    = "openai/gpt-5.6-luna"
-	maxBashOutput   = 10 * 1024 * 1024
+	maxBashOutput   = 10_000_000
 	maxToolOutput   = 50 * 1024
 	bashTimeout     = 120 * time.Second
 	defaultEndpoint = "https://openrouter.ai/api/v1"
@@ -207,7 +208,10 @@ func frontmatter(s, key string) string {
 }
 
 var toolDefinitions = []map[string]any{
-	toolDefinition("bash", "Run a shell command in the working directory", map[string]any{"command": map[string]string{"type": "string"}}, []string{"command"}),
+	toolDefinition("bash", "Run commands, builds, tests, and file discovery in the working directory. Use read, write, or edit for ordinary text file operations. Output is limited to the last 2,000 lines or 50KB; truncated output includes a full-output path.", map[string]any{
+		"command": map[string]string{"type": "string", "description": "Shell command to execute in the working directory."},
+		"timeout": map[string]any{"type": "number", "exclusiveMinimum": 0, "description": "Optional timeout in seconds. Defaults to 120."},
+	}, []string{"command"}),
 	toolDefinition("read", "Read a UTF-8 text file. Prefer this over cat or sed. Returns at most 2,000 complete lines or 50KB and includes an offset hint when more lines remain.", map[string]any{
 		"path": map[string]string{"type": "string", "description": "Path to the UTF-8 text file."}, "offset": map[string]any{"type": "integer", "minimum": 1, "description": "1-indexed line number to start reading from."}, "limit": map[string]any{"type": "integer", "minimum": 1, "description": "Maximum number of lines to return."},
 	}, []string{"path"}),
@@ -528,6 +532,26 @@ func optionalToolInteger(args map[string]any, name string, fallback int) (int, e
 	return number, nil
 }
 
+func optionalToolNumber(args map[string]any, name string, fallback float64) (float64, error) {
+	value, ok := args[name]
+	if !ok {
+		return fallback, nil
+	}
+	var number float64
+	switch value := value.(type) {
+	case int:
+		number = float64(value)
+	case float64:
+		number = value
+	default:
+		return 0, fmt.Errorf("%s must be a positive number of seconds", name)
+	}
+	if math.IsNaN(number) || math.IsInf(number, 0) || number <= 0 {
+		return 0, fmt.Errorf("%s must be a positive number of seconds", name)
+	}
+	return number, nil
+}
+
 func readToolLines(text string, offset, limit int) (string, error) {
 	lines := []string{}
 	if text != "" {
@@ -641,7 +665,11 @@ func executeToolArgs(ctx context.Context, name string, args map[string]any) (str
 			if err != nil {
 				return "", err
 			}
-			return executeBash(ctx, command)
+			timeout, err := optionalToolNumber(args, "timeout", bashTimeout.Seconds())
+			if err != nil {
+				return "", err
+			}
+			return executeBashTimeout(ctx, command, timeout)
 		}
 		return executeBG(ctx, stringsOnly)
 	}
@@ -772,63 +800,114 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 }
 
 func executeBash(ctx context.Context, command string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, bashTimeout)
-	defer cancel()
+	return executeBashTimeout(ctx, command, bashTimeout.Seconds())
+}
+
+func executeBashTimeout(ctx context.Context, command string, timeout float64) (string, error) {
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Dir = cwd
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	output := newCappedWriter()
-	cmd.Stdout, cmd.Stderr = output, output
+	stdout, stderr := newCappedWriter(), newCappedWriter()
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Start(); err != nil {
-		return "", err
+		return limitBashOutput("Command exited with code unknown", true)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	var err error
-	exceeded := false
+	timer := time.NewTimer(time.Duration(timeout * float64(time.Second)))
+	defer timer.Stop()
+	var commandErr error
+	reason := "exit"
 	select {
-	case err = <-done:
-	case <-output.exceeded:
-		exceeded = true
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-done
+	case commandErr = <-done:
+	case <-stdout.exceeded:
+		reason = "capped"
+	case <-stderr.exceeded:
+		reason = "capped"
+	case <-timer.C:
+		reason = "timeout"
 	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-done
-		err = ctx.Err()
+		reason = "cancelled"
 	}
-	if !exceeded {
+	if reason != "exit" {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		commandErr = <-done
+	}
+	if reason == "exit" {
 		select {
-		case <-output.exceeded:
-			exceeded = true
+		case <-stdout.exceeded:
+			reason = "capped"
+		default:
+		}
+		select {
+		case <-stderr.exceeded:
+			reason = "capped"
 		default:
 		}
 	}
-	if exceeded {
-		return output.String(), fmt.Errorf("bash output exceeded %dMB limit", maxBashOutput/(1024*1024))
+	if reason == "cancelled" {
+		return "", ctx.Err()
 	}
-	if output.Len() == 0 {
-		if err != nil {
-			return "", err
+	output := stdout.String() + stderr.String()
+	if reason == "capped" {
+		output = appendBashNote(output, "Bash output exceeded the 10MB safety cap; complete output was not captured.")
+		return limitBashOutput(output, false)
+	}
+	if reason == "timeout" {
+		output = appendBashNote(output, fmt.Sprintf("Command timed out after %v seconds.", timeout))
+		return limitBashOutput(output, true)
+	}
+	if commandErr != nil {
+		code := "unknown"
+		if exit, ok := commandErr.(*exec.ExitError); ok {
+			code = strconv.Itoa(exit.ExitCode())
 		}
-		return "(no output)", nil
+		output = appendBashNote(output, "Command exited with code "+code)
+	} else if output == "" {
+		output = "(no output)"
 	}
-	if output.Len() <= maxToolOutput {
-		return output.String(), err
+	return limitBashOutput(output, true)
+}
+
+func appendBashNote(output, note string) string {
+	if output == "" {
+		return note
 	}
+	return output + "\n\n" + note
+}
+
+func limitBashOutput(output string, complete bool) (string, error) {
+	lines := strings.Split(output, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) <= 2000 && len([]byte(output)) <= maxToolOutput {
+		return output, nil
+	}
+	buffer := []byte(output)
+	byteStart := max(0, len(buffer)-maxToolOutput)
+	for byteStart < len(buffer) && buffer[byteStart]&0xc0 == 0x80 {
+		byteStart++
+	}
+	tailLines := strings.Split(string(buffer[byteStart:]), "\n")
+	if len(tailLines) > 2000 {
+		tailLines = tailLines[len(tailLines)-2000:]
+	}
+	tail := strings.Join(tailLines, "\n")
+	start := max(1, len(lines)-len(tailLines)+1)
 	dir := filepath.Join(cwd, ".tiny-agent", "tool-output")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, uuid7(time.Now())) + ".log"
-	if err := os.WriteFile(path, output.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, buffer, 0o644); err != nil {
 		return "", err
 	}
-	tail := output.Bytes()[output.Len()-maxToolOutput:]
-	for len(tail) > 0 && tail[0]&0xc0 == 0x80 {
-		tail = tail[1:]
+	label := "Full output"
+	if !complete {
+		label = "Captured output; command exceeded the 10MB safety cap"
 	}
-	return fmt.Sprintf("%s\n\n[Output truncated. Full output: %s]", tail, path), err
+	return fmt.Sprintf("%s\n\n[Showing lines %d-%d of %d. %s: %s]", tail, start, len(lines), len(lines), label, path), nil
 }
 
 func uuid7(now time.Time) string {

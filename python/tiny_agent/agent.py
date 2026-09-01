@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import signal
@@ -23,7 +24,7 @@ from .settings import DEFAULT_ENDPOINT, DEFAULT_MODEL, Settings
 def chat_completions_url(endpoint: str | None = None) -> str:
     trimmed = (endpoint or Settings().tiny_endpoint or DEFAULT_ENDPOINT).rstrip("/")
     return trimmed if trimmed.endswith("/chat/completions") else f"{trimmed}/chat/completions"
-MAX_BASH_OUTPUT = 10 * 1024 * 1024
+MAX_BASH_OUTPUT = 10_000_000
 BASH_TIMEOUT_SECONDS = 120
 MAX_HTTP_RESPONSE = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT = 50 * 1024
@@ -82,7 +83,7 @@ def load_skills(extra: list[str] | None = None) -> list[dict]:
 
 
 TOOL_DEFINITIONS = [
-    {"type": "function", "function": {"name": "bash", "description": "Run a shell command in the working directory", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "bash", "description": "Run commands, builds, tests, and file discovery in the working directory. Use read, write, or edit for ordinary text file operations. Output is limited to the last 2,000 lines or 50KB; truncated output includes a full-output path.", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "Shell command to execute in the working directory."}, "timeout": {"type": "number", "exclusiveMinimum": 0, "description": "Optional timeout in seconds. Defaults to 120."}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "read", "description": "Read a UTF-8 text file. Prefer this over cat or sed. Returns at most 2,000 complete lines or 50KB and includes an offset hint when more lines remain.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Path to the UTF-8 text file."}, "offset": {"type": "integer", "minimum": 1, "description": "1-indexed line number to start reading from."}, "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines to return."}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write", "description": "Create a new UTF-8 text file or completely rewrite an existing file. Parent directories are created automatically. Use edit for partial changes.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Path to create or completely rewrite."}, "content": {"type": "string", "description": "Complete UTF-8 file content."}}, "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "edit", "description": "Make precise replacements in an existing UTF-8 text file. Every oldText must match exactly once in the original file, and edits must not overlap. All edits are validated before writing.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Path to the existing UTF-8 text file."}, "edits": {"type": "array", "minItems": 1, "description": "Atomic replacement blocks validated against the original file.", "items": {"type": "object", "properties": {"oldText": {"type": "string", "minLength": 1, "description": "Exact text that must occur exactly once in the original file."}, "newText": {"type": "string", "description": "Replacement text."}}, "required": ["oldText", "newText"]}}}, "required": ["path", "edits"]}}},
@@ -196,111 +197,118 @@ def json_object(text: object) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-async def execute_bash(command: str, cancelled: asyncio.Event) -> str:
-    deadline = time.monotonic() + BASH_TIMEOUT_SECONDS
+async def execute_bash(command: str, cancelled: asyncio.Event, timeout: float | None = None) -> str:
+    timeout = BASH_TIMEOUT_SECONDS if timeout is None else timeout
     creation = asyncio.create_task(asyncio.create_subprocess_shell(
         command, cwd=ROOT, executable="/bin/sh", stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        stderr=asyncio.subprocess.PIPE, start_new_session=True,
     ))
     abort = asyncio.create_task(cancelled.wait())
-    timer = asyncio.create_task(asyncio.sleep(max(0, deadline - time.monotonic())))
+    timer = asyncio.create_task(asyncio.sleep(timeout))
     process: asyncio.subprocess.Process | None = None
-    read: asyncio.Task[bytes] | None = None
+    readers: list[asyncio.Task[tuple[bytes, bool]]] = []
     waited: asyncio.Task[int] | None = None
+    capped = asyncio.Event()
 
     async def cancel_tasks(*tasks: asyncio.Task | None) -> None:
         active = [task for task in tasks if task is not None]
         for task in active: task.cancel()
         if active: await asyncio.gather(*active, return_exceptions=True)
 
+    async def read_stream(stream: asyncio.StreamReader) -> tuple[bytes, bool]:
+        output = bytearray()
+        exceeded = False
+        while chunk := await stream.read(65_536):
+            remaining_bytes = MAX_BASH_OUTPUT - len(output)
+            if remaining_bytes > 0: output.extend(chunk[:remaining_bytes])
+            if len(chunk) > remaining_bytes:
+                exceeded = True
+                capped.set()
+        return bytes(output), exceeded
+
     async def kill_process_group() -> None:
         assert process is not None
-        with suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, signal.SIGKILL)
+        with suppress(ProcessLookupError, PermissionError): os.killpg(process.pid, signal.SIGKILL)
 
-    async def kill_and_reap() -> None:
-        assert process is not None
-        await kill_process_group()
-        if process.stdout:
-            transport = getattr(process.stdout, "_transport", None)
-            if transport: transport.close()
-        await cancel_tasks(read)
-        if waited is not None:
-            await asyncio.gather(waited, return_exceptions=True)
-        else:
-            await asyncio.gather(process.wait(), return_exceptions=True)
-
+    reason = "exit"
     try:
         done, _ = await asyncio.wait((creation, abort, timer), return_when=asyncio.FIRST_COMPLETED)
-        if creation in done: process = await creation
         if abort in done:
             await cancel_tasks(creation)
             raise InterruptedError("Operation aborted")
         if timer in done:
             await cancel_tasks(creation)
-            raise TimeoutError(f"bash timed out after {BASH_TIMEOUT_SECONDS:g} seconds")
-        assert process is not None
-        assert process.stdout
-
-        output = bytearray()
-        stdout_eof = False
-        leader_exited = False
-        read = asyncio.create_task(process.stdout.read(65_536))
+            return f"Command timed out after {timeout:g} seconds."
+        process = await creation
+        assert process.stdout and process.stderr
+        readers = [asyncio.create_task(read_stream(process.stdout)), asyncio.create_task(read_stream(process.stderr))]
         waited = asyncio.create_task(process.wait())
-        while not (stdout_eof and leader_exited):
-            monitored = [abort, timer, waited]
-            if read is not None: monitored.append(read)
-            done, _ = await asyncio.wait(monitored, return_when=asyncio.FIRST_COMPLETED)
-            if abort in done: raise InterruptedError("Operation aborted")
-            if timer in done: raise TimeoutError(f"bash timed out after {BASH_TIMEOUT_SECONDS:g} seconds")
-            if read is not None and read in done:
-                chunk = await read
-                read = None
-                if chunk:
-                    remaining_bytes = MAX_BASH_OUTPUT - len(output)
-                    output.extend(chunk[:remaining_bytes])
-                    if len(chunk) > remaining_bytes:
-                        raise RuntimeError("bash output exceeded 10MB limit")
-                    read = asyncio.create_task(process.stdout.read(65_536))
-                else:
-                    stdout_eof = True
-            if waited in done and not leader_exited:
-                await waited
-                leader_exited = True
-                await kill_process_group()
-
-        # The shell may have exited after starting redirected descendants which no
-        # longer hold stdout open. Its isolated process group must not outlive the tool.
+        cap_wait = asyncio.create_task(capped.wait())
+        done, _ = await asyncio.wait((abort, timer, waited, cap_wait), return_when=asyncio.FIRST_COMPLETED)
+        if abort in done: reason = "cancelled"
+        elif timer in done: reason = "timeout"
+        elif cap_wait in done and capped.is_set(): reason = "capped"
         await kill_process_group()
+        await asyncio.gather(waited, return_exceptions=True)
+        await cancel_tasks(cap_wait)
     except asyncio.CancelledError:
-        if process is not None: await kill_and_reap()
+        if process is not None:
+            await kill_process_group()
+            await asyncio.gather(process.wait(), return_exceptions=True)
         if cancelled.is_set(): raise InterruptedError("Operation aborted") from None
         raise
-    except Exception:
-        if process is not None: await kill_and_reap()
-        raise
     finally:
-        await cancel_tasks(read, abort, timer)
+        await cancel_tasks(abort, timer)
         if process is None: await cancel_tasks(creation)
 
-    text = output.decode(errors="replace") or "(no output)"
-    if process.returncode and text == "(no output)": raise RuntimeError(f"command exited with status {process.returncode}")
-    if len(output) <= MAX_TOOL_OUTPUT: return text if not process.returncode else f"{text}\nError: command exited with status {process.returncode}"
+    if reason == "cancelled":
+        await cancel_tasks(*readers)
+        raise InterruptedError("Operation aborted")
+    streams = await asyncio.gather(*readers, return_exceptions=True)
+    stdout, stderr = (item[0] if isinstance(item, tuple) else b"" for item in streams)
+    output = (stdout + stderr).decode(errors="replace")
+    if reason == "capped":
+        return await limit_bash_output(
+            append_bash_note(output, "Bash output exceeded the 10MB safety cap; complete output was not captured."),
+            False, cancelled,
+        )
+    if reason == "timeout":
+        return await limit_bash_output(append_bash_note(output, f"Command timed out after {timeout:g} seconds."), True, cancelled)
+    assert process is not None
+    if process.returncode:
+        output = append_bash_note(output, f"Command exited with code {process.returncode}")
+    elif not output:
+        output = "(no output)"
+    return await limit_bash_output(output, True, cancelled)
+
+
+def append_bash_note(output: str, note: str) -> str: return f"{output}\n\n{note}" if output else note
+
+
+async def limit_bash_output(output: str, complete: bool, cancelled: asyncio.Event) -> str:
+    lines = output.split("\n")
+    if lines and lines[-1] == "": lines.pop()
+    if len(lines) <= 2_000 and len(output.encode()) <= MAX_TOOL_OUTPUT: return output
+    encoded = output.encode()
+    byte_start = max(0, len(encoded) - MAX_TOOL_OUTPUT)
+    while byte_start < len(encoded) and encoded[byte_start] & 0xC0 == 0x80: byte_start += 1
+    tail_lines = encoded[byte_start:].decode().split("\n")
+    if len(tail_lines) > 2_000: tail_lines = tail_lines[-2_000:]
+    tail = "\n".join(tail_lines)
+    start = max(1, len(lines) - len(tail_lines) + 1)
 
     def store_output() -> Path:
         directory = ROOT / ".tiny-agent/tool-output"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{uuid7()}.log"
-        path.write_bytes(output)
+        path.write_text(output, encoding="utf-8")
         return path
 
     if cancelled.is_set(): raise InterruptedError("Operation aborted")
     path = await asyncio.to_thread(store_output)
     if cancelled.is_set(): raise InterruptedError("Operation aborted")
-    tail = output[-MAX_TOOL_OUTPUT:]
-    while tail and tail[0] & 0xC0 == 0x80: tail = tail[1:]
-    result = f"{tail.decode(errors='replace')}\n\n[Output truncated. Full output: {path}]"
-    return result if not process.returncode else f"{result}\nError: command exited with status {process.returncode}"
+    label = "Full output" if complete else "Captured output; command exceeded the 10MB safety cap"
+    return f"{tail}\n\n[Showing lines {start}-{len(lines)} of {len(lines)}. {label}: {path}]"
 
 
 BG_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
@@ -534,7 +542,11 @@ def _execute_file_tool(name: str, args: dict) -> str:
 async def execute_tool(name: str, args: dict, cancelled: asyncio.Event | None = None) -> str:
     cancelled = cancelled or asyncio.Event()
     if cancelled.is_set(): raise InterruptedError("Operation aborted")
-    if name == "bash": return await execute_bash(_required_string(args.get("command"), "command"), cancelled)
+    if name == "bash":
+        timeout = args.get("timeout", BASH_TIMEOUT_SECONDS)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be a positive number of seconds")
+        return await execute_bash(_required_string(args.get("command"), "command"), cancelled, float(timeout))
     if name == "bg": return await execute_bg(args, cancelled)
     result = await asyncio.to_thread(_execute_file_tool, name, args)
     if cancelled.is_set(): raise InterruptedError("Operation aborted")

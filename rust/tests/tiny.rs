@@ -1810,6 +1810,74 @@ fn bg_manages_lifecycle_fast_failure_and_stale_metadata() {
 }
 
 #[test]
+fn matches_shared_local_tool_contract() {
+    let contract: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../schemas/tools/local-tool-contract.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let cwd = temp_dir();
+    let agent = test_agent(&cwd, "", None);
+
+    let write = &contract["write"];
+    let mut write_args = args();
+    write_args.path = write["path"].as_str().unwrap().into();
+    write_args.content = write["content"].as_str().unwrap().into();
+    assert_eq!(
+        agent.execute_tool("write", &write_args).unwrap(),
+        write["result"].as_str().unwrap()
+    );
+
+    let read = &contract["read"];
+    std::fs::write(
+        format!("{}/{}", cwd, read["path"].as_str().unwrap()),
+        read["content"].as_str().unwrap(),
+    )
+    .unwrap();
+    let mut read_args = args();
+    read_args.path = read["path"].as_str().unwrap().into();
+    read_args.offset = read["arguments"]["offset"].as_i64().unwrap();
+    read_args.limit = read["arguments"]["limit"].as_i64().unwrap();
+    assert_eq!(
+        agent.execute_tool("read", &read_args).unwrap(),
+        read["result"].as_str().unwrap()
+    );
+    read_args.offset = read["beyondOffset"].as_i64().unwrap();
+    read_args.limit = 2000;
+    assert_eq!(
+        agent.execute_tool("read", &read_args).unwrap_err(),
+        read["beyondError"].as_str().unwrap()
+    );
+
+    let edit = &contract["edit"];
+    let edit_path = format!("{}/{}", cwd, edit["path"].as_str().unwrap());
+    std::fs::write(&edit_path, edit["content"].as_str().unwrap()).unwrap();
+    let mut edit_args = args();
+    edit_args.path = edit["path"].as_str().unwrap().into();
+    edit_args.edits = serde_json::from_value(edit["edits"].clone()).unwrap();
+    assert_eq!(
+        agent.execute_tool("edit", &edit_args).unwrap(),
+        edit["result"].as_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&edit_path).unwrap(),
+        edit["contentAfter"].as_str().unwrap()
+    );
+    for failure in edit["failures"].as_array().unwrap() {
+        let before = std::fs::read(&edit_path).unwrap();
+        edit_args.edits = serde_json::from_value(failure["edits"].clone()).unwrap();
+        assert_eq!(
+            agent.execute_tool("edit", &edit_args).unwrap_err(),
+            failure["error"].as_str().unwrap()
+        );
+        assert_eq!(std::fs::read(&edit_path).unwrap(), before);
+    }
+}
+
+#[test]
 fn write_reports_bytes_and_edit_applies_atomic_replacements() {
     let cwd = temp_dir();
     let agent = test_agent(&cwd, "", None);
@@ -1972,6 +2040,58 @@ fn read_paginates_lines_with_actionable_errors() {
             .execute_tool("read", &m)
             .unwrap()
             .ends_with("[Showing lines 1-2000 of 2001. Use offset=2001 to continue.]")
+    );
+}
+
+#[test]
+fn matches_shared_bash_contract() {
+    let contract: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../schemas/tools/bash-contract.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let cwd = temp_dir();
+    let agent = test_agent(&cwd, "", None);
+    for scenario in contract["cases"].as_array().unwrap() {
+        let mut arguments = args();
+        arguments.command = scenario["command"].as_str().unwrap().into();
+        if let Some(timeout) = scenario["timeout"].as_f64() {
+            arguments.timeout = timeout;
+        }
+        assert_eq!(
+            agent.execute_tool("bash", &arguments).unwrap(),
+            scenario["result"].as_str().unwrap(),
+            "{}",
+            scenario["name"]
+        );
+    }
+    let expected = &contract["lineTruncation"];
+    let mut arguments = args();
+    arguments.command = expected["command"].as_str().unwrap().into();
+    let result = agent.execute_tool("bash", &arguments).unwrap();
+    assert!(result.starts_with(&format!(
+        "{}\n",
+        expected["firstTailLine"].as_str().unwrap()
+    )));
+    assert!(result.contains(&format!(
+        "{}{}[Showing lines 2-{} of {}. {}: ",
+        expected["lastTailLine"].as_str().unwrap(),
+        "\n".repeat(expected["separatorNewlines"].as_u64().unwrap() as usize),
+        expected["totalLines"].as_u64().unwrap(),
+        expected["totalLines"].as_u64().unwrap(),
+        expected["label"].as_str().unwrap(),
+    )));
+    let path = result
+        .split("Full output: ")
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(']');
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap().lines().count(),
+        expected["totalLines"].as_u64().unwrap() as usize
     );
 }
 

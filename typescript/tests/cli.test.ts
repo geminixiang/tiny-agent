@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { access, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -8,6 +9,9 @@ import { startTestMcpServer } from "./support/mcp-server.js";
 
 const cli = resolve("src/cli.ts"),
     loader = resolve("node_modules/tsx/dist/loader.mjs");
+const jsonLifecycleContract = JSON.parse(
+    await readFile(new URL("../../schemas/monitoring/json-lifecycle-contract.json", import.meta.url), "utf8"),
+);
 
 function envWithoutKey() {
     const env = { ...process.env };
@@ -41,6 +45,33 @@ test("--json emits a structured failed result without TUI output", async () => {
         { status: "failed", cause: "agent_error", message: "Set OPENROUTER_API_KEY" },
     );
     assert.doesNotMatch(result.stdout, /tiny-agent|Resume:|\\u001b/);
+});
+
+test("--json matches the shared successful lifecycle contract", async (t) => {
+    const workspace = await mkdtemp(join(tmpdir(), "tiny-agent-cli-"));
+    await writeFile(join(workspace, "contract-read.txt"), "fixture");
+    const responses = [...jsonLifecycleContract.responses];
+    const server = createServer((_request, response) => {
+        response.setHeader("Content-Type", "application/json");
+        response.end(JSON.stringify(responses.shift()));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server.close());
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("mock server did not bind TCP");
+    const result = await spawnCli(["--json", "--plugin", "read", jsonLifecycleContract.prompt], workspace, {
+        ...process.env,
+        OPENROUTER_API_KEY: "test",
+        TINY_MODEL: jsonLifecycleContract.model,
+        TINY_ENDPOINT: `http://127.0.0.1:${address.port}`,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const events = result.stdout
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+    assertJsonLifecycle(events);
 });
 
 test("--cwd uses the selected workspace for sessions", async () => {
@@ -206,6 +237,33 @@ function spawnCli(args: string[], cwd: string, env: NodeJS.ProcessEnv) {
             resolve({ status, stdout, stderr });
         });
     });
+}
+
+function assertJsonLifecycle(events: Record<string, unknown>[]) {
+    assert.deepEqual(
+        events.map((event) => event.type),
+        jsonLifecycleContract.events.map((event: { type: string }) => event.type),
+    );
+    for (const [index, expected] of jsonLifecycleContract.events.entries()) {
+        const actual = events[index];
+        for (const key of expected.required) assert.ok(Object.hasOwn(actual, key), `${expected.type}.${key}`);
+        if (expected.usage) assert.deepEqual(actual.usage, expected.usage);
+        if (expected.toolCallId) assert.equal(actual.toolCallId, expected.toolCallId);
+        if (expected.tool) assert.equal(actual.tool, expected.tool);
+        if (expected.ok !== undefined) assert.equal(actual.ok, expected.ok);
+        if (expected.result) {
+            const result = actual.result as Record<string, unknown>;
+            for (const [key, value] of Object.entries(expected.result)) assert.deepEqual(result[key], value);
+            for (const key of expected.resultRequired ?? [])
+                assert.ok(Object.hasOwn(result, key), `${expected.type}.result.${key}`);
+            if (expected.resultUsage) assert.deepEqual(result.usage, expected.resultUsage);
+        }
+        if ("durationMs" in actual) assert.ok(typeof actual.durationMs === "number" && actual.durationMs >= 0);
+        assert.match(String(actual.timestamp), /^\d{4}-\d{2}-\d{2}T/);
+    }
+    assert.equal(events[0].model, jsonLifecycleContract.model);
+    assert.deepEqual(events[0].plugins, jsonLifecycleContract.plugins);
+    assert.deepEqual(events[0].mcp, []);
 }
 
 function escapeRegex(value: string) {

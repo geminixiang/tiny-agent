@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "write": {
+    "path": "contract-write.txt",
+    "content": "你好",
+    "result": "Successfully wrote 6 bytes to contract-write.txt."
+  },
+  "read": {
+    "path": "contract-read.txt",
+    "content": "one\n二\nthree\nfour",
+    "arguments": {
+      "offset": 2,
+      "limit": 2
+    },
+    "result": "二\nthree\n\n[Showing lines 2-3 of 4. Use offset=4 to continue.]",
+    "beyondOffset": 5,
+    "beyondError": "Offset 5 is beyond end of file (4 lines total)."
+  },
+  "edit": {
+    "path": "contract-edit.txt",
+    "content": "﻿alpha\r\nbeta\r\ngamma",
+    "edits": [
+      {
+        "oldText": "alpha",
+        "newText": "A"
+      },
+      {
+        "oldText": "gamma",
+        "newText": "G"
+      }
+    ],
+    "result": "Successfully replaced 2 block(s) in contract-edit.txt.",
+    "contentAfter": "﻿A\r\nbeta\r\nG",
+    "failures": [
+      {
+        "edits": [
+          {
+            "oldText": "",
+            "newText": "x"
+          }
+        ],
+        "error": "edits[0].oldText must not be empty"
+      },
+      {
+        "edits": [
+          {
+            "oldText": "missing",
+            "newText": "x"
+          }
+        ],
+        "error": "edits[0].oldText was not found in contract-edit.txt."
+      },
+      {
+        "edits": [
+          {
+            "oldText": "A\r\nbeta",
+            "newText": "x"
+          },
+          {
+            "oldText": "beta\r\nG",
+            "newText": "y"
+          }
+        ],
+        "error": "edits[0] and edits[1] overlap in contract-edit.txt."
+      }
+    ]
+  }
+}

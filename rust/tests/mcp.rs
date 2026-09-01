@@ -39,7 +39,7 @@ fn config_rejects_untrusted_values() {
     );
 }
 
-fn read_request(stream: &mut TcpStream) -> (String, Value) {
+fn read_optional_request(stream: &mut TcpStream) -> (String, Option<Value>) {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -61,13 +61,18 @@ fn read_request(stream: &mut TcpStream) -> (String, Value) {
                 })
                 .unwrap_or(0);
             if bytes.len() >= split + 4 + length {
-                return (
-                    text[..split].to_string(),
-                    serde_json::from_slice(&bytes[split + 4..split + 4 + length]).unwrap(),
-                );
+                let body = (length > 0).then(|| {
+                    serde_json::from_slice(&bytes[split + 4..split + 4 + length]).unwrap()
+                });
+                return (text[..split].to_string(), body);
             }
         }
     }
+}
+
+fn read_request(stream: &mut TcpStream) -> (String, Value) {
+    let (headers, body) = read_optional_request(stream);
+    (headers, body.unwrap())
 }
 
 fn respond(stream: &mut TcpStream, status: u16, body: Value) {
@@ -75,9 +80,16 @@ fn respond(stream: &mut TcpStream, status: u16, body: Value) {
     write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
 }
 
+fn respond_with_session(stream: &mut TcpStream, body: Value) {
+    let body = body.to_string();
+    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: fixture-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+}
+
 fn modern_result(index: usize, call: Value) -> Value {
     match index {
-        0 => json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}),
+        0 => {
+            json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{},"ttlMs":0,"cacheScope":"private"})
+        }
         1 => {
             json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"echo","inputSchema":{"type":"object"}}]})
         }
@@ -99,7 +111,7 @@ fn strict_modern_is_stateless_and_repeats_metadata() {
             let id = request.1["id"].clone();
             let result = match index {
                 0 => {
-                    json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"protocolVersion":"extra-is-extensible"})
+                    json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private","protocolVersion":"extra-is-extensible"})
                 }
                 1 => {
                     json!({
@@ -112,12 +124,7 @@ fn strict_modern_is_stateless_and_repeats_metadata() {
                                 "inputSchema":{
                                     "type":"object",
                                     "properties":{
-                                        "context":{
-                                            "type":"object",
-                                            "properties":{
-                                                "label":{"type":"string","x-mcp-header":"Nested-Label"}
-                                            }
-                                        }
+                                        "label":{"type":"string","x-mcp-header":"Label"}
                                     }
                                 }
                             },
@@ -149,10 +156,7 @@ fn strict_modern_is_stateless_and_repeats_metadata() {
     assert_eq!(display_tool_name(&loaded.tools[0].name), "mcp:fixture/echo");
     assert_eq!(
         loaded.tools[0]
-            .execute(
-                json!({"context":{"label":" 北極 "}}),
-                &Arc::new(AtomicBool::new(false))
-            )
+            .execute(json!({"label":" 北極 "}), &Arc::new(AtomicBool::new(false)))
             .unwrap(),
         "hello"
     );
@@ -167,8 +171,10 @@ fn strict_modern_is_stateless_and_repeats_metadata() {
                 .find_map(|line| line.strip_prefix("mcp-method: ")),
             body["method"].as_str()
         );
+        let mut metadata = body["params"]["_meta"].clone();
+        metadata.as_object_mut().unwrap().remove("progressToken");
         assert_eq!(
-            body["params"]["_meta"],
+            metadata,
             json!({
                 "io.modelcontextprotocol/protocolVersion":"2026-07-28",
                 "io.modelcontextprotocol/clientInfo":{"name":"tiny-agent","version":"0.1.0"},
@@ -178,13 +184,89 @@ fn strict_modern_is_stateless_and_repeats_metadata() {
         assert!(!lower.contains("mcp-session-id:"));
         if index == 2 {
             assert!(lower.contains("mcp-name: echo"));
-            assert!(lower.contains("mcp-param-nested-label: =?base64?iowml+altsa=?="));
-            assert_eq!(
-                body["params"]["arguments"],
-                json!({"context":{"label":" 北極 "}})
-            );
+            assert!(lower.contains("mcp-param-label: =?base64?iowml+altsa=?="));
+            assert_eq!(body["params"]["arguments"], json!({"label":" 北極 "}));
         }
     }
+}
+
+#[test]
+fn auto_negotiates_legacy_initialize_lifecycle() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let methods = Arc::new(Mutex::new(Vec::new()));
+    let captured = methods.clone();
+    let server = thread::spawn(move || {
+        let mut index = 0;
+        while index < 4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (headers, request) = read_optional_request(&mut stream);
+            let Some(request) = request else {
+                write!(stream, "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                continue;
+            };
+            captured
+                .lock()
+                .unwrap()
+                .push(request["method"].as_str().unwrap().to_string());
+            if index >= 2 {
+                assert!(
+                    headers
+                        .to_ascii_lowercase()
+                        .contains("mcp-session-id: fixture-session")
+                );
+            }
+            match index {
+                0 => respond(
+                    &mut stream,
+                    200,
+                    json!({
+                        "jsonrpc":"2.0","id":request["id"],
+                        "error":{"code":-32601,"message":"method not found"}
+                    }),
+                ),
+                1 => respond_with_session(
+                    &mut stream,
+                    json!({
+                        "jsonrpc":"2.0","id":request["id"],"result":{
+                            "protocolVersion":"2025-03-26",
+                            "capabilities":{"tools":{}},
+                            "serverInfo":{"name":"fixture","version":"1"}
+                        }
+                    }),
+                ),
+                2 => write!(
+                    stream,
+                    "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap(),
+                _ => respond(
+                    &mut stream,
+                    200,
+                    json!({
+                        "jsonrpc":"2.0","id":request["id"],"result":{
+                            "tools":[{"name":"echo","inputSchema":{"type":"object"}}]
+                        }
+                    }),
+                ),
+            }
+            index += 1;
+        }
+    });
+    let loaded = load_mcp_tools(config(url)).unwrap();
+    assert_eq!(loaded.protocol_version, "2025-03-26");
+    assert_eq!(loaded.tools.len(), 1);
+    loaded.close();
+    server.join().unwrap();
+    assert_eq!(
+        methods.lock().unwrap().as_slice(),
+        [
+            "server/discover",
+            "initialize",
+            "notifications/initialized",
+            "tools/list"
+        ]
+    );
 }
 
 #[test]
@@ -197,7 +279,7 @@ fn normalizes_text_resources_and_rejects_binary_resources() {
             let request = read_request(&mut stream);
             let result = match index {
                 0 => {
-                    json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}})
+                    json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{},"ttlMs":0,"cacheScope":"private"})
                 }
                 1 => json!({
                     "resultType":"complete",
@@ -262,7 +344,7 @@ fn modern_input_required_is_explicitly_unsupported() {
                     "id":request.1["id"],
                     "result":modern_result(index, json!({
                         "resultType":"input_required",
-                        "inputRequests":[{"type":"text","prompt":"More detail"}]
+                        "requestState":"opaque"
                     }))
                 }),
             );
@@ -289,10 +371,10 @@ fn modern_corrective_retry_succeeds() {
             let request = read_request(&mut stream);
             let response = match index {
                 0 => {
-                    json!({"jsonrpc":"2.0","id":request.1["id"],"error":{"code":-32022,"data":{"supported":["2026-07-28"]}}})
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"error":{"code":-32022,"message":"retry","data":{"supported":["2026-07-28"],"requested":"2026-07-28"}}})
                 }
                 1 => {
-                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}})
+                    json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{},"ttlMs":0,"cacheScope":"private"}})
                 }
                 _ => {
                     json!({"jsonrpc":"2.0","id":request.1["id"],"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[]}})
@@ -317,14 +399,11 @@ fn modern_only_rejects_server_without_modern_support() {
         respond(
             &mut stream,
             200,
-            json!({"jsonrpc":"2.0","id":request.1["id"],"error":{"code":-32022,"data":{"supported":["2025-11-25"]}}}),
+            json!({"jsonrpc":"2.0","id":request.1["id"],"error":{"code":-32022,"message":"unsupported","data":{"supported":["2025-11-25"],"requested":"2026-07-28"}}}),
         );
     });
     let error = load_mcp_tools(config(url)).err().unwrap();
-    assert!(
-        error.contains("does not support the modern protocol"),
-        "unexpected error: {error}"
-    );
+    assert_eq!(error, "MCP request failed");
     server.join().unwrap();
 }
 
@@ -349,7 +428,7 @@ fn rejects_chunked_response_over_10mb() {
     });
     assert_eq!(
         load_mcp_tools(config(url)).err().unwrap(),
-        "MCP response exceeded 10MB"
+        "MCP request failed"
     );
     server.join().unwrap();
 }
@@ -365,7 +444,7 @@ fn rejects_oversized_content_length_without_reading_body() {
     });
     assert_eq!(
         load_mcp_tools(config(url)).err().unwrap(),
-        "MCP response exceeded 10MB"
+        "MCP request failed"
     );
     server.join().unwrap();
 }
@@ -375,12 +454,12 @@ fn close_joins_cancelled_request_workers_within_transport_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        for index in 0..3 {
+        for index in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let request = read_request(&mut stream);
             if index < 2 {
                 let result = if index == 0 {
-                    json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}})
+                    json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{},"ttlMs":0,"cacheScope":"private"})
                 } else {
                     json!({"resultType":"complete","ttlMs":0,"cacheScope":"public","tools":[{"name":"slow","inputSchema":{"type":"object"}}]})
                 };

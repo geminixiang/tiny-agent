@@ -36,7 +36,7 @@ pub mod terminal;
 pub const DEFAULT_MODEL: &str = "openai/gpt-5.6-luna";
 pub const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api/v1";
 pub const MAX_TOOL_OUTPUT: usize = 50 * 1024;
-pub const MAX_BASH_OUTPUT: usize = 10 * 1024 * 1024;
+pub const MAX_BASH_OUTPUT: usize = 10_000_000;
 pub const BASH_TIMEOUT: u64 = 120;
 
 pub fn model_name() -> String {
@@ -2630,27 +2630,25 @@ fn run_bash(command: &str, timeout: f64, cancel: &Arc<AtomicBool>, cwd: &str) ->
         return String::new();
     }
     if reason == "timeout" {
-        let text = if combined.is_empty() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(&combined).to_string()
-        };
-        let tail = if capped {
-            limit_output(
+        let text = String::from_utf8_lossy(&combined).to_string();
+        if capped {
+            return limit_output(
                 &append_note(
                     &text,
-                    &format!(
-                        "Bash output exceeded the 10MB safety cap; complete output was not captured.\n\nCommand timed out after {} seconds.",
-                        timeout
-                    ),
+                    "Bash output exceeded the 10MB safety cap; complete output was not captured.",
                 ),
                 false,
                 cwd,
-            )
-        } else {
-            format!("{}\n\nCommand timed out after {} seconds.", text, timeout)
-        };
-        return tail;
+            );
+        }
+        return limit_output(
+            &append_note(
+                &text,
+                &format!("Command timed out after {} seconds.", timeout),
+            ),
+            true,
+            cwd,
+        );
     }
     let exited_ok = matches!(status, Some(s) if s.success());
     let code = status.and_then(|s| s.code());

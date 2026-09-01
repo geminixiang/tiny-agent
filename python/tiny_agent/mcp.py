@@ -5,12 +5,17 @@ import math
 import re
 import time
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable
+from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
-from .http import close_writer, read_http_response_headers, remaining
+import httpx2
+from mcp import types as mcp_types
+from mcp.client import Client
+from mcp.client.streamable_http import streamable_http_client
+
 from .settings import Settings
 
 MAX_RESULT_BYTES = 50 * 1024
@@ -18,10 +23,6 @@ MAX_SCHEMA_BYTES = 50 * 1024
 MAX_DESCRIPTION_BYTES = 8 * 1024
 MAX_SCHEMA_DEPTH = 20
 MAX_TOOLS = 64
-_MODERN_PROTOCOL_VERSION = "2026-07-28"
-_MAX_HTTP_RESPONSE_BYTES = 10 * 1024 * 1024
-_CLIENT_INFO = {"name": "tiny-agent", "version": "0.1.0"}
-_CLIENT_CAPABILITIES: dict = {}
 
 
 @dataclass(frozen=True)
@@ -65,15 +66,19 @@ def load_mcp_configs(aliases: list[str], env: Mapping[str, str] | None = None) -
     configs = []
     for alias in aliases:
         server = catalog[alias]
-        token_env = server.get("tokenEnv")
+        auth = server.get("auth")
+        token_env = auth["tokenEnv"] if auth else server.get("tokenEnv")
         token = env.get(token_env) if token_env else None
         if token_env and not token: raise ValueError(f"MCP token environment variable is not set: {token_env}")
         if token is not None and any(ord(char) < 32 or ord(char) == 127 for char in token):
             raise ValueError(f"MCP token environment variable contains invalid HTTP header characters: {token_env}")
+        headers = None
+        if token:
+            headers = {"X-API-Key": token} if auth else {"Authorization": f"Bearer {token}"}
         configs.append(_McpConfig(
             alias=alias,
             url=server["url"],
-            headers={"Authorization": f"Bearer {token}"} if token else None,
+            headers=headers,
             allowed_tools=server.get("allowedTools"),
             call_timeout_ms=server.get("callTimeoutMs", 30_000),
         ))
@@ -88,12 +93,23 @@ def _validate_catalog(value: object) -> dict[str, dict]:
     for alias, raw in servers.items():
         if not isinstance(alias, str) or not alias.strip(): raise ValueError("MCP server alias must not be empty")
         server = _object(raw, f"MCP server {alias}")
-        _unknown_field(server, {"url", "tokenEnv", "allowedTools", "callTimeoutMs"}, f"MCP server {alias}")
+        _unknown_field(server, {"url", "tokenEnv", "auth", "allowedTools", "callTimeoutMs"}, f"MCP server {alias}")
         if not isinstance(server.get("url"), str) or not server["url"]: raise ValueError(f"MCP server {alias} url must be a string")
         _validate_url(server["url"])
         token_env = server.get("tokenEnv")
         if token_env is not None and (not isinstance(token_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token_env)):
             raise ValueError(f"MCP server {alias} tokenEnv must be an environment variable name")
+        auth = server.get("auth")
+        if token_env is not None and auth is not None:
+            raise ValueError(f"MCP server {alias} must not set both tokenEnv and auth")
+        if auth is not None:
+            auth = _object(auth, f"MCP server {alias} auth")
+            _unknown_field(auth, {"type", "tokenEnv"}, f"MCP server {alias} auth")
+            if auth.get("type") != "metabaseApiKey":
+                raise ValueError(f"MCP server {alias} auth type must be metabaseApiKey")
+            auth_token_env = auth.get("tokenEnv")
+            if not isinstance(auth_token_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", auth_token_env):
+                raise ValueError(f"MCP server {alias} auth tokenEnv must be an environment variable name")
         allowed = server.get("allowedTools")
         if allowed is not None:
             if not isinstance(allowed, list) or any(not isinstance(tool, str) or not tool for tool in allowed):
@@ -126,229 +142,92 @@ def _unknown_field(value: dict, allowed: set[str], name: str) -> None:
     if unknown is not None: raise ValueError(f"Unknown {name} field: {unknown}")
 
 
-class _HttpStatusError(RuntimeError):
-    def __init__(self, status: int):
-        self.status = status
-        if status in (401, 403): error_class = "authentication error"
-        elif 400 <= status < 500: error_class = "client error"
-        elif 500 <= status < 600: error_class = "server error"
-        else: error_class = "HTTP error"
-        super().__init__(f"MCP HTTP {status} ({error_class})")
-
-
-class _RpcError(RuntimeError):
-    def __init__(self, error: object = None):
-        self.code: int | None = None
-        self.data: object = None
-        if isinstance(error, dict):
-            code = error.get("code")
-            if isinstance(code, int) and not isinstance(code, bool): self.code = code
-            self.data = error.get("data")
-        super().__init__("MCP request failed (JSON-RPC error)")
-
-
-class _McpClient:
-    def __init__(self, config: _McpConfig):
-        self.config = config
-        self.protocol_version: str | None = None
-        self.closed = False
-        self.next_id = 1
-        self.tasks: set[asyncio.Task] = set()
-
-    async def connect(self, cancelled: asyncio.Event | None = None, deadline: float | None = None) -> None:
-        deadline = deadline or time.monotonic() + 10
-        corrective_retry = False
-        while True:
-            try:
-                discovered = await self.request("server/discover", {}, cancelled, _remaining_timeout_ms(deadline))
-                if not _valid_discovery(discovered): raise _RpcError()
-            except _RpcError as error:
-                if not corrective_retry and _offers_exact_modern_version(error):
-                    corrective_retry = True
-                    continue
-                raise RuntimeError("MCP server does not support the modern protocol version") from None
-            self.protocol_version = _MODERN_PROTOCOL_VERSION
-            return
-
-    async def request(self, method: str, params: dict, cancelled: asyncio.Event | None, timeout_ms: float) -> object:
-        params = {**params, "_meta": {
-            "io.modelcontextprotocol/protocolVersion": _MODERN_PROTOCOL_VERSION,
-            "io.modelcontextprotocol/clientInfo": _CLIENT_INFO,
-            "io.modelcontextprotocol/clientCapabilities": _CLIENT_CAPABILITIES,
-        }}
-        request_id = self.next_id
-        self.next_id += 1
-        response = await self._post(
-            {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
-            cancelled,
-            timeout_ms,
-        )
-        if not isinstance(response, dict) or response.get("jsonrpc") != "2.0" or response.get("id") != request_id:
-            raise _RpcError("Invalid MCP JSON-RPC response")
-        if "error" in response: raise _RpcError(response["error"])
-        if "result" not in response: raise _RpcError("Invalid MCP JSON-RPC response")
-        result = response["result"]
-        if not isinstance(result, dict) or result.get("resultType") not in ("complete", "input_required"):
-            raise _RpcError("Invalid modern MCP result envelope")
-        return result
-
-    async def _post(self, payload: dict, cancelled: asyncio.Event | None, timeout_ms: float) -> object:
-        if self.closed: raise RuntimeError("MCP connection is closed")
-        if cancelled and cancelled.is_set(): raise InterruptedError("Operation aborted")
-        owned = asyncio.create_task(self._exchange(payload, timeout_ms))
-        self.tasks.add(owned)
-        abort = asyncio.create_task(cancelled.wait()) if cancelled else None
-        try:
-            if abort:
-                done, _ = await asyncio.wait((owned, abort), return_when=asyncio.FIRST_COMPLETED)
-                if abort in done and owned not in done:
-                    owned.cancel(); await asyncio.gather(owned, return_exceptions=True)
-                    raise InterruptedError("Operation aborted")
-            return await owned
-        except asyncio.CancelledError:
-            owned.cancel(); await asyncio.gather(owned, return_exceptions=True)
-            if cancelled and cancelled.is_set(): raise InterruptedError("Operation aborted") from None
-            raise
-        finally:
-            if abort:
-                abort.cancel(); await asyncio.gather(abort, return_exceptions=True)
-            self.tasks.discard(owned)
-
-    async def _exchange(self, payload: dict, timeout_ms: float) -> object:
-        parsed = urlsplit(self.config.url)
-        headers = {
-            "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": _MODERN_PROTOCOL_VERSION, "Mcp-Method": payload.get("method", ""),
-            **(self.config.headers or {}),
-        }
-        if payload.get("method") == "tools/call":
-            name = payload.get("params", {}).get("name")
-            if isinstance(name, str): headers["Mcp-Name"] = _encode_mcp_param_value(name)
-            headers.update(payload.get("params", {}).pop("_mcp_param_headers", {}))
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-        headers.update({"Host": parsed.hostname or "", "Content-Length": str(len(body)), "Connection": "close"})
-        path = parsed.path or "/"
-        if parsed.query: path += f"?{parsed.query}"
-        deadline = time.monotonic() + timeout_ms / 1000
-        writer: asyncio.StreamWriter | None = None
-        try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(
-                parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), ssl=parsed.scheme == "https",
-            ), remaining(deadline))
-            raw_headers = "".join(f"{name}: {value}\r\n" for name, value in headers.items())
-            writer.write(f"POST {path} HTTP/1.1\r\n{raw_headers}\r\n".encode() + body)
-            await asyncio.wait_for(writer.drain(), remaining(deadline))
-            status, response_headers, response_body = await read_http_response_headers(
-                reader, deadline, _MAX_HTTP_RESPONSE_BYTES,
-                "MCP connection failed (invalid HTTP response)", "MCP response exceeded 10MB",
-            )
-            content_type = response_headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            if 200 <= status < 300 and content_type == "text/event-stream":
-                return await _read_sse(response_body, payload.get("id"))
-            raw = await response_body.read()
-            if status < 200 or status >= 300:
-                if 400 <= status < 500:
-                    try: rpc_response = json.loads(raw)
-                    except (UnicodeDecodeError, json.JSONDecodeError): rpc_response = None
-                    if isinstance(rpc_response, dict) and isinstance(rpc_response.get("error"), dict): raise _RpcError(rpc_response["error"])
-                raise _HttpStatusError(status)
-            return json.loads(raw)
-        except asyncio.TimeoutError:
-            raise TimeoutError("MCP request timed out") from None
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"MCP connection failed ({type(error).__name__})") from error
-        finally:
-            if writer: await close_writer(writer, deadline)
-
-    async def close(self) -> None:
-        if self.closed: return
-        self.closed = True
-        tasks = [task for task in self.tasks if task is not asyncio.current_task()]
-        for task in tasks: task.cancel()
-        if tasks: await asyncio.gather(*tasks, return_exceptions=True)
-
-
-def _offers_exact_modern_version(error: _RpcError) -> bool:
-    if error.code != -32022: return False
-    data = error.data
-    if not isinstance(data, dict): return False
-    supported = data.get("supported")
-    return isinstance(supported, list) and _MODERN_PROTOCOL_VERSION in supported
-
-
-def _valid_discovery(value: object) -> bool:
-    if not isinstance(value, dict) or value.get("resultType") != "complete": return False
-    versions = value.get("supportedVersions")
-    return (
-        isinstance(versions, list) and _MODERN_PROTOCOL_VERSION in versions and
-        isinstance(value.get("capabilities"), dict)
-    )
-
-
 def _remaining_timeout_ms(deadline: float) -> float:
     remaining = (deadline - time.monotonic()) * 1000
     if remaining <= 0: raise TimeoutError("MCP request timed out")
     return remaining
 
 
-async def _read_sse(chunks: AsyncIterator[bytes], request_id: int | None) -> object:
-    buffered = bytearray()
-    data: list[str] = []
+async def _await_sdk(awaitable, cancelled: asyncio.Event | None, timeout_ms: float):
+    current = asyncio.current_task()
 
-    def consume(line: bytes) -> object | None:
-        if line.endswith(b"\r"): line = line[:-1]
-        text = line.decode()
-        if text.startswith("data:"): data.append(text[5:].lstrip())
-        if text or not data: return None
-        value = json.loads("\n".join(data)); data.clear()
-        if request_id is None or isinstance(value, dict) and value.get("id") == request_id: return value
-        return None
+    async def cancel_when_requested() -> None:
+        await cancelled.wait()
+        if current is not None: current.cancel()
 
-    async for chunk in chunks:
-        buffered.extend(chunk)
-        while True:
-            endings = [index for marker in (b"\r", b"\n") if (index := buffered.find(marker)) >= 0]
-            if not endings: break
-            index = min(endings)
-            if buffered[index] == 13 and index + 1 == len(buffered): break
-            ending = 2 if buffered[index:index + 2] == b"\r\n" else 1
-            raw_line = bytes(buffered[:index])
-            del buffered[:index + ending]
-            value = consume(raw_line)
-            if value is not None: return value
-    if buffered:
-        value = consume(bytes(buffered))
-        if value is not None: return value
-    if data:
-        value = json.loads("\n".join(data))
-        if request_id is None or isinstance(value, dict) and value.get("id") == request_id: return value
-    raise RuntimeError("MCP SSE response ended without a matching result")
+    abort = asyncio.create_task(cancel_when_requested()) if cancelled is not None else None
+    try:
+        async with asyncio.timeout(timeout_ms / 1000):
+            return await awaitable
+    except TimeoutError:
+        raise TimeoutError("MCP request timed out") from None
+    except asyncio.CancelledError:
+        if cancelled is not None and cancelled.is_set(): raise InterruptedError("Operation aborted") from None
+        raise
+    except Exception:
+        raise RuntimeError("MCP request failed") from None
+    finally:
+        if abort is not None:
+            abort.cancel()
+            await asyncio.gather(abort, return_exceptions=True)
 
 
 async def load_mcp_tools(config: _McpConfig, cancelled: asyncio.Event | None = None, startup_timeout_ms: float = 10_000) -> LoadedMcpTools:
-    client = _McpClient(config)
-    deadline = time.monotonic() + startup_timeout_ms / 1000
+    ready = asyncio.get_running_loop().create_future()
+    stop = asyncio.Event()
+    closed = False
+
+    async def own_client() -> None:
+        try:
+            async with AsyncExitStack() as stack:
+                http_client = await stack.enter_async_context(httpx2.AsyncClient(headers=config.headers or {}))
+                transport = streamable_http_client(config.url, http_client=http_client)
+                client = Client(
+                    transport,
+                    mode="auto",
+                    read_timeout_seconds=config.call_timeout_ms / 1000,
+                    client_info=mcp_types.Implementation(name="tiny-agent", version="0.1.0"),
+                )
+                await stack.enter_async_context(client)
+                ready.set_result(client)
+                await stop.wait()
+        except BaseException as error:
+            if not ready.done(): ready.set_exception(error)
+            else: raise
+
+    owner = asyncio.create_task(own_client())
+
+    async def close() -> None:
+        nonlocal closed
+        if closed: return
+        closed = True
+        starting = not ready.done()
+        if starting: owner.cancel()
+        stop.set()
+        await asyncio.gather(owner, return_exceptions=True)
+        if starting and ready.done():
+            try: ready.exception()
+            except asyncio.CancelledError: pass
+
     try:
-        await client.connect(cancelled, deadline)
-        remote_tools: list[object] = []
+        client = await _await_sdk(asyncio.shield(ready), cancelled, startup_timeout_ms)
+        deadline = time.monotonic() + startup_timeout_ms / 1000
+        remote_tools: list[dict] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
         while True:
-            params = {"cursor": cursor} if cursor is not None else {}
-            listed = await client.request("tools/list", params, cancelled, _remaining_timeout_ms(deadline))
-            if not isinstance(listed, dict) or not isinstance(listed.get("tools"), list): raise RuntimeError("Invalid MCP tools/list response")
-            remote_tools.extend(listed["tools"])
+            listed = await _await_sdk(client.list_tools(cursor=cursor, cache_mode="reload"), cancelled, _remaining_timeout_ms(deadline))
+            remote_tools.extend(tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools)
             if len(remote_tools) > MAX_TOOLS: raise RuntimeError(f"MCP server returned more than {MAX_TOOLS} tools")
-            next_cursor = listed.get("nextCursor")
-            if next_cursor is None: break
-            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors: raise RuntimeError("Invalid MCP tools/list pagination cursor")
-            seen_cursors.add(next_cursor)
-            cursor = next_cursor
+            cursor = listed.next_cursor
+            if cursor is None: break
+            if not cursor or cursor in seen_cursors: raise RuntimeError("Invalid MCP tools/list pagination cursor")
+            seen_cursors.add(cursor)
         remote_names: set[str] = set(); mapped_names: set[str] = set(); tools = []
-        allowed = set(client.config.allowed_tools) if client.config.allowed_tools is not None else None
+        allowed = set(config.allowed_tools) if config.allowed_tools is not None else None
         for remote in remote_tools:
-            if not isinstance(remote, dict) or not isinstance(remote.get("name"), str): raise RuntimeError("Invalid MCP tool definition")
-            remote_name = remote["name"]
+            remote_name = remote.get("name")
+            if not isinstance(remote_name, str): raise RuntimeError("Invalid MCP tool definition")
             if remote_name in remote_names: raise RuntimeError(f"duplicate MCP tool name: {remote_name}")
             remote_names.add(remote_name)
             if allowed is not None and remote_name not in allowed: continue
@@ -358,39 +237,36 @@ async def load_mcp_tools(config: _McpConfig, cancelled: asyncio.Event | None = N
             description = remote.get("description")
             if description is not None and not isinstance(description, str): raise RuntimeError(f"Invalid MCP tool description: {remote_name}")
             if description and len(description.encode()) > MAX_DESCRIPTION_BYTES: raise RuntimeError(f"MCP tool description exceeds 8KB: {remote_name}")
-            declarations = _scan_mcp_header_declarations(schema)
-            if declarations is None: continue
-            name = _map_tool_name(client.config.alias, remote_name)
+            if _scan_mcp_header_declarations(schema) is None: continue
+            name = _map_tool_name(config.alias, remote_name)
             if name in mapped_names: raise RuntimeError(f"duplicate mapped MCP tool name: {name}")
             mapped_names.add(name)
 
-            async def execute(args: dict, call_cancelled: asyncio.Event | None = None, remote_name: str = remote_name, declarations: list[tuple[tuple[str, ...], str, str]] = declarations) -> str:
-                if client.closed: raise RuntimeError("MCP connection is closed")
+            async def execute(args: dict, call_cancelled: asyncio.Event | None = None, remote_name: str = remote_name) -> str:
+                if closed: raise RuntimeError("MCP connection is closed")
                 if not isinstance(args, dict): raise ValueError("MCP tool arguments must be a JSON object")
-                request_params = {"name": remote_name, "arguments": args}
-                if declarations:
-                    request_params["_mcp_param_headers"] = _build_mcp_param_headers(declarations, args)
-                result = await client.request("tools/call", request_params, call_cancelled, client.config.call_timeout_ms)
-                if not isinstance(result, dict): raise RuntimeError("Invalid MCP tools/call response")
-                if result.get("resultType") == "input_required": raise RuntimeError("MCP tool requires additional user input; input_required is not supported")
-                normalized = _normalize_result(result)
-                if result.get("isError"): raise RuntimeError(f"MCP tool error: {normalized}")
+                result = await _await_sdk(
+                    client.call_tool(remote_name, args, read_timeout_seconds=config.call_timeout_ms / 1000),
+                    call_cancelled, config.call_timeout_ms,
+                )
+                value = result.model_dump(by_alias=True, exclude_none=True)
+                if value.get("resultType") == "input_required": raise RuntimeError("MCP tool requires additional user input; input_required is not supported")
+                normalized = _normalize_result(value)
+                if value.get("isError"): raise RuntimeError(f"MCP tool error: {normalized}")
                 return normalized
 
             tools.append({"type": "function", "function": {
                 "name": name,
-                "description": description or f"MCP tool {remote_name} from {client.config.alias}.",
+                "description": description or f"MCP tool {remote_name} from {config.alias}.",
                 "parameters": schema,
             }, "execute": execute})
         if allowed is not None:
-            missing = [name for name in client.config.allowed_tools or [] if name not in remote_names]
+            missing = [name for name in config.allowed_tools or [] if name not in remote_names]
             if missing: raise RuntimeError(f"MCP allowed tools were not found: {', '.join(missing)}")
-        return LoadedMcpTools(tools, client.protocol_version or "", client.close)
-    except asyncio.CancelledError:
-        await client.close()
-        raise
-    except Exception:
-        await client.close()
+
+        return LoadedMcpTools(tools, client.protocol_version, close)
+    except BaseException:
+        await close()
         raise
 
 
@@ -410,17 +286,6 @@ def _json_depth(value: object) -> int:
 
 
 def _encode_name(value: str) -> str: return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
-
-
-def _encode_mcp_param_value(value: str) -> str:
-    needs_base64 = (
-        not value or value != value.strip() or
-        value.startswith("=?base64?") and value.endswith("?=") or
-        any(character != "\t" and not 32 <= ord(character) <= 126 for character in value)
-    )
-    if not needs_base64: return value
-    encoded = base64.b64encode(value.encode()).decode()
-    return f"=?base64?{encoded}?="
 
 
 _NON_REACHABLE_SCHEMA_KEYS = (
@@ -463,31 +328,6 @@ def _scan_mcp_header_declarations(schema: dict) -> list[tuple[tuple[str, ...], s
         return True
 
     return declarations if visit(schema, (), True) else None
-
-
-def _build_mcp_param_headers(declarations: list[tuple[tuple[str, ...], str, str]], args: dict) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for path, name, value_type in declarations:
-        value: object = args
-        for key in path:
-            if not isinstance(value, dict) or key not in value:
-                value = None
-                break
-            value = value[key]
-        if value is None: continue
-        if isinstance(value, str): string = value
-        elif isinstance(value, bool): string = "true" if value else "false"
-        elif isinstance(value, (int, float)) and math.isfinite(value):
-            if isinstance(value, int):
-                if abs(value) > 9_007_199_254_740_991: continue
-                string = str(value)
-            elif value.is_integer():
-                if abs(value) > 9_007_199_254_740_991: continue
-                string = str(int(value))
-            else: string = str(value)
-        else: continue
-        headers[f"Mcp-Param-{name}"] = _encode_mcp_param_value(string)
-    return headers
 
 
 def _map_tool_name(alias: str, remote_name: str) -> str:

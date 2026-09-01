@@ -19,6 +19,15 @@ from tiny_agent.cli import Terminal
 from tiny_agent.session_reducer import configuration_digest, reduce_session, source_digest
 
 FIXTURES = Path(__file__).resolve().parents[2] / "schemas/session/fixtures"
+LOCAL_TOOL_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "schemas/tools/local-tool-contract.json").read_text(encoding="utf-8")
+)
+JSON_LIFECYCLE_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "schemas/monitoring/json-lifecycle-contract.json").read_text(encoding="utf-8")
+)
+BASH_CONTRACT = json.loads(
+    (Path(__file__).resolve().parents[2] / "schemas/tools/bash-contract.json").read_text(encoding="utf-8")
+)
 
 
 async def async_value(value):
@@ -92,6 +101,38 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
             release.set()
             self.assertEqual(await task, "ready")
 
+    async def test_shared_local_tool_contract(self):
+        write = LOCAL_TOOL_CONTRACT["write"]
+        self.assertEqual(
+            await tiny.execute_tool("write", {"path": write["path"], "content": write["content"]}),
+            write["result"],
+        )
+
+        read = LOCAL_TOOL_CONTRACT["read"]
+        (tiny.ROOT / read["path"]).write_text(read["content"], encoding="utf-8")
+        self.assertEqual(
+            await tiny.execute_tool("read", {"path": read["path"], **read["arguments"]}),
+            read["result"],
+        )
+        with self.assertRaises(ValueError) as caught:
+            await tiny.execute_tool("read", {"path": read["path"], "offset": read["beyondOffset"]})
+        self.assertEqual(str(caught.exception), read["beyondError"])
+
+        edit = LOCAL_TOOL_CONTRACT["edit"]
+        edit_path = tiny.ROOT / edit["path"]
+        edit_path.write_text(edit["content"], encoding="utf-8", newline="")
+        self.assertEqual(
+            await tiny.execute_tool("edit", {"path": edit["path"], "edits": edit["edits"]}),
+            edit["result"],
+        )
+        self.assertEqual(edit_path.read_text(encoding="utf-8", newline=""), edit["contentAfter"])
+        for failure in edit["failures"]:
+            before = edit_path.read_bytes()
+            with self.assertRaises(ValueError) as caught:
+                await tiny.execute_tool("edit", {"path": edit["path"], "edits": failure["edits"]})
+            self.assertEqual(str(caught.exception), failure["error"])
+            self.assertEqual(edit_path.read_bytes(), before)
+
     async def test_tools_paths_and_large_bash_output(self):
         self.assertEqual(await tiny.execute_tool("write", {"path": "a.txt", "content": "hello"}), "Successfully wrote 5 bytes to a.txt.")
         self.assertEqual(await tiny.execute_tool("read", {"path": str(tiny.ROOT / "a.txt")}), "hello")
@@ -131,11 +172,30 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
             ]})
         self.assertEqual(edit_path.read_bytes(), before)
 
+    async def test_shared_bash_contract(self):
+        for scenario in BASH_CONTRACT["cases"]:
+            arguments = {"command": scenario["command"]}
+            if "timeout" in scenario: arguments["timeout"] = scenario["timeout"]
+            self.assertEqual(await tiny.execute_tool("bash", arguments), scenario["result"], scenario["name"])
+        truncated = await tiny.execute_tool("bash", {"command": BASH_CONTRACT["lineTruncation"]["command"]})
+        expected = BASH_CONTRACT["lineTruncation"]
+        match = re.fullmatch(
+            rf"{expected['firstTailLine']}\n.*{expected['lastTailLine']}\n{{{expected['separatorNewlines']}}}\[Showing lines 2-{expected['totalLines']} of {expected['totalLines']}\. {expected['label']}: (.*\.log)\]",
+            truncated,
+            re.S,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(len(Path(match.group(1)).read_text(encoding="utf-8").splitlines()), expected["totalLines"])
+
     async def test_bash_error_preserves_output_and_cancel_kills_children(self):
-        self.assertIn("captured", await tiny.execute_tool("bash", {"command": "printf captured; exit 7"}))
+        self.assertEqual(
+            await tiny.execute_tool("bash", {"command": "printf captured; exit 7"}),
+            "captured\n\nCommand exited with code 7",
+        )
         old_limit = tiny.MAX_BASH_OUTPUT; tiny.MAX_BASH_OUTPUT = 1024
         try:
-            with self.assertRaisesRegex(RuntimeError, "10MB limit"): await tiny.execute_bash("yes x | head -n 10000", asyncio.Event())
+            result = await tiny.execute_bash("yes x | head -n 10000", asyncio.Event())
+            self.assertIn("Bash output exceeded the 10MB safety cap; complete output was not captured.", result)
         finally: tiny.MAX_BASH_OUTPUT = old_limit
         cancelled = asyncio.Event()
         sleeper = "python3 -c 'import time; time.sleep(30)'"
@@ -179,10 +239,12 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         timeout_pid = tiny.ROOT / "timeout.pid"
         with patch.object(tiny, "BASH_TIMEOUT_SECONDS", 0.15):
             started = time.monotonic()
-            with self.assertRaisesRegex(TimeoutError, "bash timed out after 0.15 seconds"):
+            self.assertEqual(
                 await asyncio.wait_for(tiny.execute_bash(
                     f"echo $$ > {timeout_pid}; exec 1>&-; sleep 30", asyncio.Event(),
-                ), 1)
+                ), 1),
+                "Command timed out after 0.15 seconds.",
+            )
         self.assertLess(time.monotonic() - started, 1)
         await self._assert_process_group_gone(await self._wait_for_pid(timeout_pid))
 
@@ -190,10 +252,10 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         pid_path = tiny.ROOT / "overflow.pid"
         with patch.object(tiny, "MAX_BASH_OUTPUT", 1024):
             started = time.monotonic()
-            with self.assertRaisesRegex(RuntimeError, "bash output exceeded 10MB limit"):
-                await asyncio.wait_for(tiny.execute_bash(
-                    f"echo $$ > {pid_path}; yes x", asyncio.Event(),
-                ), 1)
+            result = await asyncio.wait_for(tiny.execute_bash(
+                f"echo $$ > {pid_path}; yes x", asyncio.Event(),
+            ), 1)
+            self.assertIn("Bash output exceeded the 10MB safety cap; complete output was not captured.", result)
         self.assertLess(time.monotonic() - started, 1)
         await self._assert_process_group_gone(await self._wait_for_pid(pid_path))
 
@@ -723,6 +785,64 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event["type"] for event in events], ["run.started", "model.completed", "run.completed"])
         self.assertEqual(events[-1]["result"]["status"], "succeeded")
         self.assertNotIn("tiny-agent", output.getvalue())
+
+    async def test_json_mode_matches_shared_successful_lifecycle(self):
+        responses = iter(JSON_LIFECYCLE_CONTRACT["responses"])
+
+        async def serve(reader, writer):
+            header = await reader.readuntil(b"\r\n\r\n")
+            length = int(re.search(br"Content-Length: (\d+)", header, re.I).group(1))
+            await reader.readexactly(length)
+            body = json.dumps(next(responses), separators=(",", ":")).encode()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        (tiny.ROOT / "contract-read.txt").write_text("fixture", encoding="utf-8")
+        output = io.StringIO()
+        try:
+            with patch.dict(os.environ, {
+                "OPENROUTER_API_KEY": "test",
+                "TINY_MODEL": JSON_LIFECYCLE_CONTRACT["model"],
+                "TINY_ENDPOINT": f"http://127.0.0.1:{port}",
+            }), redirect_stdout(output):
+                self.assertEqual(await cli.run_cli([
+                    "--json", "--plugin", "read", JSON_LIFECYCLE_CONTRACT["prompt"],
+                ]), 0)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        expected_events = JSON_LIFECYCLE_CONTRACT["events"]
+        self.assertEqual([event["type"] for event in events], [event["type"] for event in expected_events])
+        for actual, expected in zip(events, expected_events, strict=True):
+            for key in expected["required"]:
+                self.assertIn(key, actual)
+            if "usage" in expected:
+                self.assertEqual(actual["usage"], expected["usage"])
+            for key in ("toolCallId", "tool", "ok"):
+                if key in expected:
+                    self.assertEqual(actual[key], expected[key])
+            if "result" in expected:
+                for key, value in expected["result"].items():
+                    self.assertEqual(actual["result"][key], value)
+                for key in expected.get("resultRequired", []):
+                    self.assertIn(key, actual["result"])
+                if "resultUsage" in expected:
+                    self.assertEqual(actual["result"]["usage"], expected["resultUsage"])
+            if "durationMs" in actual:
+                self.assertGreaterEqual(actual["durationMs"], 0)
+            self.assertRegex(actual["timestamp"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(events[0]["model"], JSON_LIFECYCLE_CONTRACT["model"])
+        self.assertEqual(events[0]["plugins"], JSON_LIFECYCLE_CONTRACT["plugins"])
+        self.assertEqual(events[0]["mcp"], [])
 
     async def test_plugin_selection_deduplicates_assembles_mcp_and_rejects_unknown_early(self):
         remote = {"type": "function", "function": {"name": "mcp_remote", "description": "remote", "parameters": {}}}

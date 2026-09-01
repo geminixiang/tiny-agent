@@ -5,6 +5,12 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { startTestMcpServer } from "./support/mcp-server.js";
 
+const localToolContract = JSON.parse(
+    await readFile(new URL("../../schemas/tools/local-tool-contract.json", import.meta.url), "utf8"),
+);
+const bashContract = JSON.parse(
+    await readFile(new URL("../../schemas/tools/bash-contract.json", import.meta.url), "utf8"),
+);
 const dir = await mkdtemp(join(tmpdir(), "tiny-agent-"));
 process.chdir(dir);
 const {
@@ -1902,6 +1908,32 @@ test("formats pi-style token usage and cache ratio", () => {
 
 test("uses the default OpenRouter model", () => assert.equal(MODEL, process.env.TINY_MODEL || "openai/gpt-5.6-luna"));
 
+test("matches the shared local-tool contract", async () => {
+    const write = localToolContract.write;
+    assert.equal(await executeTool("write", { path: write.path, content: write.content }), write.result);
+
+    const read = localToolContract.read;
+    await writeFile(read.path, read.content);
+    assert.equal(await executeTool("read", { path: read.path, ...read.arguments }), read.result);
+    await assert.rejects(
+        () => executeTool("read", { path: read.path, offset: read.beyondOffset }),
+        (error: Error) => error.message === read.beyondError,
+    );
+
+    const edit = localToolContract.edit;
+    await writeFile(edit.path, edit.content);
+    assert.equal(await executeTool("edit", { path: edit.path, edits: edit.edits }), edit.result);
+    assert.equal(await readFile(edit.path, "utf8"), edit.contentAfter);
+    for (const failure of edit.failures) {
+        const before = await readFile(edit.path, "utf8");
+        await assert.rejects(
+            () => executeTool("edit", { path: edit.path, edits: failure.edits }),
+            (error: Error) => error.message === failure.error,
+        );
+        assert.equal(await readFile(edit.path, "utf8"), before);
+    }
+});
+
 test("read paginates complete UTF-8 lines with actionable errors", async () => {
     await writeFile("read.txt", "one\ntwo\nthree\nfour\n");
     assert.equal(
@@ -2027,6 +2059,29 @@ test("filesystem tools operate on paths outside cwd including symlinks", async (
 
     await executeTool("write", { path: "normal/nested.txt", content: "normal" });
     assert.equal(await executeTool("read", { path: "normal/nested.txt" }), "normal");
+});
+
+test("matches the shared bash contract", async () => {
+    for (const scenario of bashContract.cases) {
+        assert.equal(
+            await executeTool("bash", {
+                command: scenario.command,
+                ...(scenario.timeout ? { timeout: scenario.timeout } : {}),
+            }),
+            scenario.result,
+            scenario.name,
+        );
+    }
+    const truncated = await executeTool("bash", { command: bashContract.lineTruncation.command });
+    assert.match(
+        truncated,
+        new RegExp(
+            `^${bashContract.lineTruncation.firstTailLine}\\n[\\s\\S]*${bashContract.lineTruncation.lastTailLine}\\n{${bashContract.lineTruncation.separatorNewlines}}\\[Showing lines 2-2001 of 2001\\. ${bashContract.lineTruncation.label}: (.*\\.log)\\]$`,
+        ),
+    );
+    const path = truncated.match(/Full output: (.*\.log)\]$/)?.[1];
+    assert.ok(path);
+    assert.equal((await readFile(path, "utf8")).split("\n").filter(Boolean).length, 2_001);
 });
 
 test("bash preserves failures, validates timeout, and stores truncated output", async () => {
