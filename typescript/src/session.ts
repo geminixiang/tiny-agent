@@ -7,6 +7,7 @@ import { reduceSession, type SessionState } from "./session-reducer.js";
 
 export type SessionFact = Record<string, unknown>;
 export type SessionFactInput = Omit<SessionFact, "seq" | "timestamp"> & { id?: string };
+export type CommittedObserver = (facts: readonly SessionFact[]) => void;
 
 const writers = new Set<string>();
 
@@ -28,6 +29,7 @@ function countFacts(bytes: Uint8Array) {
 export class SessionStore {
     private queue = Promise.resolve();
     private closed = false;
+    private onCommitted: CommittedObserver = () => {};
 
     private constructor(
         public readonly id: string,
@@ -112,6 +114,10 @@ export class SessionStore {
         return uuid7();
     }
 
+    observeCommits(observer: CommittedObserver) {
+        this.onCommitted = observer;
+    }
+
     async append(input: SessionFactInput | SessionFactInput[]) {
         const values = Array.isArray(input) ? input : [input];
         if (!values.length) throw Error("Session transaction must not be empty");
@@ -130,6 +136,11 @@ export class SessionStore {
             this.bytes = candidate;
             this.nextSeq += facts.length;
             this.state = state;
+            try {
+                this.onCommitted(facts);
+            } catch {
+                // Monitoring is a lossy post-commit projection and cannot invalidate the write.
+            }
             return facts;
         });
     }

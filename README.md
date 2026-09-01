@@ -115,7 +115,19 @@ tiny-ts --mcp github --plugin read "只使用 GitHub MCP 的 get_file_contents�
 }
 ```
 
-TypeScript 與 Go 使用官方 MCP SDK 自動協商 protocol；Python 與 Rust 目前仍只接受 `2026-07-28`。
+四個版本都使用官方 MCP SDK；TypeScript、Go、Python 由 SDK 自動協商 protocol，Rust 使用 SDK 的 auto lifecycle mode。
+
+## OpenTelemetry
+
+TypeScript 可選擇性地用官方 OpenTelemetry SDK，透過 OTLP/HTTP protobuf 即時輸出 startup、operation、model、tool 與 MCP traces。one-shot、`--json`、interactive prompt、`/skill`、`/compact`、session recovery 與 Esc cancellation 都共用同一個 committed lifecycle：
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_SERVICE_NAME=tiny-ts
+tiny-ts "讀取 README 並摘要"
+```
+
+未設定 OTLP endpoint 時完全停用。Endpoint、headers、TLS 等只接受標準 `OTEL_*` 部署環境設定，不接受 model 或 tool 參數。JSON 與 OTLP 都投影同一個 lifecycle；logical terminal 只在 Session fact 寫入成功後發布。OTLP 預設只輸出 IDs、名稱、usage、outcome 等 metadata，不輸出 prompt、回答、tool arguments/results、error messages、request headers 或 endpoint。Exporter 與 flush 失敗不會改變 agent 執行結果；append-only Session facts 仍是 recovery 的唯一權威資料。
 
 ## 致謝
 

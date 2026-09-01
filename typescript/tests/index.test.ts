@@ -26,11 +26,25 @@ const {
     buildConfiguration,
     runFacts,
     SYNTHETIC_CONTENT,
+    ExecutionLifecycleProjector,
+    callbackSink,
+    noLifecycle,
 } = await import("../src/index.js");
 const { loadMcpTools } = await import("../src/mcp.js");
 
 async function openStore(now = new Date()) {
     return SessionStore.create(dir, MODEL, now);
+}
+
+function recordingLifecycle(session: Awaited<ReturnType<typeof openStore>>, events: any[]) {
+    const lifecycle = new ExecutionLifecycleProjector([callbackSink((event) => events.push(event))]);
+    lifecycle.observe({
+        type: "session.attached",
+        timestamp: new Date().toISOString(),
+        sessionId: session.id,
+        resumed: false,
+    });
+    return lifecycle;
 }
 
 async function facts(store: Awaited<ReturnType<typeof openStore>>) {
@@ -87,7 +101,7 @@ async function appendSettledToolStep(
             },
         },
     });
-    return { ...accepted, stepId, assistantEntryId };
+    return { ...accepted, stepId, attemptId, assistantEntryId };
 }
 
 async function appendCompactionHistory(session: Awaited<ReturnType<typeof openStore>>, fetcher?: typeof fetch) {
@@ -250,6 +264,52 @@ test("persists durable run/model lifecycle and restores an idle session", async 
     await reopened.close();
 });
 
+test("consecutive prompts share one committed lifecycle source", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const session = await openStore();
+    const lifecycleEvents: any[] = [];
+    let response = 0;
+    const agent = new Agent(
+        [],
+        (async () =>
+            new Response(
+                JSON.stringify({
+                    choices: [
+                        { finish_reason: "stop", message: { role: "assistant", content: `answer-${++response}` } },
+                    ],
+                    usage: { prompt_tokens: 1, completion_tokens: 1 },
+                }),
+                { status: 200 },
+            )) as typeof fetch,
+        session,
+        () => {},
+        "",
+        recordingLifecycle(session, lifecycleEvents),
+    );
+
+    assert.equal(await agent.runAgentLoop("first"), "answer-1");
+    assert.equal(await agent.runAgentLoop("second"), "answer-2");
+    assert.deepEqual(
+        lifecycleEvents.filter((event) => event.type !== "session.attached").map((event) => event.type),
+        [
+            "operation.started",
+            "model.started",
+            "model.completed",
+            "operation.completed",
+            "operation.started",
+            "model.started",
+            "model.completed",
+            "operation.completed",
+        ],
+    );
+    assert.equal(
+        new Set(lifecycleEvents.filter((event) => event.type === "operation.started").map((event) => event.operationId))
+            .size,
+        2,
+    );
+    await session.close();
+});
+
 test("normalizes provider-only assistant fields before durable persistence", async () => {
     process.env.OPENROUTER_API_KEY = "test";
     const session = await openStore(new Date("2026-08-03T04:00:00.000Z"));
@@ -343,7 +403,7 @@ test("normalizes provider-only tool call fields and executes the canonical call"
         session,
         () => {},
         "",
-        () => {},
+        noLifecycle,
         [
             {
                 name: "lookup",
@@ -894,7 +954,7 @@ test("replays the immutable builtin read implementation once and repeated resume
             session,
             (event) => toolEvents.push(event),
             "",
-            (event) => runEvents.push(event),
+            recordingLifecycle(session, runEvents),
             [readTool],
         );
         const settled = await appendSettledToolStep(session, agent, [
@@ -933,20 +993,26 @@ test("replays the immutable builtin read implementation once and repeated resume
                 { phase: "end", name: "read", result: "replayed" },
             ],
         );
+        const monitoredTools = runEvents.filter((event) => ["tool.started", "tool.completed"].includes(event.type));
         assert.deepEqual(
-            runEvents
-                .filter((event) => event.type.startsWith("tool."))
-                .map(({ type, tool, toolCallId, ok }) => ({
-                    type,
-                    tool,
-                    toolCallId,
-                    ok,
-                })),
+            monitoredTools.map(({ type, tool, toolCallId, outcome }) => ({ type, tool, toolCallId, outcome })),
             [
-                { type: "tool.started", tool: "read", toolCallId: "safe-call", ok: undefined },
-                { type: "tool.completed", tool: "read", toolCallId: "safe-call", ok: true },
+                { type: "tool.started", tool: "read", toolCallId: "safe-call", outcome: undefined },
+                { type: "tool.completed", tool: "read", toolCallId: "safe-call", outcome: "succeeded" },
             ],
         );
+        assert.ok(
+            monitoredTools.every(
+                (event) =>
+                    event.recovery === true &&
+                    event.operationId === settled.operationId &&
+                    event.stepId === settled.stepId &&
+                    event.parentAttemptId === settled.attemptId &&
+                    typeof event.attemptId === "string",
+            ),
+        );
+        assert.equal(monitoredTools[0].attemptId, monitoredTools[1].attemptId);
+        assert.equal(monitoredTools[0].toolStartedId, monitoredTools[1].toolStartedId);
         assert.deepEqual(await readFile(session.path), afterFirstResume);
         assert.equal((await session.load()).operation.kind, "idle");
         const replayed = (await facts(session)).find((fact) => fact.id === resultEntryId);
@@ -985,7 +1051,7 @@ test("starts an untouched recovery tool through the shared monitored execution p
             session,
             (event) => toolEvents.push(event),
             "",
-            (event) => runEvents.push(event),
+            recordingLifecycle(session, runEvents),
             tools,
         );
         await appendSettledToolStep(session, agent, [{ id: "untouched-call", name: "lookup", arguments: "{}" }]);
@@ -1005,16 +1071,16 @@ test("starts an untouched recovery tool through the shared monitored execution p
         );
         assert.deepEqual(
             runEvents
-                .filter((event) => event.type.startsWith("tool."))
-                .map(({ type, tool, toolCallId, ok }) => ({
+                .filter((event) => ["tool.started", "tool.completed"].includes(event.type))
+                .map(({ type, tool, toolCallId, outcome }) => ({
                     type,
                     tool,
                     toolCallId,
-                    ok,
+                    outcome,
                 })),
             [
-                { type: "tool.started", tool: "lookup", toolCallId: "untouched-call", ok: undefined },
-                { type: "tool.completed", tool: "lookup", toolCallId: "untouched-call", ok: true },
+                { type: "tool.started", tool: "lookup", toolCallId: "untouched-call", outcome: undefined },
+                { type: "tool.completed", tool: "lookup", toolCallId: "untouched-call", outcome: "succeeded" },
             ],
         );
         assert.deepEqual(await readFile(session.path), afterFirstResume);
@@ -1044,15 +1110,7 @@ test("REGRESSION: resuming after a safe-tool replay finishes cleanly once the mo
         const readTool = builtInTools.find((tool) => tool.name === "read")!;
         const settled = await appendSettledToolStep(
             session,
-            new Agent(
-                [],
-                fetch,
-                session,
-                () => {},
-                "",
-                () => {},
-                [readTool],
-            ),
+            new Agent([], fetch, session, () => {}, "", noLifecycle, [readTool]),
             [{ id: "safe-call", name: "read", arguments: '{"path":"replay-regression.txt"}' }],
         );
         const resultEntryId = session.allocateId();
@@ -1086,15 +1144,7 @@ test("REGRESSION: resuming after a safe-tool replay finishes cleanly once the mo
                 { status: 200 },
             );
         }) as typeof fetch;
-        const agent = new Agent(
-            [],
-            fetcher,
-            session,
-            () => {},
-            "",
-            () => {},
-            [readTool],
-        );
+        const agent = new Agent([], fetcher, session, () => {}, "", noLifecycle, [readTool]);
 
         await agent.resumeSession();
 
@@ -1156,7 +1206,7 @@ test("does not replay a custom tool that maliciously claims safe replay", async 
             session,
             () => {},
             "",
-            () => {},
+            noLifecycle,
             tools,
         );
         const originalAppend = session.append.bind(session);
@@ -1219,7 +1269,7 @@ test("reconciles an abort in tool order and repeated resume remains idle", async
             session,
             () => {},
             "",
-            () => {},
+            noLifecycle,
             tools,
         );
         const settled = await appendSettledToolStep(session, agent, [
@@ -1336,7 +1386,7 @@ test("durable tool abort wins while its append races successful settlement", asy
             session,
             () => {},
             "",
-            () => {},
+            noLifecycle,
             [
                 {
                     name: "race",
@@ -1438,6 +1488,7 @@ test("persists compaction abort before signalling and closes the operation", asy
     let requests = 0;
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => (release = resolve));
+    const lifecycleEvents: any[] = [];
     const agent = new Agent(
         [],
         (async (_url: unknown, init: RequestInit) => {
@@ -1456,6 +1507,9 @@ test("persists compaction abort before signalling and closes the operation", asy
             throw new DOMException("aborted", "AbortError");
         }) as typeof fetch,
         session,
+        () => {},
+        "",
+        recordingLifecycle(session, lifecycleEvents),
     );
     for (const prompt of ["a", "b", "c", "d"]) await agent.runAgentLoop(prompt);
     const compacting = agent.compact();
@@ -1467,6 +1521,18 @@ test("persists compaction abort before signalling and closes the operation", asy
     release();
     assert.equal(await compacting, "Compaction aborted.");
     assert.deepEqual((await session.load()).operation, { kind: "idle" });
+    assert.deepEqual(
+        lifecycleEvents
+            .filter((event) => event.operationKind === "compaction")
+            .map(({ type, outcome }) => ({ type, outcome })),
+        [
+            { type: "operation.started", outcome: undefined },
+            { type: "model.started", outcome: undefined },
+            { type: "cancel.requested", outcome: undefined },
+            { type: "model.completed", outcome: "cancelled" },
+            { type: "operation.completed", outcome: "cancelled" },
+        ],
+    );
     await session.close();
 });
 
@@ -2265,6 +2331,62 @@ test("validates tool argument objects and built-in field types", async () => {
     );
 });
 
+test("tool completion is not published before its durable result commit", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const response = {
+        choices: [
+            {
+                message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [{ id: "effect", type: "function", function: { name: "effect", arguments: "{}" } }],
+                },
+            },
+        ],
+        usage: {},
+    };
+    const events: any[] = [];
+    const session = await openStore();
+    const agent = new Agent(
+        [],
+        (async () => new Response(JSON.stringify(response), { status: 200 })) as typeof fetch,
+        session,
+        () => {},
+        "",
+        recordingLifecycle(session, events),
+        [
+            {
+                name: "effect",
+                description: "Perform an effect.",
+                parameters: { type: "object", properties: {} },
+                async execute() {
+                    return "done";
+                },
+            },
+        ],
+    );
+    const append = session.append.bind(session);
+    session.append = (async (input: Parameters<typeof session.append>[0]) => {
+        const values = Array.isArray(input) ? input : [input];
+        const isToolResult = values.some((fact) => {
+            const entry = fact.entry as Record<string, unknown> | undefined;
+            const message = entry?.message as Record<string, unknown> | undefined;
+            return fact.kind === "entry" && message?.role === "tool";
+        });
+        if (isToolResult) throw Error("result write failed");
+        return append(input);
+    }) as typeof session.append;
+
+    await assert.rejects(() => agent.runAgentLoop("perform effect"), /result write failed/);
+    assert.ok(events.some((event) => event.type === "tool.started"));
+    assert.equal(
+        events.some((event) => event.type === "tool.completed"),
+        false,
+    );
+    assert.equal((await session.load()).operation.kind, "run");
+    await session.close();
+});
+
 test("tool monitoring uses execution status instead of result text", async () => {
     process.env.OPENROUTER_API_KEY = "test";
     const responses = [
@@ -2290,7 +2412,7 @@ test("tool monitoring uses execution status instead of result text", async () =>
         session,
         () => {},
         "",
-        (event) => events.push(event),
+        recordingLifecycle(session, events),
         [
             {
                 name: "lookup",
@@ -2304,20 +2426,12 @@ test("tool monitoring uses execution status instead of result text", async () =>
     );
     assert.equal(await agent.runAgentLoop("lookup"), "done");
     await session.close();
-    assert.equal(events.find((event) => event.type === "tool.completed")?.ok, true);
+    assert.equal(events.find((event) => event.type === "tool.completed")?.outcome, "succeeded");
 });
 
 test("restricted tools do not advertise unavailable capabilities", () => {
     const edit = builtInTools.find((tool) => tool.name === "edit")!;
-    const system = new Agent(
-        [],
-        fetch,
-        undefined,
-        () => {},
-        "",
-        () => {},
-        [edit],
-    ).messages[0].content!;
+    const system = new Agent([], fetch, undefined, () => {}, "", noLifecycle, [edit]).messages[0].content!;
     assert.match(system, /Use only the tools provided in this request/);
     assert.match(system, /explain the missing capability/);
     assert.doesNotMatch(system, /Use read to inspect files|bash for discovery/);
@@ -2325,16 +2439,7 @@ test("restricted tools do not advertise unavailable capabilities", () => {
 
 test("rejects duplicate injected tool names", () => {
     assert.throws(
-        () =>
-            new Agent(
-                [],
-                fetch,
-                undefined,
-                () => {},
-                "",
-                () => {},
-                [...builtInTools, builtInTools[0]],
-            ),
+        () => new Agent([], fetch, undefined, () => {}, "", noLifecycle, [...builtInTools, builtInTools[0]]),
         /duplicate tool name: bash/,
     );
 });
@@ -2378,7 +2483,7 @@ test("runs an injected tool without changing the agent loop", async () => {
         session,
         () => {},
         "",
-        (event) => events.push(event),
+        recordingLifecycle(session, events),
         [
             {
                 name: "lookup",
@@ -2416,12 +2521,14 @@ test("runs an injected tool without changing the agent loop", async () => {
     assert.deepEqual(
         events.filter((event) => event.type.startsWith("tool.")).map(({ type, tool }) => ({ type, tool })),
         [
+            { type: "tool.admitted", tool: "lookup" },
             { type: "tool.started", tool: "lookup" },
             { type: "tool.completed", tool: "lookup" },
         ],
     );
     const toolRecord = (await facts(session)).find((fact) => fact.record?.type === "toolStarted");
     assert.equal(toolRecord.record.toolName, "lookup");
+    await session.close();
 });
 
 test("runs tool calls and compacts through mocked OpenRouter", async () => {
@@ -2480,38 +2587,40 @@ test("runs tool calls and compacts through mocked OpenRouter", async () => {
             session,
             (event) => events.push(event),
             "",
-            (event) => runEvents.push(event),
+            recordingLifecycle(session, runEvents),
         );
     assert.equal(await agent.runAgentLoop("make it"), "done");
     assert.deepEqual(
-        runEvents.map(({ type, tool, toolCallId, ok, usage }) => ({ type, tool, toolCallId, ok, usage })),
+        runEvents
+            .filter((event) => ["model.completed", "tool.started", "tool.completed"].includes(event.type))
+            .map(({ type, tool, toolCallId, outcome, usage }) => ({ type, tool, toolCallId, outcome, usage })),
         [
             {
                 type: "model.completed",
                 tool: undefined,
                 toolCallId: undefined,
-                ok: undefined,
+                outcome: "succeeded",
                 usage: { input: 75, output: 10, cacheRead: 25, cacheWrite: 0, cacheHitRate: 25 },
             },
             {
                 type: "tool.started",
                 tool: "write",
                 toolCallId: "1",
-                ok: undefined,
+                outcome: undefined,
                 usage: undefined,
             },
             {
                 type: "tool.completed",
                 tool: "write",
                 toolCallId: "1",
-                ok: true,
+                outcome: "succeeded",
                 usage: undefined,
             },
             {
                 type: "model.completed",
                 tool: undefined,
                 toolCallId: undefined,
-                ok: undefined,
+                outcome: "succeeded",
                 usage: { input: 60, output: 5, cacheRead: 60, cacheWrite: 0, cacheHitRate: 50 },
             },
         ],

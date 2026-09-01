@@ -1,0 +1,114 @@
+{
+  "version": 2,
+  "prompt": "read contract-read.txt",
+  "plugins": ["read"],
+  "model": "contract-model",
+  "responses": [
+    {
+      "choices": [
+        {
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "contract-call",
+                "type": "function",
+                "function": {"name": "read", "arguments": "{\"path\":\"contract-read.txt\"}"}
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 9,
+        "completion_tokens": 1,
+        "prompt_tokens_details": {"cached_tokens": 2, "cache_write_tokens": 0}
+      }
+    },
+    {
+      "choices": [{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
+      "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+    }
+  ],
+  "events": [
+    {
+      "type": "startup.started",
+      "required": ["timestamp", "model", "runtime", "plugins", "mcp"]
+    },
+    {
+      "type": "session.attached",
+      "required": ["timestamp", "sessionId", "resumed"],
+      "resumed": false
+    },
+    {
+      "type": "startup.completed",
+      "required": ["timestamp", "durationMs", "outcome"],
+      "outcome": "succeeded"
+    },
+    {
+      "type": "operation.started",
+      "required": ["timestamp", "sessionId", "operationId", "operationKind", "recovery"],
+      "operationKind": "run",
+      "recovery": false
+    },
+    {
+      "type": "model.started",
+      "required": ["timestamp", "sessionId", "operationId", "operationKind", "stepId", "attemptId", "attempt", "recovery"],
+      "attempt": 1,
+      "recovery": false
+    },
+    {
+      "type": "model.completed",
+      "required": ["timestamp", "sessionId", "operationId", "operationKind", "stepId", "attemptId", "recovery", "durationMs", "outcome", "usage"],
+      "outcome": "succeeded",
+      "usage": {"input": 7, "output": 1, "cacheRead": 2, "cacheWrite": 0, "cacheHitRate": 22.22222222222222}
+    },
+    {
+      "type": "tool.admitted",
+      "required": ["timestamp", "sessionId", "operationId", "stepId", "toolStartedId", "toolCallId", "tool", "replay", "recovery"],
+      "toolCallId": "contract-call",
+      "tool": "read",
+      "replay": "safe",
+      "recovery": false
+    },
+    {
+      "type": "tool.started",
+      "required": ["timestamp", "sessionId", "operationId", "stepId", "attemptId", "parentAttemptId", "toolStartedId", "toolCallId", "tool", "recovery"],
+      "toolCallId": "contract-call",
+      "tool": "read",
+      "recovery": false
+    },
+    {
+      "type": "tool.completed",
+      "required": ["timestamp", "sessionId", "operationId", "stepId", "attemptId", "parentAttemptId", "toolStartedId", "toolCallId", "tool", "recovery", "durationMs", "outcome"],
+      "toolCallId": "contract-call",
+      "tool": "read",
+      "outcome": "succeeded",
+      "recovery": false
+    },
+    {
+      "type": "model.started",
+      "required": ["timestamp", "sessionId", "operationId", "operationKind", "stepId", "attemptId", "attempt", "recovery"],
+      "attempt": 1,
+      "recovery": false
+    },
+    {
+      "type": "model.completed",
+      "required": ["timestamp", "sessionId", "operationId", "operationKind", "stepId", "attemptId", "recovery", "durationMs", "outcome", "usage"],
+      "outcome": "succeeded",
+      "usage": {"input": 3, "output": 2, "cacheRead": 0, "cacheWrite": 0, "cacheHitRate": 0}
+    },
+    {
+      "type": "operation.completed",
+      "required": ["timestamp", "sessionId", "operationId", "operationKind", "recovery", "durationMs", "outcome", "completion", "answer", "usage"],
+      "operationKind": "run",
+      "outcome": "succeeded",
+      "completion": "normal",
+      "answer": "done",
+      "usage": {"input": 10, "output": 3, "cacheRead": 2, "cacheWrite": 0, "cacheHitRate": 0},
+      "recovery": false
+    }
+  ]
+}

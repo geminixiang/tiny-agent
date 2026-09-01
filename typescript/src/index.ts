@@ -2,6 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { canonicalDigest } from "./canonical-json.js";
 import { ENDPOINT, MODEL, chatCompletionsUrl, requireOpenRouterApiKey } from "./env.js";
+import { type ExecutionLifecycle, noLifecycle } from "./lifecycle.js";
 import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
 import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
 import { expect, type ConfigurationSnapshot, type ToolCall } from "./session-reducer.js";
@@ -16,6 +17,15 @@ import {
 } from "./tools.js";
 
 export { displayToolName } from "./mcp.js";
+export {
+    ExecutionLifecycleProjector,
+    callbackSink,
+    noLifecycle,
+    type ExecutionLifecycle,
+    type LifecycleEvent,
+    type LifecycleObservation,
+    type LifecycleSink,
+} from "./lifecycle.js";
 export {
     planRecovery,
     SYNTHETIC_CONTENT,
@@ -77,35 +87,6 @@ function usageFactIfModelError(error: unknown, operationId: string, attemptId: s
 function when<T extends object>(condition: unknown, value: T): T | Record<string, never> {
     return condition ? value : {};
 }
-
-export type RunResult = {
-    status: "succeeded" | "failed" | "cancelled";
-    answer?: string;
-    cause?: string;
-    message?: string;
-    sessionId: string;
-    usage: Usage;
-};
-export type RunEvent =
-    | { type: "model.completed"; timestamp: string; durationMs: number; usage: Usage }
-    | { type: "tool.started"; timestamp: string; toolCallId: string; tool: string }
-    | {
-          type: "tool.completed";
-          timestamp: string;
-          toolCallId: string;
-          tool: string;
-          durationMs: number;
-          ok: boolean;
-      }
-    | {
-          type: "mcp.connected";
-          timestamp: string;
-          server: string;
-          protocolVersion: string;
-          toolCount: number;
-          durationMs: number;
-      }
-    | { type: "mcp.failed"; timestamp: string; server: string; stage: "connect"; cause: string };
 
 const digest = canonicalDigest;
 
@@ -260,12 +241,14 @@ type ActiveOperation = {
 type DurableToolCall = {
     operationId: string;
     stepId: string;
+    parentAttemptId: string;
     assistantEntryId: string;
     toolIndex: number;
     toolCallId: string;
     tool: Tool;
     args: ToolArgs;
     environmentIdentity: string;
+    recovery: boolean;
 } & ({ mode: "start" } | { mode: "replay"; toolStartedId: string; resultEntryId: string });
 
 type DurableToolResult = {
@@ -285,13 +268,14 @@ export class Agent {
         public session?: SessionStore,
         public onTool: (event: ToolEvent) => void = () => {},
         instructions = "",
-        public onEvent: (event: RunEvent) => void = () => {},
+        public lifecycle: ExecutionLifecycle = noLifecycle,
         public tools: readonly Tool[] = builtInTools,
     ) {
         const duplicate = tools.find(
             (tool, index) => tools.findIndex((candidate) => candidate.name === tool.name) !== index,
         );
         if (duplicate) throw Error(`duplicate tool name: ${duplicate.name}`);
+        session?.observeCommits((facts) => lifecycle.committed(facts));
         const list =
             skills
                 .map(
@@ -369,7 +353,6 @@ ${list}
     ) {
         const active = this.beginOperation(phase, operationId);
         const signal = active.controller.signal;
-        const started = performance.now();
         try {
             const response = await this.callModel(messages, tools, signal);
             if (await this.settleOperation(active)) {
@@ -388,15 +371,6 @@ ${list}
                 ]);
                 return;
             }
-            this.onEvent({
-                type: "model.completed",
-                timestamp: new Date().toISOString(),
-                durationMs: performance.now() - started,
-                usage: {
-                    ...response.usage,
-                    ...when(response.cacheHitRate !== undefined, { cacheHitRate: response.cacheHitRate }),
-                },
-            });
             return response;
         } catch (error) {
             if (!(await this.settleOperation(active))) throw error;
@@ -420,6 +394,7 @@ ${list}
     async resumeSession() {
         if (!this.session) return;
         let recoveryError: Error | undefined;
+        const attached = new Set<string>();
         for (;;) {
             const state = await this.session.load();
             this.restoreState(state);
@@ -429,6 +404,15 @@ ${list}
                 return;
             }
             const operation = state.operation;
+            if (!attached.has(operation.operationId)) {
+                attached.add(operation.operationId);
+                this.lifecycle.observe({
+                    type: "recovery.attached",
+                    timestamp: new Date().toISOString(),
+                    operationId: operation.operationId,
+                    operationKind: operation.kind,
+                });
+            }
 
             const configuration = buildConfiguration(this.systemPrompt, this.tools);
             const current = {
@@ -624,6 +608,8 @@ ${list}
         const call = {
             operationId: state.operation.operationId,
             stepId: state.operation.step.stepId,
+            parentAttemptId: state.operation.step.attemptId,
+            recovery: true,
             assistantEntryId: plan.assistantEntryId,
             toolIndex: plan.toolIndex,
             tool,
@@ -667,6 +653,7 @@ ${list}
         const session = this.session;
         const toolStartedId = call.mode === "start" ? session.allocateId() : call.toolStartedId;
         const resultEntryId = call.mode === "start" ? session.allocateId() : call.resultEntryId;
+        const executionAttemptId = session.allocateId();
         if (call.mode === "start") {
             await session.append({
                 kind: "record",
@@ -687,10 +674,15 @@ ${list}
             });
         }
 
-        const started = performance.now();
-        this.onEvent({
+        this.lifecycle.observe({
             type: "tool.started",
             timestamp: new Date().toISOString(),
+            operationId: call.operationId,
+            stepId: call.stepId,
+            attemptId: executionAttemptId,
+            parentAttemptId: call.parentAttemptId,
+            toolStartedId,
+            recovery: call.recovery,
             toolCallId: call.toolCallId,
             tool: call.tool.name,
         });
@@ -710,14 +702,6 @@ ${list}
             ok = false;
         }
         this.onTool({ phase: "end", name: call.tool.name, args: call.args, result: content });
-        this.onEvent({
-            type: "tool.completed",
-            timestamp: new Date().toISOString(),
-            toolCallId: call.toolCallId,
-            tool: call.tool.name,
-            durationMs: performance.now() - started,
-            ok,
-        });
 
         const message: Message = { role: "tool", tool_call_id: call.toolCallId, content };
         await session.append({
@@ -922,6 +906,8 @@ ${list}
                     mode: "start",
                     operationId,
                     stepId,
+                    parentAttemptId: attemptId,
+                    recovery: false,
                     assistantEntryId,
                     toolIndex: i,
                     toolCallId: call.id,

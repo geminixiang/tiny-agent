@@ -10,7 +10,10 @@ import { startTestMcpServer } from "./support/mcp-server.js";
 const cli = resolve("src/cli.ts"),
     loader = resolve("node_modules/tsx/dist/loader.mjs");
 const jsonLifecycleContract = JSON.parse(
-    await readFile(new URL("../../schemas/monitoring/json-lifecycle-contract.json", import.meta.url), "utf8"),
+    await readFile(
+        new URL("../../schemas/monitoring/typescript-execution-lifecycle-contract.json", import.meta.url),
+        "utf8",
+    ),
 );
 
 function envWithoutKey() {
@@ -32,22 +35,62 @@ test("--json emits a structured failed result without TUI output", async () => {
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line));
-    assert.equal(events.length, 2);
-    assert.equal(events[0].type, "run.started");
-    assert.deepEqual(events[0].plugins, ["bash", "read", "write", "edit", "bg"]);
-    assert.equal(events[1].type, "run.completed");
     assert.deepEqual(
-        {
-            status: events[1].result.status,
-            cause: events[1].result.cause,
-            message: events[1].result.message,
-        },
-        { status: "failed", cause: "agent_error", message: "Set OPENROUTER_API_KEY" },
+        events.map((event) => event.type),
+        [
+            "startup.started",
+            "session.attached",
+            "startup.completed",
+            "operation.started",
+            "model.started",
+            "model.completed",
+            "operation.completed",
+        ],
     );
+    assert.deepEqual(events[0].plugins, ["bash", "read", "write", "edit", "bg"]);
+    assert.equal(events[5].outcome, "failed");
+    assert.equal(events[5].errorType, "model_error");
+    assert.equal(events[6].outcome, "failed");
+    assert.equal(events[6].errorType, "model_error");
+    assert.equal(events[6].errorMessage, "Set OPENROUTER_API_KEY");
     assert.doesNotMatch(result.stdout, /tiny-agent|Resume:|\\u001b/);
 });
 
-test("--json matches the shared successful lifecycle contract", async (t) => {
+test("exports one-shot lifecycle spans through the official OTLP HTTP exporter", async (t) => {
+    const workspace = await mkdtemp(join(tmpdir(), "tiny-agent-cli-"));
+    let requestPath = "";
+    let contentType = "";
+    let bodyBytes = 0;
+    let resolveReceived: () => void = () => {};
+    const received = new Promise<void>((resolve) => (resolveReceived = resolve));
+    const server = createServer((request, response) => {
+        requestPath = request.url ?? "";
+        contentType = String(request.headers["content-type"] ?? "");
+        request.on("data", (chunk) => (bodyBytes += chunk.length));
+        request.on("end", () => {
+            response.writeHead(200).end();
+            resolveReceived();
+        });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server.close());
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("OTLP fixture did not bind TCP");
+
+    const result = await spawnCli(["--json", "hello"], workspace, {
+        ...envWithoutKey(),
+        OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${address.port}`,
+    });
+    await received;
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, "");
+    assert.equal(requestPath, "/v1/traces");
+    assert.match(contentType, /^application\/x-protobuf/);
+    assert.ok(bodyBytes > 0);
+});
+
+test("--json matches the TypeScript reference lifecycle contract", async (t) => {
     const workspace = await mkdtemp(join(tmpdir(), "tiny-agent-cli-"));
     await writeFile(join(workspace, "contract-read.txt"), "fixture");
     const responses = [...jsonLifecycleContract.responses];
@@ -161,13 +204,24 @@ test("--mcp connects trusted aliases, deduplicates them, and closes before exit"
         .map((line) => JSON.parse(line));
     assert.deepEqual(
         events.map((event) => event.type),
-        ["run.started", "mcp.connected", "run.completed"],
+        [
+            "startup.started",
+            "session.attached",
+            "mcp.started",
+            "mcp.completed",
+            "startup.completed",
+            "operation.started",
+            "model.started",
+            "model.completed",
+            "operation.completed",
+        ],
     );
     assert.deepEqual(events[0].plugins, ["read"]);
     assert.deepEqual(events[0].mcp, ["fixture"]);
-    assert.equal(events[1].server, "fixture");
-    assert.equal(events[1].toolCount, 1);
-    assert.equal(events[2].result.message, "Set OPENROUTER_API_KEY");
+    assert.equal(events[3].server, "fixture");
+    assert.equal(events[3].toolCount, 1);
+    assert.equal(events[3].outcome, "succeeded");
+    assert.equal(events[8].outcome, "failed");
     assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${secret}|${escapeRegex(server.url.href)}`));
 });
 
@@ -183,6 +237,28 @@ test("--mcp rejects unknown aliases before creating a session", async () => {
     assert.equal(result.stdout, "");
     assert.match(result.stderr, /^Unknown MCP server: missing/);
     await assert.rejects(() => access(join(workspace, ".tiny-agent")));
+});
+
+test("--json emits a startup terminal when trusted MCP configuration is invalid", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "tiny-agent-cli-"));
+    const catalog = join(workspace, "mcp.json");
+    await writeFile(catalog, JSON.stringify({ servers: {} }));
+    const result = await spawnCli(["--json", "--mcp", "missing", "hello"], workspace, {
+        ...envWithoutKey(),
+        TINY_MCP_CONFIG: catalog,
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, "");
+    const events = result.stdout
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+    assert.deepEqual(
+        events.map((event) => event.type),
+        ["startup.started", "startup.completed"],
+    );
+    assert.equal(events[1].outcome, "failed");
+    assert.equal(events[1].errorType, "startup_setup_error");
 });
 
 test("--mcp emits a complete JSON run when connection fails", async () => {
@@ -201,9 +277,12 @@ test("--mcp emits a complete JSON run when connection fails", async () => {
         .map((line) => JSON.parse(line));
     assert.deepEqual(
         events.map((event) => event.type),
-        ["run.started", "mcp.failed", "run.completed"],
+        ["startup.started", "session.attached", "mcp.started", "mcp.completed", "startup.completed"],
     );
-    assert.equal(events[2].result.cause, "mcp_setup_error");
+    assert.equal(events[3].outcome, "failed");
+    assert.equal(events[3].errorType, "connection_failed");
+    assert.equal(events[4].outcome, "failed");
+    assert.equal(events[4].errorType, "mcp_setup_error");
     assert.doesNotMatch(result.stdout, /127\.0\.0\.1|ECONNREFUSED/);
 });
 
@@ -247,16 +326,9 @@ function assertJsonLifecycle(events: Record<string, unknown>[]) {
     for (const [index, expected] of jsonLifecycleContract.events.entries()) {
         const actual = events[index];
         for (const key of expected.required) assert.ok(Object.hasOwn(actual, key), `${expected.type}.${key}`);
-        if (expected.usage) assert.deepEqual(actual.usage, expected.usage);
-        if (expected.toolCallId) assert.equal(actual.toolCallId, expected.toolCallId);
-        if (expected.tool) assert.equal(actual.tool, expected.tool);
-        if (expected.ok !== undefined) assert.equal(actual.ok, expected.ok);
-        if (expected.result) {
-            const result = actual.result as Record<string, unknown>;
-            for (const [key, value] of Object.entries(expected.result)) assert.deepEqual(result[key], value);
-            for (const key of expected.resultRequired ?? [])
-                assert.ok(Object.hasOwn(result, key), `${expected.type}.result.${key}`);
-            if (expected.resultUsage) assert.deepEqual(result.usage, expected.resultUsage);
+        for (const [key, value] of Object.entries(expected)) {
+            if (key === "type" || key === "required") continue;
+            assert.deepEqual(actual[key], value, `${expected.type}.${key}`);
         }
         if ("durationMs" in actual) assert.ok(typeof actual.durationMs === "number" && actual.durationMs >= 0);
         assert.match(String(actual.timestamp), /^\d{4}-\d{2}-\d{2}T/);

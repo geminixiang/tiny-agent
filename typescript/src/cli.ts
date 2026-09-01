@@ -13,17 +13,25 @@ import {
     loadSkills,
     formatToolEvent,
     formatUsage,
-    type RunEvent,
-    type RunResult,
+    ExecutionLifecycleProjector,
+    callbackSink,
+    noLifecycle,
+    type ExecutionLifecycle,
+    type LifecycleEvent,
+    type LifecycleSink,
     type SessionStore,
     builtInPlugins,
     closeBackgroundProcesses,
 } from "./index.js";
 import { loadMcpConfigs } from "./mcp-config.js";
 import { loadMcpTools, type LoadedMcpTools } from "./mcp.js";
+import { createTelemetry, noTelemetry } from "./telemetry.js";
 
 const activeMcp: LoadedMcpTools[] = [];
 let activeSession: SessionStore | undefined;
+let activeTelemetry: LifecycleSink = noTelemetry;
+let activeLifecycle: ExecutionLifecycle = noLifecycle;
+let structuredOutput = false;
 
 function parseCLIArgs(args = process.argv.slice(2)) {
     const { values, positionals } = parseArgs({
@@ -72,9 +80,7 @@ async function main() {
     const { sessionId, cwd, extras, json, plugins, mcp, oneShot } = parseCLIArgs();
     await changeCwd(cwd);
     if (json && !oneShot) throw Error("--json requires a one-shot prompt.");
-    const emit = (event: RunEvent | Record<string, unknown>) => {
-        if (json) process.stdout.write(`${JSON.stringify(event)}\n`);
-    };
+    structuredOutput = json;
     const selectedPlugins = plugins.length ? plugins : builtInPlugins.map((plugin) => plugin.name);
     const unknown = selectedPlugins.find((name) => !builtInPlugins.some((plugin) => plugin.name === name));
     if (unknown) {
@@ -82,38 +88,67 @@ async function main() {
             `Unknown plugin: ${unknown}. Available plugins: ${builtInPlugins.map((plugin) => plugin.name).join(", ")}`,
         );
     }
+    activeTelemetry = await createTelemetry();
     const localTools = selectedPlugins.flatMap(
         (name) => builtInPlugins.find((plugin) => plugin.name === name)?.tools ?? [],
     );
-    const loadedMcp = activeMcp;
-    const configs = await loadMcpConfigs(mcp);
-    const skills = await loadSkills(extras);
-    const instructions = await loadProjectInstructions();
-    const session = sessionId
-        ? await Session.open(sessionId, process.cwd())
-        : await Session.create(process.cwd(), MODEL);
-    activeSession = session;
-    const runStarted = performance.now();
-    if (json) {
-        emit({
-            type: "run.started",
+    activeLifecycle = new ExecutionLifecycleProjector([
+        activeTelemetry,
+        ...(json ? [callbackSink((event: LifecycleEvent) => process.stdout.write(`${JSON.stringify(event)}\n`))] : []),
+    ]);
+    const startupStarted = performance.now();
+    let startupCompleted = false;
+    const completeStartup = (outcome: "succeeded" | "failed", errorType?: string) => {
+        if (startupCompleted) return;
+        startupCompleted = true;
+        activeLifecycle.observe({
+            type: "startup.completed",
             timestamp: new Date().toISOString(),
-            sessionId: session.id,
-            model: MODEL,
-            endpoint: ENDPOINT,
-            plugins: selectedPlugins,
-            mcp,
+            durationMs: performance.now() - startupStarted,
+            outcome,
+            ...(errorType ? { errorType } : {}),
         });
+    };
+    activeLifecycle.observe({
+        type: "startup.started",
+        timestamp: new Date().toISOString(),
+        model: MODEL,
+        runtime: "typescript",
+        plugins: selectedPlugins,
+        mcp,
+    });
+    const loadedMcp = activeMcp;
+    let configs: Awaited<ReturnType<typeof loadMcpConfigs>>;
+    let skills: Awaited<ReturnType<typeof loadSkills>>;
+    let instructions: string;
+    let session: SessionStore;
+    try {
+        configs = await loadMcpConfigs(mcp);
+        skills = await loadSkills(extras);
+        instructions = await loadProjectInstructions();
+        session = sessionId ? await Session.open(sessionId, process.cwd()) : await Session.create(process.cwd(), MODEL);
+    } catch (error) {
+        completeStartup("failed", "startup_setup_error");
+        throw error;
     }
+    activeSession = session;
+    activeLifecycle.observe({
+        type: "session.attached",
+        timestamp: new Date().toISOString(),
+        sessionId: session.id,
+        resumed: Boolean(sessionId),
+    });
     for (const config of configs) {
         const started = performance.now();
+        activeLifecycle.observe({ type: "mcp.started", timestamp: new Date().toISOString(), server: config.alias });
         try {
             const loaded = await loadMcpTools(config, AbortSignal.timeout(10_000));
             loadedMcp.push(loaded);
-            emit({
-                type: "mcp.connected",
+            activeLifecycle.observe({
+                type: "mcp.completed",
                 timestamp: new Date().toISOString(),
                 server: config.alias,
+                outcome: "succeeded",
                 protocolVersion: loaded.protocolVersion,
                 toolCount: loaded.tools.length,
                 durationMs: performance.now() - started,
@@ -123,30 +158,18 @@ async function main() {
             }
         } catch (error) {
             const cause = mcpFailureCause(error);
-            emit({
-                type: "mcp.failed",
+            activeLifecycle.observe({
+                type: "mcp.completed",
                 timestamp: new Date().toISOString(),
                 server: config.alias,
-                stage: "connect",
-                cause,
+                outcome: "failed",
+                errorType: cause,
+                durationMs: performance.now() - started,
             });
-            if (json) {
-                emit({
-                    type: "run.completed",
-                    timestamp: new Date().toISOString(),
-                    durationMs: performance.now() - runStarted,
-                    result: {
-                        status: "failed",
-                        cause: "mcp_setup_error",
-                        message: `MCP ${config.alias} failed: ${cause}`,
-                        sessionId: session.id,
-                        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                    } satisfies RunResult,
-                });
-                process.exitCode = 1;
-                return;
-            }
-            throw Error(`MCP ${config.alias} failed: ${cause}`);
+            completeStartup("failed", "mcp_setup_error");
+            if (!json) throw Error(`MCP ${config.alias} failed: ${cause}`);
+            process.exitCode = 1;
+            return;
         }
     }
     const tools = [...localTools, ...loadedMcp.flatMap((loaded) => loaded.tools)];
@@ -157,7 +180,14 @@ async function main() {
             );
         }
     };
-    const agent = new Agent(skills, fetch, session, showTool, instructions, emit, tools);
+    let agent: Agent;
+    try {
+        agent = new Agent(skills, fetch, session, showTool, instructions, activeLifecycle, tools);
+    } catch (error) {
+        completeStartup("failed", "agent_setup_error");
+        throw error;
+    }
+    completeStartup("succeeded");
     if (sessionId) await agent.resumeSession();
     const resume = () => {
         if (!json) console.log(`\nResume: tiny-ts --session ${session.id}`);
@@ -188,7 +218,7 @@ async function main() {
         rl.off("SIGINT", onInterrupt);
         process.stdin.off("keypress", onKeypress);
         rl.close();
-        await session.close();
+        await bestEffort(() => session.close());
         resume();
     };
     if (!json) {
@@ -197,41 +227,16 @@ async function main() {
         );
     }
     if (oneShot) {
-        if (json) {
-            try {
-                const answer = await agent.runAgentLoop(oneShot);
-                emit({
-                    type: "run.completed",
-                    timestamp: new Date().toISOString(),
-                    durationMs: performance.now() - runStarted,
-                    result: {
-                        status: answer === "Operation aborted." ? "cancelled" : "succeeded",
-                        answer,
-                        sessionId: session.id,
-                        usage: agent.usage,
-                    } satisfies RunResult,
-                });
-            } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                emit({
-                    type: "run.completed",
-                    timestamp: new Date().toISOString(),
-                    durationMs: performance.now() - runStarted,
-                    result: {
-                        status: "failed",
-                        cause: "agent_error",
-                        message,
-                        sessionId: session.id,
-                        usage: agent.usage,
-                    } satisfies RunResult,
-                });
-                process.exitCode = 1;
+        try {
+            const answer = await agent.runAgentLoop(oneShot);
+            if (!json) {
+                console.log(`\n${answer}`);
+                console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
             }
-            await close();
-            return;
+        } catch (error) {
+            if (!json) throw error;
+            process.exitCode = 1;
         }
-        console.log(`\n${await agent.runAgentLoop(oneShot)}`);
-        console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
         await close();
         return;
     }
@@ -278,6 +283,14 @@ async function closeMcp(loaded: LoadedMcpTools[]) {
     }
 }
 
+async function bestEffort(cleanup: () => Promise<unknown>) {
+    try {
+        await cleanup();
+    } catch {
+        // Cleanup failures never replace the primary result and later cleanup still runs.
+    }
+}
+
 function mcpFailureCause(error: unknown) {
     if (error instanceof DOMException && error.name === "TimeoutError") return "timeout";
     if (error instanceof Error && /abort|timeout/i.test(`${error.name} ${error.message}`)) return "timeout";
@@ -286,11 +299,12 @@ function mcpFailureCause(error: unknown) {
 
 main()
     .finally(async () => {
-        await closeBackgroundProcesses();
-        await closeMcp(activeMcp);
-        await activeSession?.close();
+        await bestEffort(closeBackgroundProcesses);
+        await bestEffort(() => closeMcp(activeMcp));
+        await bestEffort(async () => activeSession?.close());
+        await bestEffort(() => activeLifecycle.close());
     })
     .catch((error) => {
-        console.error(error.message);
+        if (!structuredOutput) console.error(error.message);
         process.exitCode = 1;
     });

@@ -75,6 +75,32 @@ test("session store validates a candidate before append and preserves bytes on r
     await store.close();
 });
 
+test("session store publishes committed facts after the write and isolates observer failures", async () => {
+    const cwd = await workspace();
+    const store = await SessionStore.create(cwd, MODEL);
+    const observed: unknown[][] = [];
+    store.observeCommits((facts) => {
+        observed.push([...facts]);
+        throw Error("observer failure");
+    });
+
+    const committed = await store.append({
+        kind: "entry",
+        entry: { type: "message", message: { role: "user", content: "visible after commit" } },
+    });
+    assert.equal(observed.length, 1);
+    assert.deepEqual(observed[0], committed);
+    assert.match(await readFile(store.path, "utf8"), /visible after commit/);
+
+    store.observeCommits((facts) => observed.push([...facts]));
+    await assert.rejects(
+        () => store.append({ kind: "record", record: { type: "runStarted" } }),
+        /INVALID_FACT|INVALID_REFERENCE|INVALID_TRANSITION/,
+    );
+    assert.equal(observed.length, 1);
+    await store.close();
+});
+
 test("session store serializes concurrent transactions in FIFO order", async () => {
     const cwd = await workspace();
     const store = await SessionStore.create(cwd, MODEL);
