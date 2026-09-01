@@ -921,18 +921,20 @@ func uuid7(now time.Time) string {
 }
 
 type Agent struct {
-	Messages []Message
-	Usage    Usage
-	Skills   []Skill
-	Session  *SessionStore
-	Client   *http.Client
-	Endpoint string
-	OnTool   func(ToolEvent)
-	OnEvent  func(RunEvent)
-	Tools    []Tool
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	active   *activeOperation
+	Messages  []Message
+	Usage     Usage
+	Skills    []Skill
+	Session   *SessionStore
+	Client    *http.Client
+	Endpoint  string
+	OnTool    func(ToolEvent)
+	OnEvent   func(RunEvent)
+	Lifecycle executionLifecycle
+	Tools     []Tool
+	mu        sync.Mutex
+	cancel    context.CancelFunc
+	active    *activeOperation
+	recovery  bool
 }
 
 func newAgent(skills []Skill, session *SessionStore, instructions string) *Agent {
@@ -949,7 +951,11 @@ func newAgent(skills []Skill, session *SessionStore, instructions string) *Agent
 		project = fmt.Sprintf("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"%s\">\n%s\n</project_instructions>\n\n</project_context>", filepath.Join(cwd, "AGENTS.md"), instructions)
 	}
 	prompt := fmt.Sprintf("You are tiny-agent, a concise coding agent in %s. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.\n\nFor implementation tasks, inspect only what is needed, then make the changes and run focused tests. Do not keep researching the same uncertainty when a mature dependency or direct implementation is available.\nUse the provided tool descriptions to choose the right capability. Not every run enables file access, shell access, or file modification.\nPrefer completing a small working implementation over exhaustively researching every option. If repeated experiments fail, reconsider the approach instead of making another similar attempt.%s\n\n<available_skills>\n%s\n</available_skills>", cwd, project, list)
-	return &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: chatCompletionsURL(endpoint()), OnTool: func(ToolEvent) {}, OnEvent: func(RunEvent) {}, Tools: localTools()}
+	agent := &Agent{Messages: []Message{{Role: "system", Content: text(prompt)}}, Skills: skills, Session: session, Client: http.DefaultClient, Endpoint: chatCompletionsURL(endpoint()), OnTool: func(ToolEvent) {}, OnEvent: func(RunEvent) {}, Lifecycle: noopLifecycle{}, Tools: localTools()}
+	if session != nil {
+		session.ObserveCommits(func(facts []map[string]any) { agent.Lifecycle.Committed(facts) })
+	}
+	return agent
 }
 
 func localTools(names ...string) []Tool {
@@ -1318,12 +1324,34 @@ func runCLI(args []string) error {
 			return fmt.Errorf("Unknown plugin: %s. Available plugins: bash, read, write, edit, bg", plugin)
 		}
 	}
+	sinks := []lifecycleSink{newOpenTelemetryMonitor(currentEnvironment())}
+	if jsonMode {
+		sinks = append(sinks, callbackLifecycleSink(func(event map[string]any) { emitJSON(event) }))
+	}
+	lifecycle := newLifecycleProjector(sinks...)
+	defer lifecycle.Close()
+	startupStarted := time.Now()
+	startupCompleted := false
+	completeStartup := func(outcome, errorType string) {
+		if startupCompleted {
+			return
+		}
+		startupCompleted = true
+		event := map[string]any{"type": "startup.completed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "durationMs": lifecycleDuration(startupStarted, time.Now()), "outcome": outcome}
+		if errorType != "" {
+			event["errorType"] = errorType
+		}
+		lifecycle.Observe(event)
+	}
+	lifecycle.Observe(map[string]any{"type": "startup.started", "timestamp": startupStarted.UTC().Format(time.RFC3339Nano), "model": model(), "runtime": "go", "plugins": selectedPlugins, "mcp": mcpAliases})
 	configs, err := loadMCPConfigs(mcpAliases, currentEnvironment())
 	if err != nil {
+		completeStartup("failed", "startup_setup_error")
 		return err
 	}
 	skills, err := loadSkills(extras)
 	if err != nil {
+		completeStartup("failed", "startup_setup_error")
 		return err
 	}
 	var session *SessionStore
@@ -1333,15 +1361,14 @@ func runCLI(args []string) error {
 		session, err = openSessionStore(sessionID)
 	}
 	if err != nil {
+		completeStartup("failed", "startup_setup_error")
 		return err
 	}
 	defer session.Close()
 	defer closeBackgroundProcesses()
-	runStarted := time.Now()
-	if jsonMode {
-		emitJSON(RunEvent{"type": "run.started", "timestamp": runStarted.UTC().Format(time.RFC3339Nano), "sessionId": session.ID, "model": model(), "endpoint": endpoint(), "plugins": selectedPlugins, "mcp": mcpAliases})
-	}
+	lifecycle.Observe(map[string]any{"type": "session.attached", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "sessionId": session.ID, "resumed": sessionID != ""})
 	agent := newAgent(skills, session, loadProjectInstructions())
+	agent.Lifecycle = lifecycle
 	agent.Tools = localTools(selectedPlugins...)
 	loadedMCP := []*MCPClient{}
 	defer func() {
@@ -1351,29 +1378,27 @@ func runCLI(args []string) error {
 	}()
 	for _, config := range configs {
 		connectionStarted := time.Now()
+		lifecycle.Observe(map[string]any{"type": "mcp.started", "timestamp": connectionStarted.UTC().Format(time.RFC3339Nano), "server": config.Alias})
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		loaded, loadErr := loadMCPTools(ctx, config, http.DefaultClient)
 		cancel()
 		if loadErr != nil {
+			lifecycle.Observe(map[string]any{"type": "mcp.completed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "server": config.Alias, "durationMs": lifecycleDuration(connectionStarted, time.Now()), "outcome": "failed", "errorType": "connection_failed"})
+			completeStartup("failed", "mcp_setup_error")
 			if jsonMode {
-				emitJSON(RunEvent{"type": "mcp.failed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "server": config.Alias, "stage": "connect", "cause": "connection_failed"})
-				emitJSON(RunEvent{"type": "run.completed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "durationMs": float64(time.Since(runStarted).Microseconds()) / 1000, "result": map[string]any{"status": "failed", "cause": "mcp_setup_error", "message": fmt.Sprintf("MCP %s failed: connection_failed", config.Alias), "sessionId": session.ID, "usage": Usage{}}})
 				return silentCLIError{}
 			}
 			return fmt.Errorf("MCP %s failed: %w", config.Alias, loadErr)
 		}
 		loadedMCP = append(loadedMCP, loaded)
 		agent.Tools = append(agent.Tools, loaded.tools...)
-		if jsonMode {
-			emitJSON(RunEvent{"type": "mcp.connected", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "server": config.Alias, "protocolVersion": loaded.protocolVersion, "toolCount": len(loaded.tools), "durationMs": float64(time.Since(connectionStarted).Microseconds()) / 1000})
-		} else {
+		lifecycle.Observe(map[string]any{"type": "mcp.completed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "server": config.Alias, "protocolVersion": loaded.protocolVersion, "toolCount": len(loaded.tools), "durationMs": lifecycleDuration(connectionStarted, time.Now()), "outcome": "succeeded"})
+		if !jsonMode {
 			fmt.Printf("MCP %s: connected (%s, %d tools)\n", config.Alias, loaded.protocolVersion, len(loaded.tools))
 		}
 	}
+	completeStartup("succeeded", "")
 	out := io.Writer(os.Stdout)
-	if jsonMode {
-		agent.OnEvent = func(event RunEvent) { emitJSON(event) }
-	}
 	agent.OnTool = func(event ToolEvent) {
 		if jsonMode {
 			return
@@ -1390,17 +1415,7 @@ func runCLI(args []string) error {
 		}
 	}
 	if jsonMode {
-		answer, runErr := agent.runAgentLoop(oneShot)
-		result := map[string]any{"sessionId": session.ID, "usage": agent.Usage}
-		if runErr != nil {
-			result["status"], result["cause"], result["message"] = "failed", "agent_error", runErr.Error()
-		} else {
-			result["status"], result["answer"] = "succeeded", answer
-			if answer == "Operation aborted." {
-				result["status"] = "cancelled"
-			}
-		}
-		emitJSON(RunEvent{"type": "run.completed", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "durationMs": float64(time.Since(runStarted).Microseconds()) / 1000, "result": result})
+		_, runErr := agent.runAgentLoop(oneShot)
 		if runErr != nil {
 			return silentCLIError{}
 		}

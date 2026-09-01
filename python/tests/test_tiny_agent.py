@@ -23,7 +23,7 @@ LOCAL_TOOL_CONTRACT = json.loads(
     (Path(__file__).resolve().parents[2] / "schemas/tools/local-tool-contract.json").read_text(encoding="utf-8")
 )
 JSON_LIFECYCLE_CONTRACT = json.loads(
-    (Path(__file__).resolve().parents[2] / "schemas/monitoring/json-lifecycle-contract.json").read_text(encoding="utf-8")
+    (Path(__file__).resolve().parents[2] / "schemas/monitoring/execution-lifecycle-contract.json").read_text(encoding="utf-8")
 )
 BASH_CONTRACT = json.loads(
     (Path(__file__).resolve().parents[2] / "schemas/tools/bash-contract.json").read_text(encoding="utf-8")
@@ -766,11 +766,17 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         session = SimpleNamespace(id="session-id", path=Path("session.jsonl"), close=lambda: None)
 
         class FakeAgent:
-            def __init__(self, *_args, on_event=lambda event: None, **_kwargs):
+            def __init__(self, *_args, lifecycle, **_kwargs):
                 self.usage = {"input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4}
-                self.on_event = on_event
+                self.lifecycle = lifecycle
             async def run_agent_loop(self, _text):
-                self.on_event({"type": "model.completed", "timestamp": "now", "durationMs": 1, "usage": self.usage})
+                self.lifecycle.committed([{"kind": "record", "timestamp": 1, "record": {"type": "runStarted", "operationId": "operation-1"}}])
+                self.lifecycle.committed([{"kind": "record", "timestamp": 2, "record": {"type": "stepAttempt", "operationId": "operation-1", "stepId": "step-1", "attemptId": "attempt-1", "attempt": 1}}])
+                self.lifecycle.committed([
+                    {"kind": "entry", "id": "answer-1", "timestamp": 3, "entry": {"type": "message", "attemptId": "attempt-1", "message": {"role": "assistant", "content": "done"}}},
+                    {"kind": "usage", "timestamp": 3, "operationId": "operation-1", "attemptId": "attempt-1", "usage": self.usage},
+                ])
+                self.lifecycle.committed([{"kind": "record", "timestamp": 4, "record": {"type": "operationFinished", "operationId": "operation-1", "outcome": "completed", "completion": "normal", "finalEntryId": "answer-1"}}])
                 return "done"
 
         output = io.StringIO()
@@ -782,8 +788,12 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await cli.run_cli(["--json", "hello"]), 0)
 
         events = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual([event["type"] for event in events], ["run.started", "model.completed", "run.completed"])
-        self.assertEqual(events[-1]["result"]["status"], "succeeded")
+        self.assertEqual([event["type"] for event in events], [
+            "startup.started", "session.attached", "startup.completed", "operation.started",
+            "model.started", "model.completed", "operation.completed",
+        ])
+        self.assertEqual(events[-1]["outcome"], "succeeded")
+        self.assertEqual(events[-1]["answer"], "done")
         self.assertNotIn("tiny-agent", output.getvalue())
 
     async def test_json_mode_matches_shared_successful_lifecycle(self):
@@ -825,18 +835,9 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         for actual, expected in zip(events, expected_events, strict=True):
             for key in expected["required"]:
                 self.assertIn(key, actual)
-            if "usage" in expected:
-                self.assertEqual(actual["usage"], expected["usage"])
-            for key in ("toolCallId", "tool", "ok"):
-                if key in expected:
-                    self.assertEqual(actual[key], expected[key])
-            if "result" in expected:
-                for key, value in expected["result"].items():
-                    self.assertEqual(actual["result"][key], value)
-                for key in expected.get("resultRequired", []):
-                    self.assertIn(key, actual["result"])
-                if "resultUsage" in expected:
-                    self.assertEqual(actual["result"]["usage"], expected["resultUsage"])
+            for key, value in expected.items():
+                if key == "required": continue
+                self.assertEqual(actual[key], value)
             if "durationMs" in actual:
                 self.assertGreaterEqual(actual["durationMs"], 0)
             self.assertRegex(actual["timestamp"], r"^\d{4}-\d{2}-\d{2}T")
@@ -851,7 +852,7 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         captured = {}
 
         class FakeAgent:
-            def __init__(self, _skills, _session, _instructions, tools):
+            def __init__(self, _skills, _session, _instructions, tools, **_kwargs):
                 captured["tools"] = tools; self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}; self.on_tool = None
             async def run_agent_loop(self, _text): return "done"
 

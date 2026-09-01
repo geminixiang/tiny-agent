@@ -51,24 +51,23 @@ func TestJSONModeEmitsOneShotLifecycleWithoutTUIOutput(t *testing.T) {
 		t.Fatalf("expected silent CLI failure, got %v", runErr)
 	}
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected two JSON events, got %q", output)
+	if len(lines) != 7 {
+		t.Fatalf("expected seven lifecycle events, got %q", output)
 	}
-	var started, completed map[string]any
-	if json.Unmarshal([]byte(lines[0]), &started) != nil || json.Unmarshal([]byte(lines[1]), &completed) != nil {
-		t.Fatalf("invalid JSON output: %q", output)
-	}
-	if started["type"] != "run.started" || completed["type"] != "run.completed" {
-		t.Fatalf("unexpected lifecycle: %v %v", started["type"], completed["type"])
-	}
-	result := completed["result"].(map[string]any)
-	if result["status"] != "failed" || result["cause"] != "agent_error" {
-		t.Fatalf("unexpected result: %v", result)
+	types := []string{"startup.started", "session.attached", "startup.completed", "operation.started", "model.started", "model.completed", "operation.completed"}
+	for index, line := range lines {
+		var event map[string]any
+		if json.Unmarshal([]byte(line), &event) != nil {
+			t.Fatalf("invalid JSON output: %q", output)
+		}
+		if event["type"] != types[index] {
+			t.Fatalf("event %d: %v", index, event["type"])
+		}
 	}
 }
 
 func TestJSONModeMatchesSharedSuccessfulLifecycle(t *testing.T) {
-	contractData, err := os.ReadFile(filepath.Join("..", "..", "..", "schemas", "monitoring", "json-lifecycle-contract.json"))
+	contractData, err := os.ReadFile(filepath.Join("..", "..", "..", "schemas", "monitoring", "execution-lifecycle-contract.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,17 +75,7 @@ func TestJSONModeMatchesSharedSuccessfulLifecycle(t *testing.T) {
 		Prompt, Model string
 		Plugins       []string
 		Responses     []map[string]any
-		Events        []struct {
-			Type           string
-			Required       []string
-			Usage          map[string]any
-			ToolCallID     string `json:"toolCallId"`
-			Tool           string
-			OK             *bool
-			Result         map[string]any
-			ResultRequired []string
-			ResultUsage    map[string]any
-		}
+		Events        []map[string]any
 	}
 	if err := json.Unmarshal(contractData, &contract); err != nil {
 		t.Fatal(err)
@@ -132,40 +121,20 @@ func TestJSONModeMatchesSharedSuccessfulLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		expected := contract.Events[index]
-		if actual["type"] != expected.Type {
+		if actual["type"] != expected["type"] {
 			t.Fatalf("event %d type: %v", index, actual["type"])
 		}
-		for _, key := range expected.Required {
-			if _, ok := actual[key]; !ok {
+		for _, key := range expected["required"].([]any) {
+			if _, ok := actual[key.(string)]; !ok {
 				t.Fatalf("event %d missing %s", index, key)
 			}
 		}
-		if expected.Usage != nil && !reflect.DeepEqual(actual["usage"], expected.Usage) {
-			t.Fatalf("event %d usage: %v", index, actual["usage"])
-		}
-		if expected.ToolCallID != "" && actual["toolCallId"] != expected.ToolCallID {
-			t.Fatalf("event %d toolCallId: %v", index, actual["toolCallId"])
-		}
-		if expected.Tool != "" && actual["tool"] != expected.Tool {
-			t.Fatalf("event %d tool: %v", index, actual["tool"])
-		}
-		if expected.OK != nil && actual["ok"] != *expected.OK {
-			t.Fatalf("event %d ok: %v", index, actual["ok"])
-		}
-		if expected.Result != nil {
-			result := actual["result"].(map[string]any)
-			for key, value := range expected.Result {
-				if !reflect.DeepEqual(result[key], value) {
-					t.Fatalf("event %d result.%s: %v", index, key, result[key])
-				}
+		for key, value := range expected {
+			if key == "type" || key == "required" {
+				continue
 			}
-			for _, key := range expected.ResultRequired {
-				if _, ok := result[key]; !ok {
-					t.Fatalf("event %d missing result.%s", index, key)
-				}
-			}
-			if expected.ResultUsage != nil && !reflect.DeepEqual(result["usage"], expected.ResultUsage) {
-				t.Fatalf("event %d result usage: %v", index, result["usage"])
+			if !reflect.DeepEqual(actual[key], value) {
+				t.Fatalf("event %d %s: %v", index, key, actual[key])
 			}
 		}
 		if duration, ok := actual["durationMs"]; ok && duration.(float64) < 0 {

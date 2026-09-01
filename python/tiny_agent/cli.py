@@ -10,8 +10,10 @@ from contextlib import suppress
 from pathlib import Path
 
 from .agent import Agent, TOOL_DEFINITIONS, close_background_processes, format_tool_event, format_usage, load_project_instructions, load_skills, set_root, timestamp
+from .lifecycle import CallbackSink, ExecutionLifecycle
 from .mcp import display_tool_name, load_mcp_configs, load_mcp_tools, split_names
 from .session import Session
+from .telemetry import create_telemetry
 from .settings import Settings
 from .terminal import Terminal
 
@@ -129,55 +131,64 @@ def mcp_failure_cause(error: BaseException) -> str:
     return "timeout" if isinstance(error, TimeoutError) or "timeout" in str(error).lower() else "connection_failed"
 
 
-async def run_session(args: argparse.Namespace, aliases: list[str], local_tools: list[dict], configs: list) -> int:
+async def run_session(args: argparse.Namespace, aliases: list[str], local_tools: list[dict]) -> int:
     cwd = Path.cwd().resolve()
-    session = Session.open(args.session, cwd) if args.session else Session.create(cwd)
+    lifecycle = ExecutionLifecycle([create_telemetry(), *([CallbackSink(emit_json)] if args.json else [])])
+    startup_started = time.monotonic()
+    startup_completed = False
+    plugins = split_names(args.plugin) or list(PLUGIN_NAMES)
+    lifecycle.observe({"type": "startup.started", "timestamp": timestamp(), "model": Settings().tiny_model, "runtime": "python", "plugins": plugins, "mcp": aliases})
+
+    def complete_startup(outcome: str, error_type: str | None = None) -> None:
+        nonlocal startup_completed
+        if startup_completed: return
+        startup_completed = True
+        event = {"type": "startup.completed", "timestamp": timestamp(), "durationMs": (time.monotonic() - startup_started) * 1000, "outcome": outcome}
+        if error_type: event["errorType"] = error_type
+        lifecycle.observe(event)
+
+    try:
+        configs = load_mcp_configs(aliases)
+        skills = load_skills(args.skill)
+        instructions = load_project_instructions()
+        session = Session.open(args.session, cwd) if args.session else Session.create(cwd)
+    except Exception:
+        complete_startup("failed", "startup_setup_error")
+        lifecycle.close()
+        raise
+    lifecycle.observe({"type": "session.attached", "timestamp": timestamp(), "sessionId": session.id, "resumed": bool(args.session)})
     loaded_mcp = []
-    run_started = time.monotonic()
-    if args.json:
-        emit_json({
-            "type": "run.started", "timestamp": timestamp(),
-            "sessionId": session.id, "model": Settings().tiny_model, "endpoint": Settings().tiny_endpoint,
-            "plugins": split_names(args.plugin) or list(PLUGIN_NAMES), "mcp": aliases,
-        })
     try:
         for config in configs:
             started = time.monotonic()
+            lifecycle.observe({"type": "mcp.started", "timestamp": timestamp(), "server": config.alias})
             try:
                 loaded = await load_mcp_tools(config)
             except (ValueError, RuntimeError, OSError, TimeoutError) as error:
                 cause = mcp_failure_cause(error)
-                if not args.json:
-                    raise RuntimeError(f"MCP {config.alias} failed: {error}") from error
-                emit_json({"type": "mcp.failed", "timestamp": timestamp(), "server": config.alias, "stage": "connect", "cause": cause})
-                emit_json({
-                    "type": "run.completed", "timestamp": timestamp(),
-                    "durationMs": (time.monotonic() - run_started) * 1000,
-                    "result": {"status": "failed", "cause": "mcp_setup_error", "message": f"MCP {config.alias} failed: {cause}", "sessionId": session.id, "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}},
-                })
+                lifecycle.observe({"type": "mcp.completed", "timestamp": timestamp(), "server": config.alias, "durationMs": (time.monotonic() - started) * 1000, "outcome": "failed", "errorType": cause})
+                complete_startup("failed", "mcp_setup_error")
+                if not args.json: raise RuntimeError(f"MCP {config.alias} failed: {error}") from error
                 return 1
             loaded_mcp.append(loaded)
-            if args.json:
-                emit_json({"type": "mcp.connected", "timestamp": timestamp(), "server": config.alias, "protocolVersion": loaded.protocol_version, "toolCount": len(loaded.tools), "durationMs": (time.monotonic() - started) * 1000})
-            else:
+            lifecycle.observe({"type": "mcp.completed", "timestamp": timestamp(), "server": config.alias, "durationMs": (time.monotonic() - started) * 1000, "outcome": "succeeded", "protocolVersion": loaded.protocol_version, "toolCount": len(loaded.tools)})
+            if not args.json:
                 print(f"MCP {config.alias}: connected ({loaded.protocol_version}, {len(loaded.tools)} tools)")
 
-        skills = load_skills(args.skill)
         tools = [*local_tools, *(tool for loaded in loaded_mcp for tool in loaded.tools)]
-        agent = (
-            Agent(skills, session, load_project_instructions(), on_event=emit_json, tools=tools)
-            if args.json else Agent(skills, session, load_project_instructions(), tools=tools)
-        )
+        try:
+            agent = Agent(skills, session, instructions, tools=tools, lifecycle=lifecycle)
+        except Exception:
+            complete_startup("failed", "agent_setup_error")
+            raise
+        complete_startup("succeeded")
         if args.json:
             try:
-                if args.session:
-                    await agent.resume_session()
-                answer = await agent.run_agent_loop(" ".join(args.prompt))
-                result = {"status": "cancelled" if answer == "Operation aborted." else "succeeded", "answer": answer, "sessionId": session.id, "usage": agent.usage}
-            except Exception as error:
-                result = {"status": "failed", "cause": "agent_error", "message": str(error), "sessionId": session.id, "usage": agent.usage}
-            emit_json({"type": "run.completed", "timestamp": timestamp(), "durationMs": (time.monotonic() - run_started) * 1000, "result": result})
-            return 0 if result["status"] != "failed" else 1
+                if args.session: await agent.resume_session()
+                await agent.run_agent_loop(" ".join(args.prompt))
+                return 0
+            except Exception:
+                return 1
 
         install_tool_printer(agent)
         print_banner(session, tools, aliases, bool(args.session))
@@ -186,8 +197,9 @@ async def run_session(args: argparse.Namespace, aliases: list[str], local_tools:
         print(f"\nResume: tiny-py --session {session.id}")
         return 0
     finally:
-        session.close()
+        with suppress(Exception): session.close()
         await close_mcp(loaded_mcp)
+        with suppress(Exception): lifecycle.close()
 
 
 async def run_cli(argv: list[str] | None = None) -> int:
@@ -201,9 +213,8 @@ async def run_cli(argv: list[str] | None = None) -> int:
         raise ValueError("--json requires a one-shot prompt.")
     local_tools = selected_local_tools(args.plugin)
     aliases = split_names(args.mcp)
-    configs = load_mcp_configs(aliases)
     try:
-        return await run_session(args, aliases, local_tools, configs)
+        return await run_session(args, aliases, local_tools)
     finally:
         await close_background_processes()
 

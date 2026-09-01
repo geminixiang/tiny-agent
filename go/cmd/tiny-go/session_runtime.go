@@ -329,6 +329,13 @@ func (a *Agent) executeDurableTool(run *durableRun, index int, call ToolCall, se
 		}
 	}
 	started := time.Now()
+	executionAttemptID := uuid7(started)
+	a.Lifecycle.Observe(map[string]any{
+		"type": "tool.started", "timestamp": started.UTC().Format(time.RFC3339Nano),
+		"operationId": run.OperationID, "stepId": run.StepID, "attemptId": executionAttemptID,
+		"parentAttemptId": run.AttemptID, "toolStartedId": startedID, "toolCallId": call.ID,
+		"tool": call.Function.Name, "recovery": a.recovery,
+	})
 	a.OnEvent(RunEvent{"type": "tool.started", "timestamp": started.UTC().Format(time.RFC3339Nano), "toolCallId": call.ID, "tool": call.Function.Name})
 	a.OnTool(ToolEvent{Phase: "start", Name: call.Function.Name, Args: args})
 	ctx := a.beginOperation(run.OperationID, "run", "tool", call.ID)
@@ -413,6 +420,9 @@ func (a *Agent) reconcileAbort() error {
 }
 
 func (a *Agent) recoverSession() error {
+	a.recovery = true
+	defer func() { a.recovery = false }()
+	attached := map[string]bool{}
 	_, current, err := a.currentConfiguration()
 	if err != nil {
 		return err
@@ -421,6 +431,11 @@ func (a *Agent) recoverSession() error {
 		return err
 	}
 	for a.Session.State().Operation.Kind != "idle" {
+		operation := a.Session.State().Operation
+		if !attached[operation.OperationID] {
+			attached[operation.OperationID] = true
+			a.Lifecycle.Observe(map[string]any{"type": "recovery.attached", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "operationId": operation.OperationID, "operationKind": operation.Kind})
+		}
 		plan := planRecovery(a.Session.State(), current)
 		if plan["type"] == "blocked" {
 			return fmt.Errorf("Session recovery blocked: %s", plan["reason"])
@@ -637,7 +652,7 @@ func (a *Agent) recoverTool(plan recoveryPlan) error {
 	if selected == nil {
 		return errors.New("recovery tool unavailable")
 	}
-	run := durableRun{OperationID: state.Operation.OperationID, StepID: state.Operation.Step.StepID, AssistantEntryID: assistantID, ContextEntryID: state.Operation.Step.ContextThroughEntryID}
+	run := durableRun{OperationID: state.Operation.OperationID, StepID: state.Operation.Step.StepID, AttemptID: state.Operation.Step.AttemptID, AssistantEntryID: assistantID, ContextEntryID: state.Operation.Step.ContextThroughEntryID}
 	var replay *sessionToolState
 	if plan["mode"] == "replay" {
 		for i := range state.Operation.ToolCalls {

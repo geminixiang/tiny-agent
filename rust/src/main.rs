@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use tiny_agent_rust::lifecycle::{CallbackSink, ExecutionLifecycle, LifecycleSink};
 use tiny_agent_rust::mcp::{LoadedMcp, display_tool_name, load_mcp_configs, load_mcp_tools};
+use tiny_agent_rust::telemetry::OpenTelemetryMonitor;
 use tiny_agent_rust::terminal::{TermError, Terminal};
 use tiny_agent_rust::{
     Session, close_background_processes, endpoint, format_tool_event, format_usage,
@@ -113,15 +115,28 @@ fn emit_json(event: serde_json::Value) {
     println!("{}", serde_json::to_string(&event).unwrap());
 }
 
-fn usage_json(usage: tiny_agent_rust::UsageState) -> serde_json::Value {
-    let mut value = serde_json::json!({
-        "input":usage.input, "output":usage.output,
-        "cacheRead":usage.cache_read, "cacheWrite":usage.cache_write,
-    });
-    if usage.input + usage.cache_read + usage.cache_write > 0 {
-        value["cacheHitRate"] = serde_json::json!(usage.cache_hit_rate);
+fn create_lifecycle(json: bool) -> Arc<ExecutionLifecycle> {
+    let mut sinks: Vec<Arc<dyn LifecycleSink>> = vec![Arc::new(OpenTelemetryMonitor::from_env())];
+    if json {
+        sinks.push(Arc::new(CallbackSink(Arc::new(emit_json))));
     }
-    value
+    ExecutionLifecycle::new(sinks)
+}
+
+fn complete_startup(
+    lifecycle: &ExecutionLifecycle,
+    started: Instant,
+    outcome: &str,
+    error_type: Option<&str>,
+) {
+    let mut event = serde_json::json!({
+        "type":"startup.completed", "timestamp":timestamp(),
+        "durationMs":started.elapsed().as_secs_f64() * 1000.0, "outcome":outcome,
+    });
+    if let Some(error_type) = error_type {
+        event["errorType"] = serde_json::json!(error_type);
+    }
+    lifecycle.observe(event);
 }
 
 fn mcp_failure_cause(error: &str) -> &'static str {
@@ -141,6 +156,14 @@ impl Drop for ActiveMcp {
     }
 }
 
+struct ActiveLifecycle(Arc<ExecutionLifecycle>);
+
+impl Drop for ActiveLifecycle {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 struct ActiveBg {
     cwd: String,
 }
@@ -155,57 +178,96 @@ fn run_json_cli(parsed: CliArgs) -> Result<i32, String> {
     if parsed.prompt.is_empty() {
         return Err("--json requires a one-shot prompt.".into());
     }
-    let configs = load_mcp_configs(&parsed.mcp)?;
+    let lifecycle = create_lifecycle(true);
+    let _active_lifecycle = ActiveLifecycle(lifecycle.clone());
+    let startup_started = Instant::now();
+    lifecycle.observe(serde_json::json!({
+        "type":"startup.started", "timestamp":timestamp(), "model":model_name(),
+        "runtime":"rust", "plugins":parsed.plugins, "mcp":parsed.mcp,
+    }));
+    let configs = match load_mcp_configs(&parsed.mcp) {
+        Ok(configs) => configs,
+        Err(error) => {
+            complete_startup(
+                &lifecycle,
+                startup_started,
+                "failed",
+                Some("startup_setup_error"),
+            );
+            return Err(error);
+        }
+    };
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let cwd = cwd.to_string_lossy().to_string();
     let _active_bg = ActiveBg { cwd: cwd.clone() };
-    let session = if parsed.session_id.is_empty() {
-        Session::create_new(std::path::Path::new(&cwd), &model_name())?
-    } else {
-        Session::open(&parsed.session_id, std::path::Path::new(&cwd))?
+    let skills = match load_skills(parsed.extras, &cwd) {
+        Ok(skills) => skills,
+        Err(error) => {
+            complete_startup(
+                &lifecycle,
+                startup_started,
+                "failed",
+                Some("startup_setup_error"),
+            );
+            return Err(error);
+        }
     };
-    let session_id = session.id.clone();
-    let started = Instant::now();
-    emit_json(serde_json::json!({
-        "type":"run.started", "timestamp":timestamp(), "sessionId":session_id,
-        "model":model_name(), "endpoint":endpoint(), "plugins":parsed.plugins, "mcp":parsed.mcp,
+    let instructions = load_project_instructions(&cwd);
+    let session = match if parsed.session_id.is_empty() {
+        Session::create_new(std::path::Path::new(&cwd), &model_name())
+    } else {
+        Session::open(&parsed.session_id, std::path::Path::new(&cwd))
+    } {
+        Ok(session) => session,
+        Err(error) => {
+            complete_startup(
+                &lifecycle,
+                startup_started,
+                "failed",
+                Some("startup_setup_error"),
+            );
+            return Err(error);
+        }
+    };
+    lifecycle.observe(serde_json::json!({
+        "type":"session.attached", "timestamp":timestamp(), "sessionId":session.id,
+        "resumed":!parsed.session_id.is_empty(),
     }));
 
     let mut loaded_mcp = ActiveMcp(Vec::new());
     for config in configs {
         let alias = config.alias().to_string();
         let connection_started = Instant::now();
+        lifecycle.observe(serde_json::json!({
+            "type":"mcp.started", "timestamp":timestamp(), "server":alias,
+        }));
         match load_mcp_tools(config) {
             Ok(loaded) => {
-                emit_json(serde_json::json!({
-                    "type":"mcp.connected", "timestamp":timestamp(), "server":alias,
+                lifecycle.observe(serde_json::json!({
+                    "type":"mcp.completed", "timestamp":timestamp(), "server":alias,
                     "protocolVersion":loaded.protocol_version, "toolCount":loaded.tools.len(),
                     "durationMs":connection_started.elapsed().as_secs_f64() * 1000.0,
+                    "outcome":"succeeded",
                 }));
                 loaded_mcp.0.push(loaded);
             }
             Err(error) => {
-                let cause = mcp_failure_cause(&error);
-                emit_json(serde_json::json!({
-                    "type":"mcp.failed", "timestamp":timestamp(), "server":alias,
-                    "stage":"connect", "cause":cause,
+                lifecycle.observe(serde_json::json!({
+                    "type":"mcp.completed", "timestamp":timestamp(), "server":alias,
+                    "durationMs":connection_started.elapsed().as_secs_f64() * 1000.0,
+                    "outcome":"failed", "errorType":mcp_failure_cause(&error),
                 }));
-                emit_json(serde_json::json!({
-                    "type":"run.completed", "timestamp":timestamp(),
-                    "durationMs":started.elapsed().as_secs_f64() * 1000.0,
-                    "result":{
-                        "status":"failed", "cause":"mcp_setup_error",
-                        "message":format!("MCP {alias} failed: {cause}"), "sessionId":session_id,
-                        "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
-                    },
-                }));
+                complete_startup(
+                    &lifecycle,
+                    startup_started,
+                    "failed",
+                    Some("mcp_setup_error"),
+                );
                 return Ok(1);
             }
         }
     }
 
-    let skills = load_skills(parsed.extras, &cwd)?;
-    let instructions = load_project_instructions(&cwd);
     let mut agent = new_agent(skills, Some(session), instructions, &cwd);
     agent.local_tools = parsed.plugins;
     agent.mcp_tools = loaded_mcp
@@ -213,30 +275,15 @@ fn run_json_cli(parsed: CliArgs) -> Result<i32, String> {
         .iter()
         .flat_map(|loaded| loaded.tools.clone())
         .collect();
-    agent.on_event = Arc::new(emit_json);
+    agent.set_lifecycle(lifecycle.clone());
+    complete_startup(&lifecycle, startup_started, "succeeded", None);
     let outcome = (|| {
         if !parsed.session_id.is_empty() {
             agent.resume_session()?;
         }
         agent.run_agent_loop(&parsed.prompt)
     })();
-    let usage = usage_json(agent.usage);
-    let result = match outcome {
-        Ok(answer) => serde_json::json!({
-            "status":if answer == "Operation aborted." { "cancelled" } else { "succeeded" },
-            "answer":answer, "sessionId":session_id, "usage":usage,
-        }),
-        Err(error) => serde_json::json!({
-            "status":"failed", "cause":"agent_error", "message":error,
-            "sessionId":session_id, "usage":usage,
-        }),
-    };
-    let failed = result["status"] == "failed";
-    emit_json(serde_json::json!({
-        "type":"run.completed", "timestamp":timestamp(),
-        "durationMs":started.elapsed().as_secs_f64() * 1000.0, "result":result,
-    }));
-    Ok(if failed { 1 } else { 0 })
+    Ok(if outcome.is_ok() { 0 } else { 1 })
 }
 
 fn run_cli(args: Vec<String>) -> Result<i32, String> {
@@ -251,28 +298,98 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
     if parsed.json {
         return run_json_cli(parsed);
     }
-    let configs = load_mcp_configs(&parsed.mcp)?;
-    let mut loaded_mcp = ActiveMcp(Vec::new());
-    for config in configs {
-        let alias = config.alias().to_string();
-        let loaded =
-            load_mcp_tools(config).map_err(|error| format!("MCP {alias} failed: {error}"))?;
-        loaded_mcp.0.push(loaded);
-    }
+    let lifecycle = create_lifecycle(false);
+    let _active_lifecycle = ActiveLifecycle(lifecycle.clone());
+    let startup_started = Instant::now();
+    lifecycle.observe(serde_json::json!({
+        "type":"startup.started", "timestamp":timestamp(), "model":model_name(),
+        "runtime":"rust", "plugins":parsed.plugins, "mcp":parsed.mcp,
+    }));
+    let configs = match load_mcp_configs(&parsed.mcp) {
+        Ok(configs) => configs,
+        Err(error) => {
+            complete_startup(
+                &lifecycle,
+                startup_started,
+                "failed",
+                Some("startup_setup_error"),
+            );
+            return Err(error);
+        }
+    };
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let cwd = cwd.to_string_lossy().to_string();
     let _active_bg = ActiveBg { cwd: cwd.clone() };
-    let skills = load_skills(parsed.extras.clone(), &cwd)?;
+    let skills = match load_skills(parsed.extras.clone(), &cwd) {
+        Ok(skills) => skills,
+        Err(error) => {
+            complete_startup(
+                &lifecycle,
+                startup_started,
+                "failed",
+                Some("startup_setup_error"),
+            );
+            return Err(error);
+        }
+    };
     let instructions = load_project_instructions(&cwd);
-
-    let session = if parsed.session_id.is_empty() {
-        Session::create_new(std::path::Path::new(&cwd), &model_name())?
+    let session = match if parsed.session_id.is_empty() {
+        Session::create_new(std::path::Path::new(&cwd), &model_name())
     } else {
-        Session::open(&parsed.session_id, std::path::Path::new(&cwd))?
+        Session::open(&parsed.session_id, std::path::Path::new(&cwd))
+    } {
+        Ok(session) => session,
+        Err(error) => {
+            complete_startup(
+                &lifecycle,
+                startup_started,
+                "failed",
+                Some("startup_setup_error"),
+            );
+            return Err(error);
+        }
     };
     let session_id = session.id.clone();
     let session_path = session.path.to_string_lossy().into_owned();
     let is_restored = !parsed.session_id.is_empty();
+    lifecycle.observe(serde_json::json!({
+        "type":"session.attached", "timestamp":timestamp(), "sessionId":session_id,
+        "resumed":is_restored,
+    }));
+    let mut loaded_mcp = ActiveMcp(Vec::new());
+    for config in configs {
+        let alias = config.alias().to_string();
+        let connection_started = Instant::now();
+        lifecycle.observe(serde_json::json!({
+            "type":"mcp.started", "timestamp":timestamp(), "server":alias,
+        }));
+        match load_mcp_tools(config) {
+            Ok(loaded) => {
+                lifecycle.observe(serde_json::json!({
+                    "type":"mcp.completed", "timestamp":timestamp(), "server":alias,
+                    "protocolVersion":loaded.protocol_version, "toolCount":loaded.tools.len(),
+                    "durationMs":connection_started.elapsed().as_secs_f64() * 1000.0,
+                    "outcome":"succeeded",
+                }));
+                loaded_mcp.0.push(loaded);
+            }
+            Err(error) => {
+                let cause = mcp_failure_cause(&error);
+                lifecycle.observe(serde_json::json!({
+                    "type":"mcp.completed", "timestamp":timestamp(), "server":alias,
+                    "durationMs":connection_started.elapsed().as_secs_f64() * 1000.0,
+                    "outcome":"failed", "errorType":cause,
+                }));
+                complete_startup(
+                    &lifecycle,
+                    startup_started,
+                    "failed",
+                    Some("mcp_setup_error"),
+                );
+                return Err(format!("MCP {alias} failed: {cause}"));
+            }
+        }
+    }
 
     let mut agent = new_agent(skills, Some(session), instructions, &cwd);
     agent.local_tools = parsed.plugins.clone();
@@ -281,6 +398,8 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
         .iter()
         .flat_map(|loaded| loaded.tools.clone())
         .collect();
+    agent.set_lifecycle(lifecycle.clone());
+    complete_startup(&lifecycle, startup_started, "succeeded", None);
     let agent = Arc::new(Mutex::new(agent));
     let mut term = Terminal::from_stdin(Box::new(std::io::stdout()));
     let out = term.output();

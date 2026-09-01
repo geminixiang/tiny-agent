@@ -7,7 +7,7 @@ fn contract() -> serde_json::Value {
     serde_json::from_str(
         &std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../schemas/monitoring/json-lifecycle-contract.json"),
+                .join("../schemas/monitoring/execution-lifecycle-contract.json"),
         )
         .unwrap(),
     )
@@ -47,11 +47,19 @@ fn json_mode_emits_one_shot_lifecycle_without_tui_output() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0]["type"], "run.started");
-    assert_eq!(events[1]["type"], "run.completed");
-    assert_eq!(events[1]["result"]["status"], "failed");
-    assert_eq!(events[1]["result"]["cause"], "agent_error");
+    let types = [
+        "startup.started",
+        "session.attached",
+        "startup.completed",
+        "operation.started",
+        "model.started",
+        "model.completed",
+        "operation.completed",
+    ];
+    assert_eq!(events.len(), types.len());
+    for (event, expected) in events.iter().zip(types) {
+        assert_eq!(event["type"], expected);
+    }
 }
 
 #[test]
@@ -68,12 +76,27 @@ fn json_mode_matches_shared_successful_lifecycle() {
                 .unwrap();
             let mut request = Vec::new();
             let mut buffer = [0_u8; 4096];
-            loop {
+            let header_end = loop {
                 let count = stream.read(&mut buffer).unwrap();
                 request.extend_from_slice(&buffer[..count]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
                 }
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(str::trim)
+                        .map(str::to_string)
+                })
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            while request.len() - header_end < content_length {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
             }
             let body = serde_json::to_vec(&response).unwrap();
             write!(
@@ -121,22 +144,9 @@ fn json_mode_matches_shared_successful_lifecycle() {
         for key in expected["required"].as_array().unwrap() {
             assert!(actual.get(key.as_str().unwrap()).is_some());
         }
-        for key in ["usage", "toolCallId", "tool", "ok"] {
-            if expected.get(key).is_some() {
-                assert_eq!(actual[key], expected[key]);
-            }
-        }
-        if let Some(result) = expected.get("result") {
-            for (key, value) in result.as_object().unwrap() {
-                assert_eq!(actual["result"][key], *value);
-            }
-            if let Some(required) = expected["resultRequired"].as_array() {
-                for key in required {
-                    assert!(actual["result"].get(key.as_str().unwrap()).is_some());
-                }
-            }
-            if let Some(usage) = expected.get("resultUsage") {
-                assert_eq!(actual["result"]["usage"], *usage);
+        for (key, value) in expected.as_object().unwrap() {
+            if key != "type" && key != "required" {
+                assert_eq!(actual[key], *value, "event {} field {key}", actual["type"]);
             }
         }
         if let Some(duration) = actual.get("durationMs") {

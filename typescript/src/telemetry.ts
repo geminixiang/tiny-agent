@@ -18,6 +18,7 @@ export class OpenTelemetryMonitor implements LifecycleSink {
     private readonly models = new Map<string, Span>();
     private readonly tools = new Map<string, Span>();
     private readonly mcp = new Map<string, Span>();
+    private model?: string;
 
     constructor(
         private readonly tracer: Tracer,
@@ -116,10 +117,10 @@ export class OpenTelemetryMonitor implements LifecycleSink {
 
     private startStartup(event: Extract<LifecycleEvent, { type: "startup.started" }>) {
         if (this.startup) endSpan(this.startup.span, "effect_unknown");
+        this.model = event.model;
         const span = this.tracer.startSpan("tiny.startup", {
             startTime: eventTime(event),
             attributes: {
-                "gen_ai.request.model": event.model,
                 "tiny.runtime.language": event.runtime,
                 "tiny.plugin.count": event.plugins.length,
                 "tiny.mcp.server_count": event.mcp.length,
@@ -168,6 +169,10 @@ export class OpenTelemetryMonitor implements LifecycleSink {
         const span = this.tracer.startSpan("tiny.agent.operation", {
             startTime: eventTime(event),
             attributes: {
+                "openinference.span.kind": "AGENT",
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.conversation.id": event.sessionId,
+                "session.id": event.sessionId,
                 "tiny.session.id": event.sessionId,
                 "tiny.operation.id": event.operationId,
                 "tiny.operation.kind": event.operationKind,
@@ -185,7 +190,13 @@ export class OpenTelemetryMonitor implements LifecycleSink {
             "tiny.model.request",
             {
                 startTime: eventTime(event),
-                attributes: {
+                attributes: compactAttributes({
+                    "openinference.span.kind": "LLM",
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.conversation.id": event.sessionId,
+                    "gen_ai.request.model": this.model,
+                    "llm.model_name": this.model,
+                    "session.id": event.sessionId,
                     "tiny.session.id": event.sessionId,
                     "tiny.operation.id": event.operationId,
                     "tiny.operation.kind": event.operationKind,
@@ -193,7 +204,7 @@ export class OpenTelemetryMonitor implements LifecycleSink {
                     "tiny.attempt.id": event.attemptId,
                     "tiny.attempt.number": event.attempt,
                     "tiny.recovery": event.recovery,
-                },
+                }),
             },
             parent.context,
         );
@@ -224,14 +235,19 @@ export class OpenTelemetryMonitor implements LifecycleSink {
             {
                 startTime: eventTime(event),
                 attributes: {
+                    "openinference.span.kind": "TOOL",
+                    "gen_ai.operation.name": "execute_tool",
+                    "gen_ai.conversation.id": event.sessionId,
+                    "gen_ai.tool.call.id": event.toolCallId,
+                    "gen_ai.tool.name": event.tool,
+                    "session.id": event.sessionId,
+                    "tool.name": event.tool,
                     "tiny.session.id": event.sessionId,
                     "tiny.operation.id": event.operationId,
                     "tiny.step.id": event.stepId,
                     "tiny.attempt.id": event.attemptId,
                     "tiny.parent_attempt.id": event.parentAttemptId,
                     "tiny.tool.started.id": event.toolStartedId,
-                    "gen_ai.tool.call.id": event.toolCallId,
-                    "gen_ai.tool.name": event.tool,
                     "tiny.recovery": event.recovery,
                 },
             },
@@ -280,9 +296,10 @@ export async function createTelemetry(env: NodeJS.ProcessEnv = process.env): Pro
     if (!telemetryEnabled(env)) return noTelemetry;
     try {
         const detected = await detectResources({ detectors: [envDetector] });
+        const serviceName = env.OTEL_SERVICE_NAME || "tiny-ts";
         const resource = defaultResource()
             .merge(detected)
-            .merge(resourceFromAttributes({ "service.name": env.OTEL_SERVICE_NAME || "tiny-ts" }));
+            .merge(resourceFromAttributes({ "service.name": serviceName, "openinference.project.name": serviceName }));
         const provider = new NodeTracerProvider({
             resource,
             spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter())],
@@ -305,9 +322,17 @@ function eventTime(event: { timestamp: string }) {
 }
 
 function usageAttributes(usage: Usage | undefined) {
+    const input = usage ? usage.input + usage.cacheRead + usage.cacheWrite : undefined;
+    const total = input === undefined || usage === undefined ? undefined : input + usage.output;
     return {
-        "gen_ai.usage.input_tokens": usage?.input,
+        "gen_ai.usage.input_tokens": input,
         "gen_ai.usage.output_tokens": usage?.output,
+        "gen_ai.usage.cache_read.input_tokens": usage?.cacheRead,
+        "gen_ai.usage.cache_creation.input_tokens": usage?.cacheWrite,
+        "llm.token_count.prompt": input,
+        "llm.token_count.completion": usage?.output,
+        "llm.token_count.total": total,
+        "tiny.usage.input_tokens": usage?.input,
         "tiny.usage.cache_read_tokens": usage?.cacheRead,
         "tiny.usage.cache_write_tokens": usage?.cacheWrite,
     };

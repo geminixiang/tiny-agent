@@ -16,6 +16,7 @@ from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
 from .http import close_writer, read_http_response, remaining, wait_owned
+from .lifecycle import ExecutionLifecycle
 from .session import Session, environment_identity, uuid7
 from .session_recovery import plan_recovery
 from .session_reducer import configuration_digest, source_digest
@@ -555,8 +556,11 @@ async def execute_tool(name: str, args: dict, cancelled: asyncio.Event | None = 
 
 
 class Agent:
-    def __init__(self, skills: list[dict] | None = None, session: Session | None = None, instructions: str = "", requester: Callable | None = None, on_tool: Callable = lambda event: None, on_event: Callable = lambda event: None, tools: list[dict] | None = None):
+    def __init__(self, skills: list[dict] | None = None, session: Session | None = None, instructions: str = "", requester: Callable | None = None, on_tool: Callable = lambda event: None, on_event: Callable = lambda event: None, tools: list[dict] | None = None, lifecycle: ExecutionLifecycle | None = None):
         self.skills, self.session, self.requester, self.on_tool, self.on_event = skills or [], session, requester, on_tool, on_event
+        self.lifecycle = lifecycle or ExecutionLifecycle()
+        if session: session.observe_commits(self.lifecycle.committed)
+        self.recovering = False
         self.tools = tools if tools is not None else TOOL_DEFINITIONS
         self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
         self.cancelled: asyncio.Event | None = None
@@ -667,9 +671,22 @@ class Agent:
 
     async def resume_session(self) -> str | None:
         if not self.session: return None
+        if self.session.load()["operation"]["kind"] == "idle":
+            self._restore_projection()
+            return None
+        self.recovering = True
+        try: return await self._resume_session()
+        finally: self.recovering = False
+
+    async def _resume_session(self) -> str | None:
         self._restore_projection()
+        attached: set[str] = set()
         while self.session.load()["operation"]["kind"] != "idle":
             state = self.session.load()
+            operation = state["operation"]
+            if operation["operationId"] not in attached:
+                attached.add(operation["operationId"])
+                self.lifecycle.observe({"type": "recovery.attached", "timestamp": timestamp(), "operationId": operation["operationId"], "operationKind": operation["kind"]})
             operation_id = state["operation"]["operationId"]
             action = plan_recovery(state, self._current_recovery_configuration())
             if action["type"] == "blocked":
@@ -761,6 +778,13 @@ class Agent:
         assert result_id is not None
 
         started = time.monotonic()
+        physical_attempt_id = uuid7()
+        parent_attempt_id = self.session.load()["operation"].get("step", {}).get("attemptId", "")
+        self.lifecycle.observe({
+            "type": "tool.started", "timestamp": timestamp(), "operationId": operation_id,
+            "stepId": step_id, "attemptId": physical_attempt_id, "parentAttemptId": parent_attempt_id,
+            "toolStartedId": started_id, "toolCallId": call["id"], "tool": name, "recovery": self.recovering,
+        })
         self.on_event({"type": "tool.started", "timestamp": timestamp(), "toolCallId": call["id"], "tool": name})
         self.on_tool({"phase": "start", "name": name, "args": args})
         cancelled = self.begin(operation_id, "tool", call["id"])

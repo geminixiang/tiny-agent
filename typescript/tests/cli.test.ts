@@ -10,10 +10,7 @@ import { startTestMcpServer } from "./support/mcp-server.js";
 const cli = resolve("src/cli.ts"),
     loader = resolve("node_modules/tsx/dist/loader.mjs");
 const jsonLifecycleContract = JSON.parse(
-    await readFile(
-        new URL("../../schemas/monitoring/typescript-execution-lifecycle-contract.json", import.meta.url),
-        "utf8",
-    ),
+    await readFile(new URL("../../schemas/monitoring/execution-lifecycle-contract.json", import.meta.url), "utf8"),
 );
 
 function envWithoutKey() {

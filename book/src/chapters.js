@@ -123,6 +123,21 @@ export const chapters = [
             "多租戶需要專用 execution capsule；tiny-agent 本身不提供 tenant isolation。",
         ],
     },
+    {
+        slug: "09-committed-lifecycle-telemetry",
+        part: "第四部｜走向 Production",
+        title: "Committed Lifecycle 與 Phoenix Tracing",
+        description: "從 Session committed facts 投影跨語言 lifecycle，並用 OpenTelemetry、OpenInference 與 Phoenix 安全觀察 Agent trace。",
+        file: "09-committed-lifecycle-telemetry.html",
+        minutes: 22,
+        takeaways: [
+            "Append-only Session facts 是 recovery authority；JSON、OTLP 與 Phoenix 都只是 lossy projection。",
+            "Logical terminal 只能由 committed settlement 推導；physical tool attempt 與 durable tool identity 必須分開。",
+            "OpenInference 的 AGENT、LLM、TOOL spans 以 Session ID 關聯，同時保留 tiny.* durable identities。",
+            "OTLP 採 metadata-first allowlist，不輸出 prompt、answer、tool payload、error message、endpoint 或 headers。",
+            "四語言以相同 lifecycle v2 ordering、recovery、identity、span 與 privacy contracts 驗證一致性。",
+        ],
+    },
 ];
 
 export const planned = [

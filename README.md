@@ -129,6 +129,13 @@ tiny-ts "讀取 README 並摘要"
 
 未設定 OTLP endpoint 時完全停用。Endpoint、headers、TLS 等只接受標準 `OTEL_*` 部署環境設定，不接受 model 或 tool 參數。JSON 與 OTLP 都投影同一個 lifecycle；logical terminal 只在 Session fact 寫入成功後發布。OTLP 預設只輸出 IDs、名稱、usage、outcome 等 metadata，不輸出 prompt、回答、tool arguments/results、error messages、request headers 或 endpoint。Exporter 與 flush 失敗不會改變 agent 執行結果；append-only Session facts 仍是 recovery 的唯一權威資料。
 
+OTLP spans 同時提供 OpenTelemetry GenAI 與 OpenInference metadata：Session 使用 `session.id`／`gen_ai.conversation.id`，operation、model、tool 分別標記為 `AGENT`、`LLM`、`TOOL`，並保留 `tiny.*` durable identities。這讓 Phoenix 等 AI observability backend 能直接建立 Session 與 Agent trace tree，而不改變 tiny-agent 的 lifecycle authority。Phoenix 本機範例：
+
+```bash
+uvx --from arize-phoenix phoenix serve
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006 OTEL_SERVICE_NAME=tiny-ts tiny-ts "讀取 README 並摘要"
+```
+
 ## 致謝
 
 Tiny-agent 受到 [Pi](https://github.com/earendil-works/pi) 對 agent loop、Tool、skills、compaction 與可理解工程設計的啟發。Tiny-agent 不是 Pi 的 fork 或移植。

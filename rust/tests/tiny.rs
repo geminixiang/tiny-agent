@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use tiny_agent_rust::lifecycle::{CallbackSink, ExecutionLifecycle, LifecycleSink};
 use tiny_agent_rust::*;
 
 fn temp_dir() -> String {
@@ -1017,19 +1018,33 @@ fn pending_safe_read_replays_once_then_closes_and_finishes_idempotently() {
     let tool_events = Arc::new(Mutex::new(Vec::new()));
     let captured_tools = tool_events.clone();
     agent.on_tool = Arc::new(move |event| captured_tools.lock().unwrap().push(event.phase));
-    let lifecycle = Arc::new(Mutex::new(Vec::new()));
-    let captured_lifecycle = lifecycle.clone();
-    agent.on_event = Arc::new(move |event| {
+    let lifecycle_events = Arc::new(Mutex::new(Vec::new()));
+    let captured_lifecycle = lifecycle_events.clone();
+    let sink: Arc<dyn LifecycleSink> = Arc::new(CallbackSink(Arc::new(move |event| {
         captured_lifecycle
             .lock()
             .unwrap()
             .push(event["type"].as_str().unwrap().to_string());
-    });
+    })));
+    let execution_lifecycle = ExecutionLifecycle::new(vec![sink]);
+    execution_lifecycle.observe(serde_json::json!({
+        "type":"session.attached", "timestamp":timestamp(),
+        "sessionId":agent.session.as_ref().unwrap().id, "resumed":true,
+    }));
+    agent.set_lifecycle(execution_lifecycle);
     agent.resume_session().unwrap();
     assert_eq!(*tool_events.lock().unwrap(), ["start", "end"]);
     assert_eq!(
-        *lifecycle.lock().unwrap(),
-        ["tool.started", "tool.completed", "model.completed"]
+        *lifecycle_events.lock().unwrap(),
+        [
+            "session.attached",
+            "operation.recovered",
+            "tool.started",
+            "tool.completed",
+            "model.started",
+            "model.completed",
+            "operation.completed",
+        ]
     );
     let state = agent.session.as_ref().unwrap().load().unwrap();
     assert!(matches!(

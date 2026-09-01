@@ -25,12 +25,13 @@ var sessionWriters = struct {
 type SessionStore struct {
 	ID, Path string
 
-	mu      sync.Mutex
-	file    *os.File
-	data    []byte
-	state   sessionState
-	nextSeq int
-	closed  bool
+	mu          sync.Mutex
+	file        *os.File
+	data        []byte
+	state       sessionState
+	nextSeq     int
+	closed      bool
+	onCommitted func([]map[string]any)
 }
 
 func environmentIdentity() (string, error) {
@@ -195,6 +196,12 @@ func openSessionStore(id string) (*SessionStore, error) {
 
 func (s *SessionStore) NewID(now time.Time) string { return uuid7(now) }
 
+func (s *SessionStore) ObserveCommits(observer func([]map[string]any)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onCommitted = observer
+}
+
 func (s *SessionStore) State() sessionState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -291,7 +298,16 @@ func (s *SessionStore) Commit(facts []map[string]any) error {
 		return err
 	}
 	s.data, s.state, s.nextSeq = candidate, state, s.nextSeq+len(facts)
+	notifyCommitted(s.onCommitted, transaction)
 	return nil
+}
+
+func notifyCommitted(observer func([]map[string]any), facts []map[string]any) {
+	if observer == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	observer(facts)
 }
 
 func nextSessionSeq(data []byte) int {

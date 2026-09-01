@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::lifecycle::ExecutionLifecycle;
 use crate::session::ConditionalAppend;
 pub use crate::session::Session;
 use crate::session_recovery::{CurrentConfiguration, CurrentTool, plan_recovery};
@@ -26,11 +27,13 @@ use crate::session_runtime::{
     tool_started, usage,
 };
 
+pub mod lifecycle;
 pub mod mcp;
 pub mod session;
 pub mod session_recovery;
 pub mod session_reducer;
 pub mod session_runtime;
+pub mod telemetry;
 pub mod terminal;
 
 pub const DEFAULT_MODEL: &str = "openai/gpt-5.6-luna";
@@ -467,9 +470,11 @@ pub struct Agent {
     pub client: Arc<ureq::Agent>,
     pub on_tool: Arc<dyn Fn(ToolEvent) + Send + Sync>,
     pub on_event: Arc<dyn Fn(serde_json::Value) + Send + Sync>,
+    pub lifecycle: Arc<ExecutionLifecycle>,
     pub cwd: String,
     pub local_tools: Vec<String>,
     pub mcp_tools: Vec<mcp::McpTool>,
+    recovering: bool,
     abort_coordination: Arc<(Mutex<AbortCoordination>, Condvar)>,
 }
 
@@ -512,12 +517,14 @@ pub fn new_agent(
         client: Arc::new(open_router_agent()),
         on_tool: Arc::new(|_| {}),
         on_event: Arc::new(|_| {}),
+        lifecycle: ExecutionLifecycle::new(Vec::new()),
         cwd: cwd.to_string(),
         local_tools: local_tool_names()
             .iter()
             .map(|name| (*name).to_string())
             .collect(),
         mcp_tools: Vec::new(),
+        recovering: false,
         abort_coordination: Arc::new((Mutex::new(AbortCoordination::NonDurable), Condvar::new())),
     }
 }
@@ -550,10 +557,15 @@ fn api_key() -> String {
 }
 
 pub fn timestamp() -> String {
-    let now = SystemTime::now()
+    let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let seconds = now.as_secs() as i64;
+        .unwrap_or_default()
+        .as_millis() as u64;
+    timestamp_at(millis)
+}
+
+pub(crate) fn timestamp_at(millis: u64) -> String {
+    let seconds = (millis / 1000) as i64;
     let days = seconds.div_euclid(86_400);
     let day_seconds = seconds.rem_euclid(86_400);
     let (year, month, day) = civil_date(days);
@@ -562,7 +574,7 @@ pub fn timestamp() -> String {
         day_seconds / 3_600,
         day_seconds / 60 % 60,
         day_seconds % 60,
-        now.subsec_millis(),
+        millis % 1000,
     )
 }
 
@@ -581,7 +593,32 @@ fn civil_date(days_since_epoch: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
+fn operation_identity(operation: &OperationState) -> Option<(&str, &str)> {
+    match operation {
+        OperationState::Run { operation_id, .. } => Some((operation_id, "run")),
+        OperationState::Compaction { operation_id, .. } => Some((operation_id, "compaction")),
+        OperationState::Idle => None,
+    }
+}
+
+fn operation_attempt_id(operation: &OperationState) -> Option<&str> {
+    match operation {
+        OperationState::Run { step, .. } | OperationState::Compaction { step, .. } => {
+            step.as_ref().map(|value| value.attempt_id.as_str())
+        }
+        OperationState::Idle => None,
+    }
+}
+
 impl Agent {
+    pub fn set_lifecycle(&mut self, lifecycle: Arc<ExecutionLifecycle>) {
+        if let Some(session) = &self.session {
+            let commits = lifecycle.clone();
+            session.observe_commits(Arc::new(move |facts| commits.committed(facts)));
+        }
+        self.lifecycle = lifecycle;
+    }
+
     pub fn abort_handle(&self) -> AbortHandle {
         if let Ok(mut state) = self.abort_coordination.0.lock() {
             *state = AbortCoordination::Waiting;
@@ -1055,10 +1092,16 @@ impl Agent {
         arguments: serde_json::Map<String, serde_json::Value>,
         args: ToolArgs,
     ) -> Result<DurableExecution, String> {
-        let started = Instant::now();
-        (self.on_event.as_ref())(serde_json::json!({
-            "type":"tool.started", "timestamp":timestamp(),
-            "toolCallId":tool_call_id, "tool":name,
+        let physical_attempt_id = uuid7();
+        let state = self.session.as_ref().unwrap().load()?;
+        let parent_attempt_id = operation_attempt_id(&state.operation)
+            .unwrap_or_default()
+            .to_string();
+        let recovery = self.recovering;
+        self.lifecycle.observe(serde_json::json!({
+            "type":"tool.started", "timestamp":timestamp(), "operationId":operation_id,
+            "stepId":step_id, "attemptId":physical_attempt_id, "parentAttemptId":parent_attempt_id,
+            "toolStartedId":started_id, "toolCallId":tool_call_id, "tool":name, "recovery":recovery,
         }));
         (self.on_tool.as_ref())(ToolEvent {
             phase: "start".into(),
@@ -1081,16 +1124,15 @@ impl Agent {
                 Some(tool_call_id),
             )])?;
         }
-        let (content, result_type, ok) = if aborted {
+        let (content, result_type) = if aborted {
             (
                 crate::session_recovery::SYNTHETIC_INTERRUPTED.to_string(),
                 "synthetic",
-                false,
             )
         } else {
             match result {
-                Ok(content) => (content, "success", true),
-                Err(error) => (format!("Error: {error}"), "error", false),
+                Ok(content) => (content, "success"),
+                Err(error) => (format!("Error: {error}"), "error"),
             }
         };
         (self.on_tool.as_ref())(ToolEvent {
@@ -1099,11 +1141,6 @@ impl Agent {
             args,
             result: content.clone(),
         });
-        (self.on_event.as_ref())(serde_json::json!({
-            "type":"tool.completed", "timestamp":timestamp(),
-            "toolCallId":tool_call_id, "tool":name,
-            "durationMs":started.elapsed().as_secs_f64() * 1000.0, "ok":ok,
-        }));
         self.session.as_ref().unwrap().append(vec![tool_result(
             result_id,
             step_id,
@@ -1164,7 +1201,10 @@ impl Agent {
             self.restore_latest_cache_hit_rate()?;
             return Ok(());
         }
-        self.recover_session()?;
+        self.recovering = true;
+        let recovery = self.recover_session();
+        self.recovering = false;
+        recovery?;
         let state = self.session.as_ref().unwrap().load()?;
         let projection = project_idle(&state, &system_prompt)?;
         self.messages = projection.messages;
@@ -1191,6 +1231,13 @@ impl Agent {
     }
 
     fn recover_session(&mut self) -> Result<(), String> {
+        let state = self.session.as_ref().unwrap().load()?;
+        if let Some((operation_id, operation_kind)) = operation_identity(&state.operation) {
+            self.lifecycle.observe(serde_json::json!({
+                "type":"recovery.attached", "timestamp":timestamp(),
+                "operationId":operation_id, "operationKind":operation_kind,
+            }));
+        }
         loop {
             let state = self.session.as_ref().unwrap().load()?;
             if matches!(state.operation, OperationState::Idle) {
@@ -1532,23 +1579,9 @@ impl Agent {
         }
         let body_str =
             serde_json::to_string(&serde_json::Value::Object(body)).map_err(|e| e.to_string())?;
-        let started = Instant::now();
         let text = request_text_cancellable(&self.client, &self.endpoint, body_str, &self.cancel)?;
         let data = parse_model_body(&text)?;
         let prompt = data.usage.input + data.usage.cache_read + data.usage.cache_write;
-        let mut event_usage = serde_json::json!({
-            "input":data.usage.input, "output":data.usage.output,
-            "cacheRead":data.usage.cache_read, "cacheWrite":data.usage.cache_write,
-        });
-        if prompt > 0 {
-            event_usage["cacheHitRate"] =
-                serde_json::json!(data.usage.cache_read as f64 / prompt as f64 * 100.0);
-        }
-        (self.on_event.as_ref())(serde_json::json!({
-            "type":"model.completed", "timestamp":timestamp(),
-            "durationMs":started.elapsed().as_secs_f64() * 1000.0,
-            "usage":event_usage,
-        }));
         self.add_usage(data.usage, update_cache_rate && prompt > 0);
         if update_cache_rate && prompt > 0 {
             self.usage.cache_hit_rate = data.usage.cache_read as f64 / prompt as f64 * 100.0;

@@ -1,0 +1,179 @@
+<p class="lead">
+    <strong>一句話掌握本章核心</strong>：tiny-agent 不直接把 scattered callbacks 當成 trace，而是先讓 append-only Session 提交事實，再由同一個 <strong>committed lifecycle projector</strong> 產生 JSON 與 OpenTelemetry/OpenInference 投影；Phoenix 只是讀取這份投影的 backend，不是執行結果或 recovery 的權威。
+</p>
+
+<h2 id="problem">為什麼一般 callback tracing 不夠？</h2>
+<p>
+    Agent 的一次工作不只是一個 HTTP request。它可能先建立或開啟 Session、連接 MCP、呼叫 model、接受多個 tool intent、執行外部 effect、再次呼叫 model，最後才完成 operation；過程也可能被 Esc 取消或在 process crash 後恢復。若每個 branch 各自發出 <code>started</code>／<code>completed</code>，就容易出現一個危險反轉：trace 已宣稱 tool 成功，但保存結果的 Session append 尚未成功。
+</p>
+<p>
+    tiny-agent 因此把「發生過什麼」分成三層。每層回答不同問題，不能互相取代：
+</p>
+<table>
+    <thead>
+        <tr><th>層次</th><th>回答的問題</th><th>例子</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>Durable truth</strong></td><td>Crash 後仍可相信哪些 logical facts？</td><td><code>runStarted</code>、<code>stepAttempt</code>、<code>toolStarted</code>、result entry、<code>operationFinished</code></td></tr>
+        <tr><td><strong>Physical observation</strong></td><td>這個 process 此刻真的開始了哪個 effect？</td><td>CLI/MCP startup、實際 tool execution attempt、recovery attach</td></tr>
+        <tr><td><strong>Projection</strong></td><td>人與 backend 要如何觀察上述事實？</td><td><code>--json</code> lifecycle events、OTLP spans、Phoenix trace tree</td></tr>
+    </tbody>
+</table>
+
+<aside class="note">
+    <strong>最重要的邊界</strong>：Session JSONL 與 reducer 決定 recovery truth；JSON、OTLP、Phoenix、exporter 與 flush 都是 lossy observation。觀測失敗不得把成功的 agent operation 改成失敗，觀測成功也不得把未提交的 effect 說成已完成。
+</aside>
+
+<h2 id="architecture">Committed lifecycle projector 的資料流</h2>
+<p>
+    四個語言版本使用同一個小型架構：Session append 成功後，把本次 committed facts 交給 lifecycle projector；只有沒有合適 durable terminal 的即時事件，才走 observation seam。Projector 再 fan out 到 JSON sink 與 OpenTelemetry sink。
+</p>
+<pre data-lang="text"><code>CLI / Agent / Recovery
+        │
+        ├── startup、recovery attach、physical tool start ── observe(...)
+        │
+        └── Session append/write 成功 ──────────────────── committed(facts)
+                                                              │
+                                                Execution Lifecycle Projector
+                                                   │                    │
+                                                   ▼                    ▼
+                                             JSON lifecycle       OTLP/OpenInference
+                                                   │                    │
+                                                stdout          Collector / Phoenix
+
+Session JSONL + reducer ─────────────── recovery authority（不由右側反向修改）</code></pre>
+<p>
+    這不是第二個 reducer。Projector 只辨識 lifecycle 需要的 fact subset、關聯 durable IDs、計算 duration 與確保 terminal 至多一次；transcript reconstruction、replay safety、recovery planning 仍留在 Session reducer 與 planner。
+</p>
+
+<h2 id="ordering">從 commit 推導 canonical ordering</h2>
+<p>
+    一次包含 <code>read</code> tool 的正常 one-shot run，canonical lifecycle 順序如下。Startup 與 Agent operation 分開，因為 MCP setup 失敗時可能根本還沒有 committed operation：
+</p>
+<pre data-lang="text"><code>startup.started
+session.attached
+startup.completed
+operation.started          ← runStarted / compactionStarted 已提交
+model.started              ← stepAttempt 已提交，model effect 才開始
+ model.completed           ← assistant tool-call entry 已提交
+tool.admitted              ← durable toolStarted intent 已提交
+tool.started               ← 這個 process 的 physical execution attempt
+ tool.completed            ← tool result entry 已提交
+model.started
+ model.completed           ← final assistant entry 已提交
+operation.completed        ← operationFinished 已提交</code></pre>
+<p>
+    <code>tool.admitted</code> 與 <code>tool.started</code> 刻意分開。前者代表 logical tool intent，使用可跨 crash 保留的 <code>toolStartedId</code>；後者代表某次 physical attempt，使用新的 <code>attemptId</code>。Safe replay 會沿用 logical identity，但不能假裝 crash 前後是同一次 effect。
+</p>
+<table>
+    <thead>
+        <tr><th>Identity</th><th>生命週期</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>sessionId</code></td><td>跨多個 prompts 與 process</td><td>Conversation / Session correlation</td></tr>
+        <tr><td><code>operationId</code></td><td>一次 run 或 compaction</td><td>Agent root 與 durable operation</td></tr>
+        <tr><td><code>stepId</code>、model <code>attemptId</code></td><td>一次 logical model attempt</td><td>LLM span 與 retry correlation</td></tr>
+        <tr><td><code>toolStartedId</code></td><td>一次 durable tool intent</td><td>正常執行與 replay 共用的 logical identity</td></tr>
+        <tr><td>tool physical <code>attemptId</code></td><td>單一 process 內的一次 effect</td><td>區分原執行與 crash 後 replay</td></tr>
+        <tr><td><code>toolCallId</code></td><td>Provider transcript 中的 tool call</td><td>協定關聯，不當作全域 span identity</td></tr>
+    </tbody>
+</table>
+
+<h2 id="failure-recovery">Cancellation、crash 與 recovery 如何呈現？</h2>
+<p>
+    <code>cancel.requested</code> 是 observation event，不是 operation terminal。Esc 會先 durable append abort request，再 signal 目前的 model 或 tool；只有 <code>operationFinished</code> 提交後，projector 才發布 <code>operation.completed(outcome=cancelled)</code>。
+</p>
+<p>
+    Process crash 後，新的 process 無法可靠延續舊的 in-memory span context，也不應重播舊的 <code>operation.started</code>。它會發布 <code>operation.recovered</code>，沿用相同 durable <code>operationId</code>，但建立新的 recovery trace segment。若發現 crash 前未 reconcile 的 model attempt，會用 <code>model.reconciled</code> 描述恢復判斷，而不是虛構一個跨 process model span。
+</p>
+<p>
+    Shutdown 時仍開啟的 physical span 可以用 <code>effect_unknown</code> 收束，意思是「本 process 無法觀察 terminal」，不是替 Session 合成成功或失敗。這個區分讓 trace 誠實保留不確定性。
+</p>
+
+<h2 id="trace-tree">Phoenix 看到的 OpenInference trace tree</h2>
+<p>
+    OTLP sink 將 canonical lifecycle 映射成兩棵不同用途的樹：startup root 包含 MCP connection spans；每個 committed run 或 compaction 則有自己的 Agent operation root。Interactive Session 的多個 prompts 是以 Session ID 關聯的 sibling operations，不建立一個長時間不結束的 Session span。
+</p>
+<pre data-lang="text"><code>tiny.startup
+└── tiny.mcp.connect
+
+tiny.agent.operation                  openinference.span.kind = AGENT
+├── tiny.model.request                openinference.span.kind = LLM
+├── tiny.tool.execute                 openinference.span.kind = TOOL
+└── tiny.model.request                openinference.span.kind = LLM</code></pre>
+<p>
+    為了讓 Phoenix 與其他 AI observability backend 可直接分組，resource 同時設定 <code>service.name</code> 與 <code>openinference.project.name</code>；operation、model 與 tool spans 帶有 <code>AGENT</code>、<code>LLM</code>、<code>TOOL</code> kind。<code>session.id</code> 與 <code>gen_ai.conversation.id</code> 對應 durable Session，<code>tiny.*</code> attributes 則保留 operation、step、attempt 與 recovery identity。
+</p>
+<p>
+    Model name 只放在 LLM span，不放在 startup 或 tool span。Token 也保留兩種語意：OpenTelemetry/OpenInference 的 prompt tokens 是 uncached input 加上 cache read 與 cache write；<code>tiny.usage.input_tokens</code> 仍只代表 provider 回報的 uncached input，方便診斷 cache 行為而不混淆口徑。
+</p>
+
+<h2 id="privacy">Metadata-first 的隱私邊界</h2>
+<p>
+    OTLP 預設只輸出名稱、IDs、duration、usage、outcome、recovery 與有限的 error type。它不輸出 prompt、model answer、tool arguments、tool results、error message、MCP/OTLP endpoint、request headers 或 credentials。這能降低意外外洩，但不等於 backend 已具備完整的資料治理。
+</p>
+<aside class="warning">
+    <strong>不要混淆 JSON 與 OTLP 的受眾</strong>：<code>--json</code> 是 CLI 的機器可讀結果介面，canonical completion 可能包含 answer；OTLP 是送往共享 observability backend 的 metadata-first 投影。Production 仍要為 collector 與 Phoenix 設定 authentication、TLS、tenant binding、access control 與 retention。
+</aside>
+
+<h2 id="phoenix">動手使用 Phoenix backend</h2>
+<p>
+    以下範例會在本機啟動 Phoenix，並讓 tiny-agent 直接以 OTLP/HTTP 匯出 traces。先在第一個 terminal 啟動 backend：
+</p>
+<pre data-lang="sh"><code>uvx --from arize-phoenix phoenix serve</code></pre>
+<p>
+    Phoenix UI 與本機 OTLP endpoint 預設使用 <code>http://localhost:6006</code>。在第二個 terminal 設定 OpenRouter key 與標準 OpenTelemetry deployment environment，再執行任一語言版本：
+</p>
+<pre data-lang="sh"><code>export OPENROUTER_API_KEY=sk-or-...
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006
+export OTEL_SERVICE_NAME=tiny-ts
+
+tiny-ts "讀取 README 並摘要"</code></pre>
+<p>
+    將 service name 與 CLI 一起替換，即可分別觀察四個 runtime：
+</p>
+<pre data-lang="sh"><code>OTEL_SERVICE_NAME=tiny-ts tiny-ts "讀取 README 並摘要"
+OTEL_SERVICE_NAME=tiny-go tiny-go "讀取 README 並摘要"
+OTEL_SERVICE_NAME=tiny-py tiny-py "讀取 README 並摘要"
+OTEL_SERVICE_NAME=tiny-rs tiny-rs "讀取 README 並摘要"</code></pre>
+<p>
+    開啟 <a href="http://localhost:6006">Phoenix UI</a> 後，以 project/service、Session ID 或 operation ID 篩選。應能看到 Agent root、LLM children、Tool children、duration、outcome 與 token usage；不應看到 prompt、answer 或 tool payload。若同一 Session crash 後恢復，應看到帶相同 durable operation identity 的新 recovery segment，而不是一條偽造的跨 process span。
+</p>
+<aside class="note">
+    <strong>部署規則</strong>：未設定 <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> 或 traces endpoint 時，telemetry 完全停用；設定 <code>OTEL_SDK_DISABLED=true</code> 也會停用。Endpoint、headers、TLS 與 credential 只來自標準 <code>OTEL_*</code> 環境變數，不接受 model、tool 或 CLI task 內容注入。
+</aside>
+
+<h2 id="validation">如何驗證四語言沒有漂移？</h2>
+<p>
+    Cross-language parity 不是比較 class 名稱，而是比較 observable contract。固定 fixture 應讓四個 CLI 產生相同的 event types、ordering、required fields、outcomes 與 durable identity 關係；各語言再以 in-memory exporter 或 loopback OTLP server 驗證 span tree 與 privacy allowlist。
+</p>
+<ol>
+    <li><strong>Lifecycle contract</strong>：正常 run 的 ordering 符合 v2 schema；logical terminal 只在 committed settlement 後出現。</li>
+    <li><strong>Recovery contract</strong>：發布 <code>operation.recovered</code>／<code>model.reconciled</code>，不重播歷史 start，也不合成跨 process context。</li>
+    <li><strong>Identity contract</strong>：durable IDs 可跨 recovery 關聯，physical tool attempt ID 每次 effect 都不同。</li>
+    <li><strong>Span contract</strong>：AGENT、LLM、TOOL parentage、Session attributes、model placement 與 token arithmetic 一致。</li>
+    <li><strong>Privacy contract</strong>：以 sentinel prompt、answer、arguments、result、error message、endpoint 與 header 驗證 exported attributes 中完全不存在它們。</li>
+    <li><strong>Failure isolation</strong>：sink throw、exporter failure 與 flush failure 不改變 CLI result或 durable Session。</li>
+</ol>
+<pre data-lang="sh"><code># Repository 的離線驗證入口
+make test
+make check
+
+# Book build 也會檢查章節 metadata、HTML 與 assets
+npm --prefix book run build</code></pre>
+
+<h2 id="mental-model">最後的心智模型</h2>
+<p>
+    從左到右記住這條單向資料流即可：<strong>effect intent 先 durable commit，執行 effect，settlement 再 durable commit，lifecycle 投影 committed truth，backend 最後才顯示它</strong>。Realtime 的正確定義不是「搶在 Session append 完成前宣稱成功」，而是 start 在 effect 前可見，terminal 在 authoritative settlement 寫入成功後立刻可見。
+</p>
+<p class="closure">
+    <strong>本章收束</strong>：Phoenix 讓 Agent 執行變得容易閱讀；committed lifecycle 則確保容易閱讀的畫面仍忠於可恢復的事實。前者回答「我們看見什麼」，後者守住「系統真正承諾了什麼」。
+</p>
+
+<aside class="note">
+    <strong>延伸閱讀</strong>　
+    <a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">OpenTelemetry Generative AI semantic conventions</a>、
+    <a href="https://arize-ai.github.io/openinference/spec/semantic_conventions.html">OpenInference semantic conventions</a>、
+    <a href="https://arize.com/docs/phoenix">Arize Phoenix 文件</a>、
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/schemas/monitoring/execution-lifecycle-contract.json">tiny-agent cross-language lifecycle v2 contract</a>。
+</aside>

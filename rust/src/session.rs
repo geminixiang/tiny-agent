@@ -12,6 +12,7 @@ use crate::session_reducer::{SessionState, reduce_session};
 use crate::{UsageJSON, model_name, uuid7, uuid7_at};
 
 pub type SessionFact = Map<String, Value>;
+type CommittedObserver = Arc<dyn Fn(&[SessionFact]) + Send + Sync>;
 
 static WRITERS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
@@ -56,6 +57,7 @@ struct StoreInner {
     bytes: Vec<u8>,
     next_seq: u64,
     state: SessionState,
+    observer: CommittedObserver,
     closed: bool,
 }
 
@@ -110,6 +112,7 @@ impl Session {
                 bytes,
                 next_seq: 1,
                 state,
+                observer: Arc::new(|_| {}),
                 closed: false,
             })),
         })
@@ -189,6 +192,7 @@ impl Session {
                     bytes,
                     next_seq,
                     state,
+                    observer: Arc::new(|_| {}),
                     closed: false,
                 })),
             })
@@ -201,6 +205,10 @@ impl Session {
 
     pub fn allocate_id(&self) -> String {
         uuid7()
+    }
+
+    pub fn observe_commits(&self, observer: CommittedObserver) {
+        self.inner.lock().unwrap().observer = observer;
     }
 
     pub fn append(&self, facts: Vec<SessionFact>) -> Result<Vec<SessionFact>, String> {
@@ -569,6 +577,8 @@ fn append_locked(
     inner.bytes = candidate;
     inner.next_seq += committed.len() as u64;
     inner.state = state;
+    let observer = inner.observer.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(&committed)));
     Ok(committed)
 }
 

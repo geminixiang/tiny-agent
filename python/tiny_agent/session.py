@@ -44,6 +44,7 @@ class Session:
     def __init__(self, session_id: str, path: Path, file: BinaryIO, data: bytes, state: dict, next_seq: int = 1):
         self.id, self.path, self.file, self.data = session_id, path, file, data
         self.state, self.next_seq, self.lock, self.closed = state, next_seq, threading.Lock(), False
+        self.on_committed = lambda facts: None
 
     @classmethod
     def create(cls, cwd: Path = ROOT, now: datetime | None = None) -> Session:
@@ -108,6 +109,10 @@ class Session:
             file.close()
             raise
 
+    def observe_commits(self, observer) -> None:
+        with self.lock:
+            self.on_committed = observer
+
     def load(self) -> dict:
         with self.lock:
             if self.closed: raise ValueError("Session is closed")
@@ -161,6 +166,8 @@ class Session:
         state = reduce_session(candidate)
         self.file.write(line)
         self.data, self.state, self.next_seq = candidate, state, self.next_seq + len(committed)
+        try: self.on_committed(committed)
+        except Exception: pass
         return committed
 
     def close(self) -> None:
