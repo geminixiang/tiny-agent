@@ -185,7 +185,7 @@ async def load_mcp_tools(config: _McpConfig, cancelled: asyncio.Event | None = N
                 client = Client(
                     transport,
                     mode="auto",
-                    read_timeout_seconds=config.call_timeout_ms / 1000,
+                    read_timeout_seconds=startup_timeout_ms / 1000,
                     client_info=mcp_types.Implementation(name="tiny-agent", version="0.1.0"),
                 )
                 await stack.enter_async_context(client)

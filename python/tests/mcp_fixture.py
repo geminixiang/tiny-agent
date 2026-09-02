@@ -19,11 +19,13 @@ class McpFixture:
         pages: list[list[dict]] | None = None,
         sse_terminal_delay: float = 0,
         legacy: bool = False,
+        list_delay: float = 0,
     ):
         self.sse = sse
         self.chunked = chunked
         self.sse_terminal_delay = sse_terminal_delay
         self.legacy = legacy
+        self.list_delay = list_delay
         self.token = token
         self.http_error = http_error
         self.error_body = error_body
@@ -116,6 +118,7 @@ class McpFixture:
                         "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "fixture", "version": "1"}},
                     }
                 elif method == "tools/list":
+                    if fixture.list_delay: time.sleep(fixture.list_delay)
                     if fixture.pages is None: result = {"resultType": "complete", "tools": fixture.tools, "ttlMs": 0, "cacheScope": "private"}
                     else:
                         page = int(params.get("cursor", "0"))

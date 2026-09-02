@@ -202,7 +202,7 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
         finally: fixture.close()
 
     async def test_allowlist_bounds_mapping_timeout_and_cancellation(self):
-        fixture = McpFixture()
+        fixture = McpFixture(list_delay=0.05)
         try:
             loaded = await load_mcp_tools(McpConfig("fixture", fixture.url, allowed_tools=["slow"], call_timeout_ms=30))
             self.assertEqual(len(loaded.tools), 1)
