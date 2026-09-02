@@ -286,7 +286,17 @@ fn run_json_cli(parsed: CliArgs) -> Result<i32, String> {
     Ok(if outcome.is_ok() { 0 } else { 1 })
 }
 
+fn print_help() {
+    println!(
+        "tiny-rs - minimal AI coding agent\n\nUsage:\n  tiny-rs [OPTIONS] [PROMPT]\n\nOptions:\n  --json                 Run a one-shot prompt and emit JSON events\n  --session <ID>         Resume an existing session\n  --cwd <DIR>            Run in a different working directory\n  --skill <NAME>         Load an additional skill (repeatable)\n  --mcp <ALIAS[,ALIAS]>  Enable MCP server(s) (repeatable)\n  --plugin <NAME[,NAME]> Enable selected local plugin(s) (repeatable)\n  -h, --help             Show this help message\n\nInteractive commands:\n  /compact               Compact the current session\n  /skill:<NAME> [TEXT]   Run a loaded skill\n  /exit                  Exit the agent"
+    );
+}
+
 fn run_cli(args: Vec<String>) -> Result<i32, String> {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_help();
+        return Ok(0);
+    }
     let parsed = parse_args(args)?;
     if !parsed.cwd.is_empty() {
         let path = std::path::Path::new(&parsed.cwd);
