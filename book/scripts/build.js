@@ -191,7 +191,7 @@ async function main() {
     );
     await writeFile(
         join(out, "_headers"),
-        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self' ${architectureHashes.scripts}; style-src 'self' ${architectureHashes.styles}; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; frame-src https://www.youtube.com; object-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
+        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com ${architectureHashes.scripts}; style-src 'self' ${architectureHashes.styles}; img-src 'self' data: blob:; font-src 'self' data:; connect-src https://cloudflareinsights.com; frame-src 'self' https://www.youtube.com; object-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
     );
     await writeFile(join(out, "_redirects"), `/index.html / 301\n`);
     await writeFile(
