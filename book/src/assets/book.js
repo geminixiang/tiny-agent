@@ -65,6 +65,15 @@ addEventListener("scroll", updateProgress, { passive: true });
 addEventListener("resize", updateProgress);
 updateProgress();
 
+const architectureDialog = document.querySelector("#architecture-dialog");
+document.querySelector("[data-architecture-open]")?.addEventListener("click", () => {
+    if (architectureDialog instanceof HTMLDialogElement) architectureDialog.showModal();
+});
+architectureDialog?.querySelector("[data-architecture-close]")?.addEventListener("click", () => architectureDialog.close());
+architectureDialog?.addEventListener("click", (event) => {
+    if (event.target === architectureDialog) architectureDialog.close();
+});
+
 document.querySelectorAll("figure.data-anim").forEach((figure) => {
     const button = document.createElement("button");
     button.className = "anim-toggle";
