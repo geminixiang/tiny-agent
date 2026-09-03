@@ -59,7 +59,7 @@ const readTool: Tool = Object.freeze({
 
 <aside class="note">
     <strong>安全邊界：目前 File Tools 沒有 CWD containment</strong><br>
-    tiny-agent 的 <code>read</code>、<code>write</code>、<code>edit</code> 接受 cwd 外絕對路徑，也會跟隨 symlink；CLI 本身不建立 Docker、gVisor、namespace 或其他 OS sandbox。單純以字串前綴檢查 <code>/workspace</code> 確實會遭遇正規化、symlink 與 TOCTOU 問題，但這不代表應用程式永遠無法做安全解析：Linux <code>openat2()</code> 的 <code>RESOLVE_BENEATH</code>、<code>RESOLVE_IN_ROOT</code>、<code>RESOLVE_NO_SYMLINKS</code> 可提供 kernel-assisted 限制。敵對或多租戶工作仍應由外層 <strong>Execution Capsule</strong> 限定檔案系統、程序、資源與網路（詳見第 8 章）。
+    tiny-agent 的 <code>read</code>、<code>write</code>、<code>edit</code> 接受 cwd 外絕對路徑，也會跟隨 symlink；CLI 本身不建立 Docker、gVisor、namespace 或其他 OS sandbox。單純以字串前綴檢查 <code>/workspace</code> 確實會遭遇正規化、symlink 與 TOCTOU 問題，但這不代表應用程式永遠無法做安全解析：Linux <code>openat2()</code> 的 <code>RESOLVE_BENEATH</code>、<code>RESOLVE_IN_ROOT</code>、<code>RESOLVE_NO_SYMLINKS</code> 可提供 kernel-assisted 限制。敵對或多租戶工作仍應由外層 <strong>Execution Capsule</strong> 限定檔案系統、行程、資源與網路（詳見第 8 章）。
 </aside>
 
 <h2 id="validation">JSON Schema 不等於 Runtime Validation</h2>

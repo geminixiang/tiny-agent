@@ -2,12 +2,12 @@
     <strong>一句話掌握本章核心</strong>：tiny-agent 的 Chat Completions 配接器會由 Host 重送選入的 <strong>Transcript</strong> 以延續對話；其他 API 也可能提供 Server-managed State。無論狀態由誰管理，Provider 回傳的 Wire Format 都不應未經驗證地進入 Canonical Transcript：本專案以 <strong>正規化防線（Normalization Seam）</strong>只保留允許欄位。
 </p>
 
-<h2 id="mental-model">記憶體的本質：失憶的模型與忠實的錄音帶</h2>
+<h2 id="mental-model">狀態延續的本質：無對話記憶的模型與忠實的紀錄卷軸</h2>
 <p>
     對 tiny-agent 目前使用的 Chat Completions 模式，可想像模型每次通話都需要 Host 提供本輪有效 Context：System Instructions、選入的歷史、工具定義與結果。這個比喻不涵蓋所有 Endpoint；例如 OpenAI Responses API 可透過 <code>previous_response_id</code> 串接 Provider 管理的狀態。
 </p>
 <p>
-    在系統架構中，這個「從頭到尾念一遍的錄音帶」就是 <strong>Transcript</strong>。
+    在系統架構中，這個「依序重送歷程的紀錄卷軸」就是 <strong>Transcript</strong>。
 </p>
 
 <!-- [IMAGE_PROMPT_START]

@@ -145,7 +145,7 @@
         <tr><td><code>read</code></td><td>讀取 UTF-8 檔案內容</td><td>Node <code>readFile()</code> 後分頁回傳</td><td>限制回傳為 2,000 行 / 50KB；目前會先讀完整檔案，且不做 CWD 路徑限制</td></tr>
         <tr><td><code>write</code></td><td>建立新檔或覆寫檔案</td><td>Node <code>writeFile()</code></td><td>會直接覆寫且可操作 CWD 外路徑，呼叫者與部署層須提供授權與隔離</td></tr>
         <tr><td><code>edit</code></td><td>針對指定字串區段精準置換</td><td>精確字串比對與取代 (Exact Match)</td><td>要求每個目標在原檔恰好出現一次且 Edit 不重疊</td></tr>
-        <tr><td><code>bash</code></td><td>執行外部指令、編譯與測試</td><td>Node <code>exec()</code> 經 Shell 啟動子程序</td><td>有 Timeout 與輸出截斷，但不是 OS Sandbox</td></tr>
+        <tr><td><code>bash</code></td><td>執行外部指令、編譯與測試</td><td>Node <code>exec()</code> 經 Shell 啟動子行程 (Child Process)</td><td>有 Timeout 與輸出截斷，但不是 OS Sandbox</td></tr>
     </tbody>
 </table>
 

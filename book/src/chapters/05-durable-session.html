@@ -1,5 +1,5 @@
 <p class="lead">
-    <strong>一句話掌握本章核心</strong>：如果假設網路永遠正常、工具永遠成功、程序絕不崩潰，幾十行就能寫出 Agent；但生產環境的硬核挑戰在於<strong>崩潰之後仍能辨認已知與未知</strong>。tiny-agent 採用 WAL（Write-Ahead Logging）啟發的 append-only 設計：<strong>先記意圖（Intent），再發動副作用（Effect）</strong>。
+    <strong>一句話掌握本章核心</strong>：如果假設網路永遠正常、工具永遠成功、行程絕不崩潰，幾十行就能寫出 Agent；但生產環境的硬核挑戰在於<strong>崩潰之後仍能辨認已知與未知</strong>。tiny-agent 採用 WAL（Write-Ahead Logging）啟發的 append-only 設計：<strong>先記意圖（Intent），再發動副作用（Effect）</strong>。
 </p>
 
 <h2 id="mental-model">經典問題：被 <code>kill -9</code> 強制關閉後，指令到底執行了沒？</h2>
@@ -91,7 +91,7 @@
 
 <h2 id="store">深而小的 Storage 介面</h2>
 <p>
-    SessionStore 是標準的 <strong>Deep Module</strong>——以極簡的介面隱藏了極其複雜的交易流水號、ID 生成、隊列排程與尾端修復：
+    SessionStore 是標準的 <strong>Deep Module</strong>——以極簡的介面隱藏了極其複雜的交易流水號、ID 生成、佇列排程與尾端修復：
 </p>
 
 <pre data-lang="ts"><code>// 教學化摘錄；實際 public method 名稱與核心語意如下
@@ -142,7 +142,7 @@ cd typescript
 node --import tsx --test --test-name-pattern="repairs a torn tail" tests/session.test.ts</code></pre>
 
 <p class="bridge">
-    透過 WAL 順序與 append-only JSONL，tiny-agent 為正常 runtime 寫入提供可追溯、可驗證內部一致性的 session history；但沒有 MAC、signature、trusted timestamp 或外部 anchor，因此它不是能抵抗有寫檔權限攻擊者的「不可竄改合規 audit log」。當程序重啟並讀入整份日誌後，<strong>我們該如何從數百筆時序事件中計算目前狀態並決定下一步？</strong>下一章將深入探討 <strong>Pure Reducer 與 Planner 的復原狀態機</strong>。
+    透過 WAL 順序與 append-only JSONL，tiny-agent 為正常 runtime 寫入提供可追溯、可驗證內部一致性的 session history；但沒有 MAC、signature、trusted timestamp 或外部 anchor，因此它不是能抵抗有寫檔權限攻擊者的「不可竄改合規 audit log」。當行程重啟並讀入整份日誌後，<strong>我們該如何從數百筆時序事件中計算目前狀態並決定下一步？</strong>下一章將深入探討 <strong>Pure Reducer 與 Planner 的復原狀態機</strong>。
 </p>
 
 <aside class="note">
