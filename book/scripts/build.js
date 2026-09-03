@@ -165,7 +165,10 @@ async function main() {
     }
 
     const architectureDirectory = join(out, "00-foundations", "architecture");
-    const architectureHtml = await readFile(resolve(bookRoot, "../docs/tiny-ts-architecture.html"), "utf8");
+    const architectureSource = await readFile(resolve(bookRoot, "../docs/tiny-ts-architecture.html"), "utf8");
+    const architectureHtml = architectureSource
+        .replace("      padding: 2rem;", "      padding: 1rem;")
+        .replace("      max-width: var(--archify-reader-width, 1440px);", "      max-width: none;");
     const architectureHashes = architectureCsp(architectureHtml);
     await mkdir(architectureDirectory, { recursive: true });
     await writeFile(join(architectureDirectory, "index.html"), architectureHtml);
