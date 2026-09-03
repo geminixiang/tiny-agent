@@ -100,7 +100,7 @@ function architectureExtensionPage(assets) {
         path: "/00-foundations/architecture/",
         current: "00-foundations",
         assets,
-        body: `<article class="article architecture-intro"><p class="eyebrow">第零部｜基礎知識 · 第 00 章延伸</p><h1>tiny-ts 系統架構</h1><p class="deck">從整體視角探索 tiny-ts。你可以縮放、搜尋元件、追蹤路徑、切換語意視角，或播放三條導覽路徑。</p><p><a href="/00-foundations/">← 回到第 00 章</a></p></article><section class="architecture-stage" aria-label="互動式 tiny-ts 系統架構圖"><iframe src="/00-foundations/architecture/diagram.html" title="互動式 tiny-ts 系統架構圖" loading="eager" allowfullscreen></iframe></section>`,
+        body: `<article class="article architecture-intro"><p class="eyebrow">第零部｜基礎知識 · 第 00 章延伸</p><h1>tiny-ts 系統架構</h1><p class="deck">從整體視角探索 tiny-ts。你可以縮放、搜尋元件、追蹤路徑、切換語意視角，或播放三條導覽路徑。</p><p><a href="/00-foundations/">← 回到第 00 章</a></p></article><section class="architecture-stage" aria-label="互動式 tiny-ts 系統架構圖"><iframe src="/00-foundations/architecture/diagram" title="互動式 tiny-ts 系統架構圖" loading="eager" allowfullscreen></iframe></section>`,
     });
 }
 
@@ -192,7 +192,7 @@ async function main() {
     );
     await writeFile(
         join(out, "_headers"),
-        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-src 'self' https://www.youtube.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'\n\n/00-foundations/architecture/diagram.html\n  Content-Security-Policy: default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
+        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-src 'self' https://www.youtube.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'\n\n/00-foundations/architecture/diagram\n  Content-Security-Policy: default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
     );
     await writeFile(join(out, "_redirects"), `/index.html / 301\n`);
     await writeFile(
