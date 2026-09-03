@@ -2,12 +2,12 @@
     <strong>一句話掌握本章核心</strong>：在討論 Agent 之前，必須先釐清「模型實際收到什麼」。本章依序拆解 <strong>Token</strong>、<strong>Message</strong>、<strong>Context</strong>、<strong>Context Window</strong>、<strong>Tool Call</strong>、<strong>Session</strong> 與 <strong>Memory</strong>。讀完後，你將能清楚指出每一次 API 呼叫中，每一份資料究竟儲存在模型權重、應用程式記憶體，還是硬碟之中。
 </p>
 
-<h2 id="mental-model">先有一張正確的系統圖</h2>
+<h2 id="mental-model">先建立清晰的系統心智模型</h2>
 <p>
-    在固定模型權重與推論設定下，可將大型語言模型（Large Language Model，LLM）近似為一個<strong>不自行保存應用程式對話狀態的推論函式</strong>：輸入 Token 序列，計算下一個 Token 的條件機率分佈。這是方便設計 Runtime 的工程抽象；實際取樣回覆可能不同，而部分 Provider API 也能在伺服器端保存或串接對話狀態。
+    在固定模型權重與推論設定下，可將大型語言模型（Large Language Model，LLM）視為一個<strong>不自行保存應用程式對話狀態的推論函式</strong>：輸入 Token 序列，計算下一個 Token 的條件機率分佈。這是設計 Runtime 時最純粹的工程抽象；實際取樣回覆可能略有不同，而部分 Provider API 也能在伺服器端保存或串接對話狀態。
 </p>
 <p>
-    產品中看似會聊天、能讀寫專案、能執行指令的「AI」，不是模型本身具備作業系統特權，而是外層的 <strong>Host Application</strong> 將模型、資料結構與系統呼叫串接而成的結果。
+    產品中看似會流暢聊天、能讀寫專案檔案、能執行命令列的「AI」，本質上並非模型本身具備作業系統特權，而是外層的 <strong>Host Application</strong> 將模型、資料結構與系統呼叫（System Call）串接整合的成果。
 </p>
 
 <figure class="diagram-embed" id="fig-00-system-boundary" aria-labelledby="fig-00-system-boundary-caption">
@@ -40,22 +40,22 @@
 Host Application
   ├─ 組合 Instructions、歷史對話、檢索資料與 Tool Definitions
   ├─ 呼叫 Model API（送出 Active Context）
-  ├─ 驗證並執行 Model 請求的 Tool（發動 System Effects）
-  └─ 保存 Transcript / Session（持久化狀態）
+  ├─ 驗證並執行 Model 請求的 Tool（發動 System Effects，如檔案讀寫或 Shell 執行）
+  └─ 保存 Transcript / Session（持久化狀態到硬碟）
   ↓
 Model：根據本次有效 Context 計算下一個回覆或 Tool Call 提議</code></pre>
 
 <p>
-    對 tiny-agent 目前使用的 OpenRouter Chat Completions 配接器而言，模型可用的資料來自本次 Request 中的 Messages、Tool Definitions 與其他明確輸入；未送入的檔案系統、資料庫或環境變數不會自動出現在 Context。這不是所有 API 的通則：例如 OpenAI Responses API 可用 <code>previous_response_id</code> 串接由 Provider 管理的對話狀態，詳見 <a href="https://platform.openai.com/docs/guides/conversation-state">OpenAI Conversation State</a>。
+    對 tiny-agent 目前使用的 OpenRouter Chat Completions 配接器（Adapter）而言，模型可用的資料完全來自本次 Request 中的 Messages、Tool Definitions 與其他明確輸入；未送入的檔案系統、資料庫或環境變數，絕對不會憑空出現在 Context 中。這不是所有 API 的通則：例如 OpenAI Responses API 可用 <code>previous_response_id</code> 串接由 Provider 伺服器端管理的對話狀態，詳見 <a href="https://platform.openai.com/docs/guides/conversation-state">OpenAI Conversation State</a>。
 </p>
 
 <aside class="note">
-    <strong>工程抽象 vs. 物理現實</strong>　工程討論中常說「模型讀取檔案」或「模型選擇工具」，這是為了溝通便利的擬人化抽象。底層物理現實完全是矩陣乘法、機率取樣與 JSON Protocol 序列化；不需要先推導 Transformer 數學公式，就能以嚴謹的 CS 思維設計出可靠的 Agent Runtime。
+    <strong>工程抽象 vs. 物理現實</strong>　工程討論中常說「模型讀取檔案」或「模型選擇工具」，這是為了溝通便利的擬人化抽象。底層物理現實完全是矩陣乘法、機率取樣與 JSON Protocol 序列化；我們不需要先推導 Transformer 數學公式，就能以嚴謹的計算機科學思維設計出可靠的 Agent Runtime。
 </aside>
 
-<h2 id="recommended-video">推薦先看：建立 LLM 的直觀理解</h2>
+<h2 id="recommended-video">推薦觀看：建立 LLM 的直觀理解</h2>
 <p>
-    在深入 Token、Context 與推論生命週期前，推薦先觀看 3Blue1Brown 的視覺化解析。它能幫助你在腦中建立神經網路計算的具體直覺，之後再閱讀本章的工程定義時，更容易將「模型本身」與「外層 Agent 系統」清楚拆分。
+    在深入探討 Token、Context 與推論生命週期前，推薦先觀看 3Blue1Brown 的視覺化解析。它能幫助你在腦中建立神經網路計算的具體直覺，之後再閱讀本章的工程定義時，更容易將「模型本身」與「外層 Agent 系統」清晰拆分。
 </p>
 <figure class="video-embed">
     <iframe width="560" height="315" src="https://www.youtube.com/embed/2eq-8GM2bhg?si=HhPCYKTCv8KqJxoX" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>

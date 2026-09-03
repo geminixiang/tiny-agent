@@ -121,7 +121,7 @@ tiny-ts --plugin write
 /skill:i-have-adhd 幫我把工作拆解為可執行的具體步驟</code></pre>
 
 <p class="bridge">
-    至此，我們已經掌握了 Agent 的大腦（Model）、手腳（Tools）與注意力（Context）。實際 CLI 在開始工作前就會建立或開啟 JSONL Session，並在每一步追加 facts；記憶體中的 <code>messages</code> 只是可由 durable log 重建的 active view。下一章將把這條已存在的持久化路徑拆開，說明<strong>先記 Intent，再發動 Effect</strong>的交易順序、torn-tail 修復與明確的 durability 限制。
+    至此，我們已經掌握了 Agent 的大腦（Model）、手腳（Tools）與注意力（Context）。實際 CLI 在開始工作前就會建立或開啟 JSONL Session，並在每一步追加 facts；記憶體中的 <code>messages</code> 只是可由 durable log 重建的 active view。下一章將把這條已存在的持久化路徑拆開，說明<strong>先記 Intent，再發動 Effect</strong>的寫入順序、torn-tail 修復與明確的 durability 限制。
 
 </p>
 

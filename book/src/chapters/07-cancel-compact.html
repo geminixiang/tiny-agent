@@ -4,7 +4,7 @@
 
 <h2 id="abort-order">中斷的正確順序：先持久化意圖，再發送信號</h2>
 <p>
-    設想情境：工程師在 <code>bash deploy.sh</code> 執行時按下了 <code>Esc</code>。如果系統直接調用 <code>abortController.abort()</code> 卻未先寫入磁碟，一旦行程在此刻崩潰，重啟後系統完全不知道使用者曾要求中斷，可能會誤判為未知錯誤而發起重試。
+    設想情境：工程師在 <code>bash deploy.sh</code> 執行時按下了 <code>Esc</code>。如果系統直接呼叫 <code>abortController.abort()</code> 卻未先寫入磁碟，一旦行程在此刻崩潰，重啟後系統完全不知道使用者曾要求中斷，可能會誤判為未知錯誤而發起重試。
 </p>
 
 <!-- [IMAGE_PROMPT_START]
