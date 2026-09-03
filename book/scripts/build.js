@@ -2,7 +2,19 @@ import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import hljs from "highlight.js/lib/core";
+import json from "highlight.js/lib/languages/json";
+import shell from "highlight.js/lib/languages/shell";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
 import { chapters, planned } from "../src/chapters.js";
+
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("sh", shell);
+hljs.registerLanguage("ts", typescript);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("yaml", yaml);
 
 const bookRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const out = resolve(process.env.BOOK_OUT_DIR || join(bookRoot, "dist"));
@@ -70,6 +82,23 @@ function layout({ title, description, path, current = "", body, assets, type = "
 </html>`;
 }
 
+function decodeCode(value) {
+    return value
+        .replaceAll("&lt;", "<")
+        .replaceAll("&gt;", ">")
+        .replaceAll("&quot;", '"')
+        .replaceAll("&#39;", "'")
+        .replaceAll("&amp;", "&");
+}
+
+function highlightCodeBlocks(content) {
+    return content.replace(/<pre data-lang="([^"]+)"><code>([\s\S]*?)<\/code><\/pre>/g, (_, language, code) => {
+        const source = decodeCode(code);
+        const highlighted = language === "text" ? escape(source) : hljs.highlight(source, { language }).value;
+        return `<pre data-lang="${language}"><code class="hljs language-${language}">${highlighted}</code></pre>`;
+    });
+}
+
 function extractToc(content) {
     const headings = [...content.matchAll(/<h2 id="([^"]+)">([\s\S]*?)<\/h2>/g)];
     if (!headings.length) return "";
@@ -98,7 +127,7 @@ ${next ? `<a href="/${next.slug}/"><small>下一章</small> ${escape(next.title)
         path: `/${chapter.slug}/`,
         current: chapter.slug,
         assets,
-        body: `<article class="article"><p class="eyebrow">${escape(chapter.part)} · 第 ${index} 章</p><h1>${escape(chapter.title)}</h1><p class="deck">${escape(chapter.description)}</p><div class="meta"><span>約 ${chapter.minutes} 分鐘</span> <span>${index + 1} / ${chapters.length}</span></div>${takeawaysBox(chapter.takeaways)}${extractToc(content)}${content}</article>${navigation}`,
+        body: `<article class="article"><p class="eyebrow">${escape(chapter.part)} · 第 ${index} 章</p><h1>${escape(chapter.title)}</h1><p class="deck">${escape(chapter.description)}</p><div class="meta"><span>約 ${chapter.minutes} 分鐘</span> <span>${index + 1} / ${chapters.length}</span></div>${takeawaysBox(chapter.takeaways)}${extractToc(content)}${highlightCodeBlocks(content)}</article>${navigation}`,
     });
 }
 
