@@ -10,9 +10,10 @@ Tiny-agent 不是 Pi 的 fork 或移植；它是獨立的四語言教學實作�
 
 ## 本機開發
 
-不需要安裝相依套件：
+先安裝相依套件，再使用 Vite 建置：
 
 ```bash
+npm --prefix book ci
 npm --prefix book run build
 ```
 
@@ -35,9 +36,9 @@ npx serve book/dist
 - `src/chapters.js`：章節 metadata 的 single source of truth。
 - `src/chapters/*.html`：受控 HTML fragments，不使用自製 Markdown parser。
 - `src/assets/`：共用 CSS 與 enhancement-only JavaScript。
-- `scripts/build.js`：使用 Node.js 22 標準函式庫的靜態產生器。
+- `vite.config.js`：Vite 設定與書籍頁面產生插件；負責組裝章節、語法上色、CSP 與靜態部署檔案。
 
-產生的 `dist/` 是 build artifact，不應手動修改。Build 會依內容雜湊產生 CSS 與 JavaScript 檔名，供 Cloudflare Pages 安全地使用 immutable cache。
+產生的 `dist/` 是 build artifact，不應手動修改。Vite 會依內容雜湊產生資源檔名，供 Cloudflare Pages 安全地使用 immutable cache。
 
 ## Cloudflare Pages
 

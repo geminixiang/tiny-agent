@@ -4,11 +4,14 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "build": "node scripts/build.js",
-        "check": "node scripts/build.js",
-        "test": "node scripts/build.js"
+        "build": "vite build",
+        "check": "vite build",
+        "test": "vite build"
     },
     "dependencies": {
         "highlight.js": "^11.11.1"
+    },
+    "devDependencies": {
+        "vite": "^7.3.6"
     }
 }

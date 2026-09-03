@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, extname, join, resolve } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { defineConfig } from "vite";
 import hljs from "highlight.js/lib/core";
 import json from "highlight.js/lib/languages/json";
 import shell from "highlight.js/lib/languages/shell";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
-import { chapters, planned } from "../src/chapters.js";
+import { chapters, planned } from "./src/chapters.js";
 
 hljs.registerLanguage("json", json);
 hljs.registerLanguage("sh", shell);
@@ -16,13 +17,12 @@ hljs.registerLanguage("ts", typescript);
 hljs.registerLanguage("xml", xml);
 hljs.registerLanguage("yaml", yaml);
 
-const bookRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const bookRoot = dirname(fileURLToPath(import.meta.url));
 const out = resolve(process.env.BOOK_OUT_DIR || join(bookRoot, "dist"));
 const origin = "https://tiny-agent.geminixiang.com";
 const repo = "https://github.com/geminixiang/tiny-agent";
 const escape = (value) =>
     String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-const hash = (content) => createHash("sha256").update(content).digest("hex").slice(0, 12);
 const cspHash = (content) => `'sha256-${createHash("sha256").update(content).digest("base64")}'`;
 
 function architectureCsp(html) {
@@ -150,88 +150,101 @@ function homePage(assets) {
     });
 }
 
-async function main() {
-    await rm(out, { recursive: true, force: true });
-    await mkdir(join(out, "assets"), { recursive: true });
+function bookPlugin() {
+    const assetRefs = new Map();
+    let assetCount = 0;
 
-    // 自動掃描並打包所有 src/assets 檔案（自動進行 content hashing）
-    const assetsDir = join(bookRoot, "src/assets");
-    const assetFiles = await readdir(assetsDir);
-    const assetMap = new Map(); // originalFileName -> hashedFileName
-    const assets = {};
-
-    for (const fileName of assetFiles) {
-        const filePath = join(assetsDir, fileName);
-        const content = await readFile(filePath);
-        const ext = extname(fileName);
-        const baseName = fileName.slice(0, -ext.length);
-        const hashedName = `${baseName}.${hash(content)}${ext}`;
-        assetMap.set(fileName, hashedName);
-        await writeFile(join(out, "assets", hashedName), content);
-    }
-
-    assets.css = assetMap.get("styles.css");
-    assets.js = assetMap.get("book.js");
-    assets.theme = assetMap.get("theme.js");
-    assets.favicon = assetMap.get("favicon.png");
-    assets.hero = assetMap.get("hero.png");
-
-    await writeFile(join(out, "index.html"), homePage(assets));
-
-    for (const [index, chapter] of chapters.entries()) {
-        let content = await readFile(join(bookRoot, "src/chapters", chapter.file), "utf8");
-        // 動態替換所有 <!-- ASSET:xxx.png --> 佔位符
-        content = content.replaceAll(/<!-- ASSET:([a-zA-Z0-9._-]+) -->/g, (match, rawName) => {
-            const hashed = assetMap.get(rawName);
-            if (!hashed) {
-                throw new Error(`Chapter ${chapter.file} references missing asset: ${rawName}`);
+    return {
+        name: "tiny-agent-book",
+        enforce: "pre",
+        resolveId(id) {
+            if (id === "virtual:book") return "\0virtual:book";
+        },
+        load(id) {
+            if (id === "\0virtual:book") return "export default {};";
+        },
+        async buildStart() {
+            const assetsDir = join(bookRoot, "src/assets");
+            for (const fileName of await readdir(assetsDir)) {
+                const source = await readFile(join(assetsDir, fileName));
+                assetRefs.set(fileName, this.emitFile({ type: "asset", name: fileName, source }));
             }
-            return `/assets/${hashed}`;
-        });
-        const directory = join(out, chapter.slug);
-        await mkdir(directory, { recursive: true });
-        await writeFile(join(directory, "index.html"), articlePage(chapter, index, content, assets));
-    }
+            assetCount = assetRefs.size;
+        },
+        async generateBundle(_, bundle) {
+            for (const [fileName, item] of Object.entries(bundle)) {
+                if (item.type === "chunk") delete bundle[fileName];
+            }
 
-    const architectureDirectory = join(out, "00-foundations", "architecture");
-    const architectureSource = await readFile(resolve(bookRoot, "../docs/tiny-ts-architecture.html"), "utf8");
-    const architectureHtml = architectureSource
-        .replace("      padding: 2rem;", "      padding: 1rem;")
-        .replace("      max-width: var(--archify-reader-width, 1440px);", "      max-width: none;");
-    const architectureHashes = architectureCsp(architectureHtml);
-    await mkdir(architectureDirectory, { recursive: true });
-    await writeFile(join(architectureDirectory, "index.html"), architectureHtml);
+            const assetMap = new Map([...assetRefs].map(([name, ref]) => [name, this.getFileName(ref)]));
+            const assetName = (name) => assetMap.get(name)?.split("/").at(-1);
+            const assets = {
+                css: assetName("styles.css"),
+                js: assetName("book.js"),
+                theme: assetName("theme.js"),
+                favicon: assetName("favicon.png"),
+                hero: assetName("hero.png"),
+            };
+            const emit = (fileName, source) => this.emitFile({ type: "asset", fileName, source });
 
-    const urls = ["/", ...chapters.map((chapter) => `/${chapter.slug}/`), "/00-foundations/architecture/"];
-    await writeFile(
-        join(out, "sitemap.xml"),
-        `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((path) => `  <url><loc>${origin}${path}</loc></url>`).join("\n")}\n</urlset>\n`,
-    );
-    await writeFile(join(out, "robots.txt"), `User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`);
-    await writeFile(
-        join(out, "404.html"),
-        layout({
-            title: "找不到頁面",
-            description: "這個頁面不存在。",
-            path: "/404.html",
-            assets,
-            body: `<article class="article"><p class="eyebrow">404</p><h1>這裡沒有章節</h1><p class="deck">連結可能已經改變，回到學習路徑繼續閱讀。</p><p><a href="/">返回全書目錄 →</a></p></article>`,
-        }),
-    );
-    await writeFile(
-        join(out, "_headers"),
-        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com ${architectureHashes.scripts}; style-src 'self' ${architectureHashes.styles}; img-src 'self' data: blob:; font-src 'self' data:; connect-src https://cloudflareinsights.com; frame-src 'self' https://www.youtube.com; object-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
-    );
-    await writeFile(join(out, "_redirects"), `/index.html / 301\n`);
-    await writeFile(
-        join(out, "search-index.json"),
-        JSON.stringify(
-            chapters.map(({ slug, title, description, part }) => ({ slug, title, description, part })),
-            null,
-            2,
-        ),
-    );
-    console.log(`Built ${chapters.length + 1} pages with ${assetMap.size} assets in ${out}`);
+            emit("index.html", homePage(assets));
+            for (const [index, chapter] of chapters.entries()) {
+                let content = await readFile(join(bookRoot, "src/chapters", chapter.file), "utf8");
+                content = content.replaceAll(/<!-- ASSET:([a-zA-Z0-9._-]+) -->/g, (_, rawName) => {
+                    const hashed = assetMap.get(rawName);
+                    if (!hashed) throw new Error(`Chapter ${chapter.file} references missing asset: ${rawName}`);
+                    return `/${hashed}`;
+                });
+                emit(`${chapter.slug}/index.html`, articlePage(chapter, index, content, assets));
+            }
+
+            const architectureSource = await readFile(resolve(bookRoot, "../docs/tiny-ts-architecture.html"), "utf8");
+            const architectureHtml = architectureSource
+                .replace("      padding: 2rem;", "      padding: 1rem;")
+                .replace("      max-width: var(--archify-reader-width, 1440px);", "      max-width: none;");
+            const architectureHashes = architectureCsp(architectureHtml);
+            emit("00-foundations/architecture/index.html", architectureHtml);
+
+            const urls = ["/", ...chapters.map((chapter) => `/${chapter.slug}/`), "/00-foundations/architecture/"];
+            emit(
+                "sitemap.xml",
+                `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((path) => `  <url><loc>${origin}${path}</loc></url>`).join("\n")}\n</urlset>\n`,
+            );
+            emit("robots.txt", `User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`);
+            emit(
+                "404.html",
+                layout({
+                    title: "找不到頁面",
+                    description: "這個頁面不存在。",
+                    path: "/404.html",
+                    assets,
+                    body: `<article class="article"><p class="eyebrow">404</p><h1>這裡沒有章節</h1><p class="deck">連結可能已經改變，回到學習路徑繼續閱讀。</p><p><a href="/">返回全書目錄 →</a></p></article>`,
+                }),
+            );
+            emit(
+                "_headers",
+                `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self' https://static.cloudflareinsights.com ${architectureHashes.scripts}; style-src 'self' ${architectureHashes.styles}; img-src 'self' data: blob:; font-src 'self' data:; connect-src https://cloudflareinsights.com; frame-src 'self' https://www.youtube.com; object-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
+            );
+            emit("_redirects", "/index.html / 301\n");
+            emit(
+                "search-index.json",
+                JSON.stringify(chapters.map(({ slug, title, description, part }) => ({ slug, title, description, part })), null, 2),
+            );
+        },
+        writeBundle() {
+            console.log(`Built ${chapters.length + 1} pages with ${assetCount} assets in ${out}`);
+        },
+    };
 }
 
-await main();
+export default defineConfig({
+    build: {
+        outDir: out,
+        emptyOutDir: true,
+        rollupOptions: {
+            input: "virtual:book",
+            output: { assetFileNames: "assets/[name].[hash][extname]" },
+        },
+    },
+    plugins: [bookPlugin()],
+});
