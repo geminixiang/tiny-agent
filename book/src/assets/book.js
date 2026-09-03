@@ -65,18 +65,6 @@ addEventListener("scroll", updateProgress, { passive: true });
 addEventListener("resize", updateProgress);
 updateProgress();
 
-const architectureDialog = document.querySelector("#architecture-dialog");
-const architectureFrame = architectureDialog?.querySelector("iframe[data-src]");
-document.querySelector("[data-architecture-open]")?.addEventListener("click", () => {
-    if (!architectureDialog || !(architectureDialog instanceof HTMLDialogElement)) return;
-    if (architectureFrame && !architectureFrame.hasAttribute("src")) architectureFrame.src = architectureFrame.dataset.src;
-    architectureDialog.showModal();
-});
-architectureDialog?.querySelector("[data-architecture-close]")?.addEventListener("click", () => architectureDialog.close());
-architectureDialog?.addEventListener("click", (event) => {
-    if (event.target === architectureDialog) architectureDialog.close();
-});
-
 document.querySelectorAll("figure.data-anim").forEach((figure) => {
     const button = document.createElement("button");
     button.className = "anim-toggle";

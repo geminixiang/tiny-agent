@@ -318,27 +318,12 @@ figure.step-flow figcaption, figure.decision-tree figcaption { margin-top: .6rem
     .chapter-footer a:last-child { text-align: left; }
 }
 
-.architecture-preview button { position: relative; display: block; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; cursor: zoom-in; }
-.architecture-preview button::after { content: ""; position: absolute; inset: 0; border: 3px solid transparent; pointer-events: none; transition: border-color .15s ease, background .15s ease; }
-.architecture-preview button:hover::after, .architecture-preview button:focus-visible::after { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, transparent); }
-.architecture-preview button span { position: absolute; right: .75rem; bottom: .75rem; padding: .45rem .7rem; background: color-mix(in srgb, var(--code) 88%, transparent); color: var(--code-ink); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .75rem; font-weight: 700; }
-.architecture-dialog { width: 90vw; max-width: none; height: 90vh; max-height: none; margin: auto; padding: 0; border: 1px solid var(--line-strong); background: var(--paper); color: var(--ink); box-shadow: 0 24px 80px rgb(0 0 0 / .35); overflow: hidden; }
-.architecture-dialog[open] { display: grid; grid-template-rows: auto 1fr; }
-.architecture-dialog::backdrop { background: rgb(5 12 18 / .72); backdrop-filter: blur(5px); }
-.architecture-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .7rem 1rem; border-bottom: 1px solid var(--line); }
-.architecture-dialog header small { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.architecture-dialog header h2 { margin: .1rem 0 0; font-size: 1rem; }
-.architecture-dialog header button { padding: .45rem .7rem; border: 1px solid var(--line-strong); background: var(--paper); color: var(--ink); cursor: pointer; }
-.architecture-dialog iframe { display: block; width: 100%; height: 100%; border: 0; background: #07131f; }
+.architecture-preview a { position: relative; display: block; color: inherit; cursor: zoom-in; text-decoration: none; }
+.architecture-preview a::after { content: ""; position: absolute; inset: 0; border: 3px solid transparent; pointer-events: none; transition: border-color .15s ease, background .15s ease; }
+.architecture-preview a:hover::after, .architecture-preview a:focus-visible::after { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.architecture-preview a span { position: absolute; right: .75rem; bottom: .75rem; padding: .45rem .7rem; background: color-mix(in srgb, var(--code) 88%, transparent); color: var(--code-ink); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .75rem; font-weight: 700; }
 @media (max-width: 860px) {
-    .architecture-dialog { width: 94vw; height: 88vh; }
-    .architecture-preview button span { position: static; display: block; margin-top: .6rem; background: var(--accent-soft); color: var(--accent-strong); }
-}
-.architecture-intro { padding-bottom: 1rem; }
-.architecture-stage { width: min(1500px, calc(100vw - var(--sidebar) - 3rem)); height: max(720px, calc(100vh - 8rem)); margin: 0 auto 3rem; padding: .5rem; border: 1px solid var(--line-strong); background: var(--paper); box-shadow: var(--shadow); }
-.architecture-stage iframe { display: block; width: 100%; height: 100%; border: 0; background: #07131f; }
-@media (max-width: 860px) {
-    .architecture-stage { width: calc(100vw - 1.5rem); height: 78vh; min-height: 560px; }
+    .architecture-preview a span { position: static; display: block; margin-top: .6rem; background: var(--accent-soft); color: var(--accent-strong); }
 }
 
 /* Diagram embeds */
