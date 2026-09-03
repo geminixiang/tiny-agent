@@ -18,8 +18,11 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: typescript/package-lock.json
+          cache-dependency-path: |
+            typescript/package-lock.json
+            book/package-lock.json
       - run: npm ci --prefix typescript
+      - run: npm ci --prefix book
       - run: npm --prefix typescript test
       - run: cd typescript && node --import tsx --test ../eval/run.test.ts
       - run: npm --prefix book test
