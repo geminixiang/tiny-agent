@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "tiny-ts 系統架構",
+    "subtitle": "從 CLI 輸入、Agent Loop、模型推理到本機／MCP 工具與可恢復 Session",
+    "quality_profile": "showcase",
+    "visual_preset": "signal-flow",
+    "animation": "none",
+    "repository": {
+      "url": "https://github.com/geminixiang/tiny-agent",
+      "revision": "ce1f55c3f4afaa578d47b23124c8d15210c821a8"
+    },
+    "viewBox": [1320, 840],
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "frontend": { "label": "使用者介面" },
+        "backend": { "label": "核心執行元件" },
+        "database": { "label": "持久化狀態" },
+        "security": { "label": "信任邊界與設定" },
+        "messagebus": { "label": "工具介面" },
+        "external": { "label": "外部服務" }
+      }
+    },
+    "views": [
+      {
+        "id": "mainLoop",
+        "label": "主要執行路徑",
+        "focus": ["operator", "cli", "agent", "model", "toolRouter", "localTools", "sessionStore"],
+        "note": "使用者輸入進入 Agent Loop；模型可反覆要求工具，直到產生最終回答。"
+      },
+      {
+        "id": "mcpPath",
+        "label": "MCP 擴充路徑",
+        "focus": ["mcpCatalog", "cli", "mcpAdapter", "toolRouter", "mcpServers"],
+        "note": "CLI 只接受可信 alias，憑證由環境變數解析，再以 Streamable HTTP 連線。"
+      },
+      {
+        "id": "recoveryPath",
+        "label": "Session 與恢復",
+        "focus": ["agent", "sessionStore", "sessionReducer", "recovery"],
+        "note": "Append-only facts 經 reducer 驗證重建狀態，恢復規劃補齊中斷中的工具呼叫。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "使用者／自動化",
+      "sublabel": "Prompt、CLI flags、stdin",
+      "pos": [40, 270],
+      "size": [150, 76]
+    },
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "tiny-ts CLI",
+      "sublabel": "參數、TUI、取消、JSON events",
+      "tag": "入口",
+      "sources": [{ "path": "typescript/src/cli.ts" }],
+      "pos": [235, 270],
+      "size": [176, 76]
+    },
+    {
+      "id": "agent",
+      "type": "backend",
+      "label": "Agent Loop",
+      "sublabel": "組態、模型回合、工具迴圈",
+      "tag": "核心",
+      "sources": [{ "path": "typescript/src/index.ts" }],
+      "pos": [470, 270],
+      "size": [188, 76]
+    },
+    {
+      "id": "model",
+      "type": "external",
+      "label": "Chat Completions API",
+      "sublabel": "OpenRouter／相容 endpoint",
+      "sources": [{ "path": "typescript/src/env.ts" }, { "path": "typescript/src/index.ts" }],
+      "pos": [735, 92],
+      "size": [196, 76]
+    },
+    {
+      "id": "toolRouter",
+      "type": "messagebus",
+      "label": "Tool Router",
+      "sublabel": "定義、派送、事件格式化",
+      "sources": [{ "path": "typescript/src/tools.ts" }],
+      "pos": [735, 270],
+      "size": [196, 76]
+    },
+    {
+      "id": "localTools",
+      "type": "backend",
+      "label": "內建工具與 Plugins",
+      "sublabel": "bash · read · write · edit · bg",
+      "sources": [{ "path": "typescript/src/tools.ts" }],
+      "pos": [1010, 214],
+      "size": [220, 76]
+    },
+    {
+      "id": "mcpAdapter",
+      "type": "backend",
+      "label": "MCP Adapter",
+      "sublabel": "tools/list · tools/call · bounds",
+      "sources": [{ "path": "typescript/src/mcp.ts" }],
+      "pos": [1010, 340],
+      "size": [220, 76]
+    },
+    {
+      "id": "mcpServers",
+      "type": "external",
+      "label": "可信 MCP Servers",
+      "sublabel": "Streamable HTTP",
+      "pos": [1010, 492],
+      "size": [220, 76]
+    },
+    {
+      "id": "mcpCatalog",
+      "type": "security",
+      "label": "MCP Catalog + Env",
+      "sublabel": "TINY_MCP_CONFIG · tokenEnv",
+      "sources": [{ "path": "typescript/src/mcp-config.ts" }, { "path": "typescript/src/env.ts" }],
+      "pos": [235, 492],
+      "size": [196, 76]
+    },
+    {
+      "id": "sessionStore",
+      "type": "database",
+      "label": "SessionStore",
+      "sublabel": "Append-only JSONL facts",
+      "sources": [{ "path": "typescript/src/session.ts" }],
+      "pos": [470, 492],
+      "size": [188, 76]
+    },
+    {
+      "id": "sessionReducer",
+      "type": "backend",
+      "label": "Session Reducer",
+      "sublabel": "驗證並重建 transcript state",
+      "sources": [{ "path": "typescript/src/session-reducer.ts" }],
+      "pos": [735, 492],
+      "size": [196, 76]
+    },
+    {
+      "id": "recovery",
+      "type": "backend",
+      "label": "Recovery Planner",
+      "sublabel": "安全續跑與 synthetic results",
+      "sources": [{ "path": "typescript/src/session-recovery.ts" }],
+      "pos": [735, 620],
+      "size": [196, 76]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "tiny-agent TypeScript Runtime",
+      "wraps": ["cli", "agent", "toolRouter", "localTools", "mcpAdapter", "sessionStore", "sessionReducer", "recovery"],
+      "pad": 24
+    },
+    {
+      "kind": "security-group",
+      "label": "Trusted deployment configuration",
+      "wraps": ["mcpCatalog"],
+      "pad": 16
+    }
+  ],
+  "connections": [
+    { "id": "operatorToCli", "from": "operator", "to": "cli", "variant": "emphasis" },
+    { "id": "cliToAgent", "from": "cli", "to": "agent", "variant": "emphasis" },
+    { "id": "agentToModel", "from": "agent", "to": "model", "label": "模型回合", "variant": "emphasis", "labelDx": 54 },
+    { "id": "agentToRouter", "from": "agent", "to": "toolRouter", "variant": "emphasis" },
+    { "id": "routerToLocal", "from": "toolRouter", "to": "localTools", "label": "本機派送", "labelDy": -22 },
+    { "id": "routerToMcp", "from": "toolRouter", "to": "mcpAdapter", "label": "遠端派送", "labelDx": 54 },
+    { "id": "mcpToServers", "from": "mcpAdapter", "to": "mcpServers", "label": "Streamable HTTP", "variant": "dashed", "labelAt": [1184, 430] },
+    { "id": "agentToStore", "from": "agent", "to": "sessionStore", "label": "append facts", "labelAt": [618, 360] },
+    { "id": "storeToReducer", "from": "sessionStore", "to": "sessionReducer", "label": "重建狀態", "labelDy": 24 },
+    { "id": "reducerToRecovery", "from": "sessionReducer", "to": "recovery", "label": "中斷狀態", "labelAt": [887, 582] }
+  ]
+}

@@ -93,6 +93,17 @@ ${next ? `<a href="/${next.slug}/"><small>下一章</small> ${escape(next.title)
     });
 }
 
+function architectureExtensionPage(assets) {
+    return layout({
+        title: "tiny-ts 系統架構",
+        description: "第 00 章的互動式延伸閱讀：探索 tiny-ts 的 CLI、Agent Loop、模型、工具、MCP 與 Session Recovery。",
+        path: "/00-foundations/architecture/",
+        current: "00-foundations",
+        assets,
+        body: `<article class="article architecture-intro"><p class="eyebrow">第零部｜基礎知識 · 第 00 章延伸</p><h1>tiny-ts 系統架構</h1><p class="deck">從整體視角探索 tiny-ts。你可以縮放、搜尋元件、追蹤路徑、切換語意視角，或播放三條導覽路徑。</p><p><a href="/00-foundations/">← 回到第 00 章</a></p></article><section class="architecture-stage" aria-label="互動式 tiny-ts 系統架構圖"><iframe src="/00-foundations/architecture/diagram.html" title="互動式 tiny-ts 系統架構圖" loading="eager" allowfullscreen></iframe></section>`,
+    });
+}
+
 function homePage(assets) {
     const total = chapters.reduce((sum, chapter) => sum + chapter.minutes, 0);
     const cards = chapters
@@ -154,7 +165,16 @@ async function main() {
         await mkdir(directory, { recursive: true });
         await writeFile(join(directory, "index.html"), articlePage(chapter, index, content, assets));
     }
-    const urls = ["/", ...chapters.map((chapter) => `/${chapter.slug}/`)];
+
+    const architectureDirectory = join(out, "00-foundations", "architecture");
+    await mkdir(architectureDirectory, { recursive: true });
+    await writeFile(join(architectureDirectory, "index.html"), architectureExtensionPage(assets));
+    await writeFile(
+        join(architectureDirectory, "diagram.html"),
+        await readFile(resolve(bookRoot, "../docs/tiny-ts-architecture.html")),
+    );
+
+    const urls = ["/", ...chapters.map((chapter) => `/${chapter.slug}/`), "/00-foundations/architecture/"];
     await writeFile(
         join(out, "sitemap.xml"),
         `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map((path) => `  <url><loc>${origin}${path}</loc></url>`).join("\n")}\n</urlset>\n`,
@@ -172,7 +192,7 @@ async function main() {
     );
     await writeFile(
         join(out, "_headers"),
-        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-src https://www.youtube.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
+        `/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-src 'self' https://www.youtube.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'\n\n/00-foundations/architecture/diagram.html\n  Content-Security-Policy: default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'\n\n/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n`,
     );
     await writeFile(join(out, "_redirects"), `/index.html / 301\n`);
     await writeFile(
