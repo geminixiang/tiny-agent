@@ -4,7 +4,7 @@
 
 <h2 id="interface">小而深的 Tool 介面設計</h2>
 <p>
-    在 TypeScript reference implementation 中，核心 Runtime 不需要知道某個 Tool 背後是本機讀檔、查詢資料庫還是遠端 MCP；它只依賴一個極小且深（Deep Interface）的契約：
+    在 TypeScript reference implementation 中，核心 Runtime 不需要知道某個 Tool 背後是本機讀檔、查詢資料庫還是遠端 MCP。它只依賴一個極小且深（Deep Interface）的契約：
 </p>
 
 <pre data-lang="ts"><code>export type Tool = {
@@ -36,7 +36,7 @@
 
 <h2 id="locality">高內聚原則：Schema 與 Execute 必須合一</h2>
 <p>
-    <strong>TypeScript reference 的取捨</strong>：將 JSON Schema、replay 宣告與 <code>execute</code> 放在同一物件，可降低定義與實作漂移。Go、Python、Rust 的教學版為保持直接，仍有集中 definitions 與 dispatcher；若採此形式，就必須以 contract tests 持續核對 schema、派發與 runtime guard，而不能假設兩者自然同步。
+    <strong>TypeScript reference 的取捨</strong>：將 JSON Schema、replay 宣告與 <code>execute</code> 放在同一物件，可降低定義與實作漂移。Go、Python、Rust 的教學版為保持直接，仍有集中 definitions 與 dispatcher。若採此形式，就必須以 contract tests 持續核對 schema、派發與 runtime guard，而不能假設兩者自然同步。
 </p>
 
 <pre data-lang="ts"><code>// 推薦做法：將定義、守衛與實作高內聚封裝
@@ -59,7 +59,7 @@ const readTool: Tool = Object.freeze({
 
 <aside class="note">
     <strong>安全邊界：目前 File Tools 沒有 CWD containment</strong><br>
-    tiny-agent 的 <code>read</code>、<code>write</code>、<code>edit</code> 接受 cwd 外絕對路徑，也會跟隨 symlink；CLI 本身不建立 Docker、gVisor、namespace 或其他 OS sandbox。單純以字串前綴檢查 <code>/workspace</code> 確實會遭遇正規化、symlink 與 TOCTOU 問題，但這不代表應用程式永遠無法做安全解析：Linux <code>openat2()</code> 的 <code>RESOLVE_BENEATH</code>、<code>RESOLVE_IN_ROOT</code>、<code>RESOLVE_NO_SYMLINKS</code> 可提供 kernel-assisted 限制。敵對或多租戶工作仍應由外層 <strong>Execution Capsule</strong> 限定檔案系統、行程、資源與網路（詳見第 8 章）。
+    tiny-agent 的 <code>read</code>、<code>write</code>、<code>edit</code> 接受 cwd 外絕對路徑，也會跟隨 symlink。CLI 本身不建立 Docker、gVisor、namespace 或其他 OS sandbox。單純以字串前綴檢查 <code>/workspace</code> 確實會遭遇正規化、symlink 與 TOCTOU 問題，但這不代表應用程式永遠無法做安全解析：Linux <code>openat2()</code> 的 <code>RESOLVE_BENEATH</code>、<code>RESOLVE_IN_ROOT</code>、<code>RESOLVE_NO_SYMLINKS</code> 可提供 kernel-assisted 限制。敵對或多租戶工作仍應由外層 <strong>Execution Capsule</strong> 限定檔案系統、行程、資源與網路（詳見第 8 章）。
 </aside>
 
 <h2 id="validation">JSON Schema 不等於 Runtime Validation</h2>
@@ -74,12 +74,12 @@ const readTool: Tool = Object.freeze({
     <tbody>
         <tr><td><code>null</code> 或 <code>[]</code>（非物件）</td><td>解構時拋出 <code>TypeError: Cannot read property</code></td><td>進入派發前強制校驗 <code>typeof args === "object" && args !== null</code></td></tr>
         <tr><td>型別錯亂（如 <code>{"command": 42}</code>）</td><td>底層 OS 指令執行函式型別崩潰</td><td>在 Tool 內部進行精確型別 Assertion</td></tr>
-        <tr><td>以成功回傳值承載失敗文字</td><td>若監控只看 Promise 是否 reject，可能把失敗記成成功</td><td>先定義清楚 adapter 契約。多數 builtin 參數／I/O 錯誤會 <code>throw</code>；但目前 <code>bash</code> 的 non-zero exit、timeout 與輸出上限會回傳文字，因此其 <code>tool.completed.ok</code> 只代表 adapter 已正常 settle，不等同 shell command exit 0</td></tr>
+        <tr><td>以成功回傳值承載失敗文字</td><td>若監控只看 Promise 是否 reject，可能把失敗記成成功</td><td>先定義清楚 adapter 契約。多數 builtin 參數／I/O 錯誤會 <code>throw</code>。但目前 <code>bash</code> 的 non-zero exit、timeout 與輸出上限會回傳文字，因此其 <code>tool.completed.ok</code> 只代表 adapter 已正常 settle，不等同 shell command exit 0</td></tr>
     </tbody>
 </table>
 
 <p>
-    三種邊界不可混為一談：provider 的 strict function calling（若啟用）約束模型產生的 arguments；tiny-agent builtin tools 另做逐欄 runtime guard；MCP adapter 目前只在 Host 端確認 arguments 是 object 並限制 schema 大小／深度，實際欄位驗證仍由遠端 MCP server 依其 <code>inputSchema</code> 負責。即使 provider 支援 strict mode，Host 與 Tool 邊界仍應把輸入視為不可信。
+    三種邊界不可混為一談：provider 的 strict function calling（若啟用）約束模型產生的 arguments。tiny-agent builtin tools 另做逐欄 runtime guard。MCP adapter 目前只在 Host 端確認 arguments 是 object 並限制 schema 大小／深度，實際欄位驗證仍由遠端 MCP server 依其 <code>inputSchema</code> 負責。即使 provider 支援 strict mode，Host 與 Tool 邊界仍應把輸入視為不可信。
 </p>
 
 <h2 id="background-processes">背景行程管理：為什麼需要 <code>bg</code> 工具？</h2>
@@ -93,8 +93,8 @@ const readTool: Tool = Object.freeze({
     </thead>
     <tbody>
         <tr><td><strong>執行語意</strong></td><td>同步等待命令結束，收集並回傳 stdout/stderr</td><td>非同步啟動行程，短暫確認存活後立即回傳 PID</td></tr>
-        <tr><td><strong>持久伺服器適用性</strong></td><td>會等待命令結束，預設 120 秒 timeout，不適合直接承載長期服務</td><td>適合在目前支援的 POSIX 環境啟動 Dev Server、Watcher；實作依賴 <code>ps</code>、process group 與 Unix signals</td></tr>
-        <tr><td><strong>生命週期控制</strong></td><td>回傳當次 stdout/stderr；被截斷時另存完整輸出檔</td><td>支援 <code>list</code>、<code>status</code>、<code>logs</code>、<code>stop</code>；stop 先送 SIGTERM，等待後仍存活才送 SIGKILL</td></tr>
+        <tr><td><strong>持久伺服器適用性</strong></td><td>會等待命令結束，預設 120 秒 timeout，不適合直接承載長期服務</td><td>適合在目前支援的 POSIX 環境啟動 Dev Server、Watcher。實作依賴 <code>ps</code>、process group 與 Unix signals</td></tr>
+        <tr><td><strong>生命週期控制</strong></td><td>回傳當次 stdout/stderr。被截斷時另存完整輸出檔</td><td>支援 <code>list</code>、<code>status</code>、<code>logs</code>、<code>stop</code>。stop 先送 SIGTERM，等待後仍存活才送 SIGKILL</td></tr>
     </tbody>
 </table>
 
@@ -104,8 +104,8 @@ const readTool: Tool = Object.freeze({
 【核心概念】：bg 工具透過 .tiny-agent/bg/<id>.json 與 .log 追蹤背景行程生命週期
 【視覺元素】：
   1. 上方：Action 狀態轉移（start → running → stop / crash → stale / cleanup）
-  2. 下方：工作目錄檔案映射（.tiny-agent/bg/<id>.json 記錄 PID, 啟動時間, 指令；<id>.log 記錄 stdout/stderr）
-  3. 側邊標示：同一個 cwd 下的下一個 tiny-agent 行程可透過 list/status/logs/stop 手動檢視與清理遺留 server；啟動時不會自動掃描接管。
+  2. 下方：工作目錄檔案映射（.tiny-agent/bg/<id>.json 記錄 PID, 啟動時間, 指令。<id>.log 記錄 stdout/stderr）
+  3. 側邊標示：同一個 cwd 下的下一個 tiny-agent 行程可透過 list/status/logs/stop 手動檢視與清理遺留 server。啟動時不會自動掃描接管。
 【AI 繪圖/SVG Prompt】：
 "System architecture diagram of background process manager (bg tool). Top shows process states: 'start' -> 'running' -> 'logs/status' -> 'stop'. Bottom shows local directory structure: '.tiny-agent/bg/<id>.json' (PID, start time, command) and '.tiny-agent/bg/<id>.log' (real-time stream). High contrast, tech textbook aesthetic, emerald green and slate grey accents."
 [IMAGE_PROMPT_END] -->
@@ -122,7 +122,7 @@ const readTool: Tool = Object.freeze({
 
 <aside class="note">
     <strong>Process Identity 與防誤殺設計</strong><br>
-    每個 <code>bg</code> 行程在 <code>.tiny-agent/bg/&lt;id&gt;.json</code> 中記錄 PID、<code>startedAt</code> 與實際查得的 <code>processStartedAt</code>。後續的 list/status/stop 會把目前 OS 行程啟動時間與 <code>processStartedAt</code> 比對；不一致時標成 <code>stale</code> 且不送 signal，以降低 PID 重複使用造成的誤殺風險。這是防護性檢查，不是不可偽造的 process identity，也不會在 CLI 啟動時自動接管舊行程。
+    每個 <code>bg</code> 行程在 <code>.tiny-agent/bg/&lt;id&gt;.json</code> 中記錄 PID、<code>startedAt</code> 與實際查得的 <code>processStartedAt</code>。後續的 list/status/stop 會把目前 OS 行程啟動時間與 <code>processStartedAt</code> 比對。不一致時標成 <code>stale</code> 且不送 signal，以降低 PID 重複使用造成的誤殺風險。這是防護性檢查，不是不可偽造的 process identity，也不會在 CLI 啟動時自動接管舊行程。
 </aside>
 
 <h2 id="mcp">MCP (Model Context Protocol) 的本質</h2>
@@ -167,7 +167,7 @@ cd ../go
 go test ./cmd/tiny-go -run 'TestFilesystemToolsOperateOutsideCwdIncludingSymlinks' -count=1</code></pre>
 
 <p class="bridge">
-    Tool 確立了 Agent 改變世界的能力邊界；但若每次推論都將所有 Tool 定義與龐大專案規則全數塞進模型，會迅速撐爆 Context Window。下一章我們將探討 <strong>Context Engineering 與 Skills 的漸進式載入（Progressive Loading）</strong>。
+    Tool 確立了 Agent 改變世界的能力邊界。但若每次推論都將所有 Tool 定義與龐大專案規則全數塞進模型，會迅速撐爆 Context Window。下一章我們將探討 <strong>Context Engineering 與 Skills 的漸進式載入（Progressive Loading）</strong>。
 </p>
 
 <aside class="note">

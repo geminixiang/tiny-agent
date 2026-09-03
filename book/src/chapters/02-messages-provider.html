@@ -1,10 +1,10 @@
 <p class="lead">
-    <strong>一句話掌握本章核心</strong>：tiny-agent 的 Chat Completions 配接器會由 Host 重送選入的 <strong>Transcript</strong> 以延續對話；其他 API 也可能提供 Server-managed State。無論狀態由誰管理，Provider 回傳的 Wire Format 都不應未經驗證地進入 Canonical Transcript：本專案以 <strong>正規化防線（Normalization Seam）</strong>只保留允許欄位。
+    <strong>一句話掌握本章核心</strong>：tiny-agent 的 Chat Completions 配接器會由 Host 重送選入的 <strong>Transcript</strong> 以延續對話。其他 API 也可能提供 Server-managed State。無論狀態由誰管理，Provider 回傳的 Wire Format 都不應未經驗證地進入 Canonical Transcript：本專案以 <strong>正規化防線（Normalization Seam）</strong>只保留允許欄位。
 </p>
 
 <h2 id="mental-model">狀態延續的本質：無對話記憶的模型與忠實的紀錄卷軸</h2>
 <p>
-    對 tiny-agent 目前使用的 Chat Completions 模式，可想像模型每次通話都需要 Host 提供本輪有效 Context：System Instructions、選入的歷史、工具定義與結果。這個比喻不涵蓋所有 Endpoint；例如 OpenAI Responses API 可透過 <code>previous_response_id</code> 串接 Provider 管理的狀態。
+    對 tiny-agent 目前使用的 Chat Completions 模式，可想像模型每次通話都需要 Host 提供本輪有效 Context：System Instructions、選入的歷史、工具定義與結果。這個比喻不涵蓋所有 Endpoint。例如 OpenAI Responses API 可透過 <code>previous_response_id</code> 串接 Provider 管理的狀態。
 </p>
 <p>
     在系統架構中，這個「依序重送歷程的紀錄卷軸」就是 <strong>Transcript</strong>。
@@ -84,7 +84,7 @@
         <tr><th>常見錯誤序列 (Illegal Transcripts)</th><th>引發後果</th><th>tiny-agent 防禦機制</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>孤立的 Tool Call</strong><br>發出 <code>call_1</code> 後行程崩潰，未寫入 <code>tool</code> 回傳即重啟</td><td>後續 Request 可能被 Provider 拒絕，也一定違反 tiny-agent 的 Transcript Invariant</td><td>尚未開始的 Tool 可正常啟動；已開始的 Built-in Read 在宣告相符時可 Replay；不能安全 Replay 的 Pending Effect 才補 <strong>Synthetic Interrupted Result</strong></td></tr>
+        <tr><td><strong>孤立的 Tool Call</strong><br>發出 <code>call_1</code> 後行程崩潰，未寫入 <code>tool</code> 回傳即重啟</td><td>後續 Request 可能被 Provider 拒絕，也一定違反 tiny-agent 的 Transcript Invariant</td><td>尚未開始的 Tool 可正常啟動。已開始的 Built-in Read 在宣告相符時可 Replay。不能安全 Replay 的 Pending Effect 才補 <strong>Synthetic Interrupted Result</strong></td></tr>
         <tr><td><strong>ID 不吻合</strong><br><code>tool_call_id</code> 與 Assistant Tool Call 的 ID 不同</td><td>可能被 Provider 拒絕或使工具結果無法正確歸屬</td><td>Reducer 驗證 ID、Tool Name 與 Reference 完整性</td></tr>
         <tr><td><strong>無故插入 Tool 訊息</strong><br>沒有對應 Tool Call 時注入 <code>role: "tool"</code></td><td>違反 Provider Protocol 與本專案的 Canonical Transcript Contract</td><td>由 Agent Loop 與 Strict Reducer 控制合法狀態流轉</td></tr>
     </tbody>
@@ -95,10 +95,10 @@
     <strong>核心踩坑警示</strong>：TypeScript 的 Type Assertion（如 <code>response.message as Message</code>）<strong>只存在於編譯時期，在 JavaScript Runtime 階段完全不會刪除任何欄位</strong>！
 </p>
 <p>
-    若直接將 OpenRouter / OpenAI 回傳的原始物件存入 Canonical Session，諸如 <code>reasoning</code>、<code>refusal</code>、<code>annotations</code> 等供應商專屬欄位會污染持久化格式；tiny-agent 的 Strict Reducer 會以 <code>INVALID_FACT</code> / Session Corruption 拒絕不符合 Exact-key Contract 的資料。另一種架構也可另外保存 Raw Events，但不可把未驗證的 Wire Shape 當成 Canonical Message。
+    若直接將 OpenRouter / OpenAI 回傳的原始物件存入 Canonical Session，諸如 <code>reasoning</code>、<code>refusal</code>、<code>annotations</code> 等供應商專屬欄位會污染持久化格式。tiny-agent 的 Strict Reducer 會以 <code>INVALID_FACT</code> / Session Corruption 拒絕不符合 Exact-key Contract 的資料。另一種架構也可另外保存 Raw Events，但不可把未驗證的 Wire Shape 當成 Canonical Message。
 </p>
 
-<pre data-lang="ts"><code>// tiny-agent 實作的等價節錄；validateToolCall 代表原始碼內的 inline 欄位驗證
+<pre data-lang="ts"><code>// tiny-agent 實作的等價節錄。validateToolCall 代表原始碼內的 inline 欄位驗證
 // 核心契約：先拒絕不合法資料，再以白名單重建 Canonical Object
 function normalizeAssistantMessage(value: unknown): Message {
     // 1. Wire value 必須是非陣列物件，且 role 必須正確
@@ -108,7 +108,7 @@ function normalizeAssistantMessage(value: unknown): Message {
     const raw = value as Record&lt;string, unknown&gt;;
     if (raw.role !== "assistant") throw new Error("invalid assistant message role");
 
-    // 2. content 僅接受 string | null；不合法時拒絕，不做寬鬆轉型
+    // 2. content 僅接受 string | null。不合法時拒絕，不做寬鬆轉型
     if (raw.content !== null &amp;&amp; typeof raw.content !== "string") {
         throw new Error("invalid assistant content");
     }
@@ -132,7 +132,7 @@ function normalizeAssistantMessage(value: unknown): Message {
         <li class="anim-arrow a1" aria-hidden="true">→</li>
         <li class="anim-node s2">
             <span class="anim-title">validate + normalize</span>
-            <span class="anim-data">逐欄檢查：role、content、每個 tool call 的 id / name / arguments；不合法 → throw</span>
+            <span class="anim-data">逐欄檢查：role、content、每個 tool call 的 id / name / arguments。不合法 → throw</span>
         </li>
         <li class="anim-arrow a2" aria-hidden="true">→</li>
         <li class="anim-node s3">
@@ -152,7 +152,7 @@ function normalizeAssistantMessage(value: unknown): Message {
 
 <h2 id="stop-reason">Finish Reason 狀態映射</h2>
 <p>
-    <strong>TL;DR</strong>：tiny-agent 會<strong>交叉驗證</strong> Provider 的 <code>finish_reason</code> 與 Canonical Message。<code>tool_calls</code> / <code>function_call</code> Reason 必須真的含 Calls；<code>length</code> 走截斷分支；而合法、缺省或 <code>stop</code> Reason 若仍帶 Calls，目前實作會依 Calls 正規化為內部 <code>toolUse</code>。
+    <strong>TL;DR</strong>：tiny-agent 會<strong>交叉驗證</strong> Provider 的 <code>finish_reason</code> 與 Canonical Message。<code>tool_calls</code> / <code>function_call</code> Reason 必須真的含 Calls。<code>length</code> 走截斷分支。而合法、缺省或 <code>stop</code> Reason 若仍帶 Calls，目前實作會依 Calls 正規化為內部 <code>toolUse</code>。
 </p>
 
 <table>
@@ -160,17 +160,17 @@ function normalizeAssistantMessage(value: unknown): Message {
         <tr><th>Wire / Internal 狀態</th><th>模型或傳輸狀態</th><th>tiny-agent 處置</th></tr>
     </thead>
     <tbody>
-        <tr><td>Wire <code>stop</code> 或缺省 Reason，且沒有 Calls</td><td>正常推理完畢</td><td>要求非空 Content，寫入正常終局；空回覆則 Failed</td></tr>
-        <tr><td>Wire <code>tool_calls</code> / <code>function_call</code>；Internal <code>toolUse</code></td><td>Provider 宣告 Tool Call，或合法 Message 實際帶 Calls</td><td>Reason 宣告 Tool Call 卻沒有 Calls 時拒絕；否則進入派發流程</td></tr>
-        <tr><td>Wire <code>length</code></td><td><strong>Token 上限觸發截斷</strong></td><td>若含 Calls，逐一寫入 <code>truncated</code> Synthetic Result 且不執行；若沒有 Calls，Model Step 直接 Failed</td></tr>
+        <tr><td>Wire <code>stop</code> 或缺省 Reason，且沒有 Calls</td><td>正常推理完畢</td><td>要求非空 Content，寫入正常終局。空回覆則 Failed</td></tr>
+        <tr><td>Wire <code>tool_calls</code> / <code>function_call</code>。Internal <code>toolUse</code></td><td>Provider 宣告 Tool Call，或合法 Message 實際帶 Calls</td><td>Reason 宣告 Tool Call 卻沒有 Calls 時拒絕。否則進入派發流程</td></tr>
+        <tr><td>Wire <code>length</code></td><td><strong>Token 上限觸發截斷</strong></td><td>若含 Calls，逐一寫入 <code>truncated</code> Synthetic Result 且不執行。若沒有 Calls，Model Step 直接 Failed</td></tr>
         <tr><td>Wire <code>content_filter</code></td><td>Provider 終止生成</td><td>保存 Usage 與失敗事件，不偽造 Assistant Completion</td></tr>
-        <tr><td>HTTP / Network / Parse Error</td><td>Transport 或 Provider Request 根本未產生合法 Completion</td><td>走 Exception / <code>stepFailed</code> 路徑；不要混稱為 Finish Reason</td></tr>
+        <tr><td>HTTP / Network / Parse Error</td><td>Transport 或 Provider Request 根本未產生合法 Completion</td><td>走 Exception / <code>stepFailed</code> 路徑。不要混稱為 Finish Reason</td></tr>
     </tbody>
 </table>
 
 <h2 id="usage">Provider-reported Token Usage 的標準化</h2>
 <p>
-    在多輪對話中，保存每一次物理 Request 由 Provider 回報的 Token Usage，是成本控制與除錯的重要訊號。它不是 tiny-agent 以本機 Tokenizer 獨立重算的絕對量測；OpenRouter 說明 Token Counts 由實際路由模型的 Native Tokenizer 計算，明細欄位也可能依 Endpoint 而異：
+    在多輪對話中，保存每一次物理 Request 由 Provider 回報的 Token Usage，是成本控制與除錯的重要訊號。它不是 tiny-agent 以本機 Tokenizer 獨立重算的絕對量測。OpenRouter 說明 Token Counts 由實際路由模型的 Native Tokenizer 計算，明細欄位也可能依 Endpoint 而異：
 </p>
 
 <pre data-lang="ts"><code>type Usage = {
@@ -181,14 +181,14 @@ function normalizeAssistantMessage(value: unknown): Message {
 };</code></pre>
 
 <p>
-    OpenAI / OpenRouter 風格的 <code>prompt_tokens</code> 可包含 Cache Read / Write Tokens；tiny-agent 依 Provider 回傳的 Optional Details 採用以下內部 Ledger 公式，缺少的明細以 0 處理：
+    OpenAI / OpenRouter 風格的 <code>prompt_tokens</code> 可包含 Cache Read / Write Tokens。tiny-agent 依 Provider 回傳的 Optional Details 採用以下內部 Ledger 公式，缺少的明細以 0 處理：
 </p>
 
 <pre data-lang="text"><code>input = prompt_tokens - cacheRead - cacheWrite
 cacheHitRate = cacheRead / (input + cacheRead + cacheWrite)</code></pre>
 
 <aside class="note">
-    <strong>觀念辨析：單次 Request 命中率 vs. 累積總量</strong>　<code>model.completed.cacheHitRate</code> 是該次 Request 的診斷訊號；下降可能來自 Prefix 改變、TTL、最低可快取長度、Model Routing、Eligibility 或明細缺失，不能單獨證明根因。整個 Run / Session 的比例則須先累加各類 Token Counters，再重新計算。
+    <strong>觀念辨析：單次 Request 命中率 vs. 累積總量</strong>　<code>model.completed.cacheHitRate</code> 是該次 Request 的診斷訊號。下降可能來自 Prefix 改變、TTL、最低可快取長度、Model Routing、Eligibility 或明細缺失，不能單獨證明根因。整個 Run / Session 的比例則須先累加各類 Token Counters，再重新計算。
 </aside>
 
 <h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
@@ -205,17 +205,17 @@ node --import tsx --test --test-name-pattern="rejects malformed provider assista
 
 <aside class="note">
     <strong>官方來源</strong>　
-    <a href="https://platform.openai.com/docs/guides/conversation-state">OpenAI Conversation State</a> 說明 Provider-managed State；
+    <a href="https://platform.openai.com/docs/guides/conversation-state">OpenAI Conversation State</a> 說明 Provider-managed State。
     <a href="https://platform.openai.com/docs/guides/prompt-caching">OpenAI Prompt Caching</a> 與
-    <a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching">Anthropic Prompt Caching</a> 說明 Cache Usage 欄位；
+    <a href="https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching">Anthropic Prompt Caching</a> 說明 Cache Usage 欄位。
     <a href="https://openrouter.ai/docs/api-reference/overview#response-body">OpenRouter API Overview</a> 說明 Native-tokenizer Usage Accounting。
 </aside>
 
 <p class="bridge">
-    嚴格的 Transcript Contract 與正規化防線，使經過目前 Adapter 與 Reducer 接受的資料維持 Canonical 結構；Storage Corruption、未來 Schema 變更與實作 Bug 仍須 Fail-closed 處理。下一章將探討誰把這些 JSON 轉化為檔案讀寫、Shell 執行與背景行程：<strong>Tool 的設計哲學與執行守衛</strong>。
+    嚴格的 Transcript Contract 與正規化防線，使經過目前 Adapter 與 Reducer 接受的資料維持 Canonical 結構。Storage Corruption、未來 Schema 變更與實作 Bug 仍須 Fail-closed 處理。下一章將探討誰把這些 JSON 轉化為檔案讀寫、Shell 執行與背景行程：<strong>Tool 的設計哲學與執行守衛</strong>。
 </p>
 
 <aside class="note">
     <strong>閱讀原始碼</strong>　
-    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts">TypeScript <code>normalizeAssistantMessage()</code> 與 OpenRouter <code>callModel()</code></a>；使用函式名稱搜尋可避免行號隨版本漂移。
+    <a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts">TypeScript <code>normalizeAssistantMessage()</code> 與 OpenRouter <code>callModel()</code></a>。使用函式名稱搜尋可避免行號隨版本漂移。
 </aside>

@@ -1,5 +1,5 @@
 <p class="lead">
-    <strong>一句話掌握本章核心</strong>：在 tiny-agent 的工程模型中，單次模型推論不自行保存應用程式對話；Agent Runtime 則以「<strong>接收目標 → 呼叫模型 → 執行工具 → 寫回觀測 → 再判斷</strong>」形成閉環。本流程與 OODA 的概念相近，但不是 OODA 原典的四階段定義；OODA 正確順序是 Observe → Orient → Decide → Act。
+    <strong>一句話掌握本章核心</strong>：在 tiny-agent 的工程模型中，單次模型推論不自行保存應用程式對話。Agent Runtime 則以「<strong>接收目標 → 呼叫模型 → 執行工具 → 寫回觀測 → 再判斷</strong>」形成閉環。本流程與 OODA 的概念相近，但不是 OODA 原典的四階段定義。OODA 正確順序是 Observe → Orient → Decide → Act。
 </p>
 
 <h2 id="llm-is-not-agent">LLM 不是 Agent</h2>
@@ -7,13 +7,13 @@
     在計算機模型中，單次 LLM 呼叫可以高度抽象為純函式：<code>output = model(messages)</code>。
 </p>
 <p>
-    對 tiny-agent 使用的 OpenRouter Chat Completions 配接器而言，模型推論不自行記住上一次呼叫，也不直接具備讀檔、編譯或連網的 OS 權限；Host 會在下一次 Request 重送選入的 Messages。其他 Endpoint 也可能提供 Server-managed Conversation State，因此這是本專案的配接模式，不是所有 Model API 的普遍限制。
+    對 tiny-agent 使用的 OpenRouter Chat Completions 配接器而言，模型推論不自行記住上一次呼叫，也不直接具備讀檔、編譯或連網的 OS 權限。Host 會在下一次 Request 重送選入的 Messages。其他 Endpoint 也可能提供 Server-managed Conversation State，因此這是本專案的配接模式，不是所有 Model API 的普遍限制。
 </p>
 
 <figure class="diagram-embed" id="fig-01-llm-vs-agent" aria-labelledby="fig-01-llm-vs-agent-caption">
     <img src="<!-- ASSET:01-llm-vs-agent.png -->" alt="LLM 純函式與 Agent 閉環控制系統對比圖" loading="lazy" />
     <figcaption id="fig-01-llm-vs-agent-caption">
-        圖 1：LLM 與 Agent 的工程邊界——模型負責根據有效 Context 產生輸出；Agent 則以 Transcript、Session 狀態與 Tool 副作用形成閉環系統。
+        圖 1：LLM 與 Agent 的工程邊界——模型負責根據有效 Context 產生輸出。Agent 則以 Transcript、Session 狀態與 Tool 副作用形成閉環系統。
     </figcaption>
 </figure>
 
@@ -23,9 +23,9 @@
     </thead>
     <tbody>
         <tr><td><strong>計算本質</strong></td><td>可近似為推論函式 <code>f(context) -&gt; distribution/output</code></td><td>以狀態機為核心的閉環控制系統 (Control Loop)</td></tr>
-        <tr><td><strong>狀態延續</strong></td><td>模型不自行保存 tiny-agent 的對話；Endpoint 也可能提供 Server-managed State</td><td>本專案由 Host 的 Messages、Durable Session 與 Operation State 維持</td></tr>
+        <tr><td><strong>狀態延續</strong></td><td>模型不自行保存 tiny-agent 的對話。Endpoint 也可能提供 Server-managed State</td><td>本專案由 Host 的 Messages、Durable Session 與 Operation State 維持</td></tr>
         <tr><td><strong>環境副作用</strong></td><td>零（僅產生字串或 JSON 資料）</td><td>有（透過 Tool Adapter 執行真實 I/O 與 Shell 命令）</td></tr>
-        <tr><td><strong>終止條件</strong></td><td>產生 Stop Token、達到長度上限或 Provider 中止</td><td>正常情況是沒有 Tool Calls 且有非空答案；也可能因取消、截斷、Provider Error 或 Runtime Failure 結束</td></tr>
+        <tr><td><strong>終止條件</strong></td><td>產生 Stop Token、達到長度上限或 Provider 中止</td><td>正常情況是沒有 Tool Calls 且有非空答案。也可能因取消、截斷、Provider Error 或 Runtime Failure 結束</td></tr>
     </tbody>
 </table>
 
@@ -100,7 +100,7 @@
         <li class="anim-arrow a1" aria-hidden="true">→</li>
         <li class="anim-node s2">
             <span class="anim-title">model(messages)</span>
-            <span class="anim-data">此偽碼每次重送 messages；完整 Runtime 另有 Session、設定與 Operation 狀態</span>
+            <span class="anim-data">此偽碼每次重送 messages。完整 Runtime 另有 Session、設定與 Operation 狀態</span>
         </li>
         <li class="anim-arrow a2" aria-hidden="true">→</li>
         <li class="anim-node s3">
@@ -142,7 +142,7 @@
         <tr><th>核心工具名稱</th><th>本質功能</th><th>系統對應操作</th><th>安全性考量</th></tr>
     </thead>
     <tbody>
-        <tr><td><code>read</code></td><td>讀取 UTF-8 檔案內容</td><td>Node <code>readFile()</code> 後分頁回傳</td><td>限制回傳為 2,000 行 / 50KB；目前會先讀完整檔案，且不做 CWD 路徑限制</td></tr>
+        <tr><td><code>read</code></td><td>讀取 UTF-8 檔案內容</td><td>Node <code>readFile()</code> 後分頁回傳</td><td>限制回傳為 2,000 行 / 50KB。目前會先讀完整檔案，且不做 CWD 路徑限制</td></tr>
         <tr><td><code>write</code></td><td>建立新檔或覆寫檔案</td><td>Node <code>writeFile()</code></td><td>會直接覆寫且可操作 CWD 外路徑，呼叫者與部署層須提供授權與隔離</td></tr>
         <tr><td><code>edit</code></td><td>針對指定字串區段精準置換</td><td>精確字串比對與取代 (Exact Match)</td><td>要求每個目標在原檔恰好出現一次且 Edit 不重疊</td></tr>
         <tr><td><code>bash</code></td><td>執行外部指令、編譯與測試</td><td>Node <code>exec()</code> 經 Shell 啟動子行程 (Child Process)</td><td>有 Timeout 與輸出截斷，但不是 OS Sandbox</td></tr>
@@ -175,7 +175,7 @@
         <tr>
             <td><strong>Agent Runtime (心臟)</strong></td>
             <td>調度迴圈、管理 Message 狀態機、捕捉例外</td>
-            <td>不應無意間耦合本可由 Tool / Workflow 模組承擔的領域政策；這是 tiny-agent 的設計取捨</td>
+            <td>不應無意間耦合本可由 Tool / Workflow 模組承擔的領域政策。這是 tiny-agent 的設計取捨</td>
         </tr>
         <tr>
             <td><strong>Tool Adapter (手腳)</strong></td>
@@ -189,18 +189,18 @@
         </tr>
         <tr>
             <td><strong>CLI / Host (外殼)</strong></td>
-            <td>提供使用者互動介面與 Plugin Allowlist；生產部署另須配置 OS Sandbox、資源與網路邊界</td>
-            <td>將部署安全責任推卸給模型；tiny-agent CLI 本身不建立 Container 或 VM Sandbox</td>
+            <td>提供使用者互動介面與 Plugin Allowlist。生產部署另須配置 OS Sandbox、資源與網路邊界</td>
+            <td>將部署安全責任推卸給模型。tiny-agent CLI 本身不建立 Container 或 VM Sandbox</td>
         </tr>
     </tbody>
 </table>
 
 <aside class="note">
-    <strong>閱讀原始碼</strong>　<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts">TypeScript <code>Agent.runAgentLoop()</code></a> 是本閉環的 Reference Implementation；使用函式名稱搜尋可避免行號隨版本漂移。
+    <strong>閱讀原始碼</strong>　<a href="https://github.com/geminixiang/tiny-agent/blob/main/typescript/src/index.ts">TypeScript <code>Agent.runAgentLoop()</code></a> 是本閉環的 Reference Implementation。使用函式名稱搜尋可避免行號隨版本漂移。
 </aside>
 
 <aside class="note">
-    <strong>術語來源</strong>　OODA 的原典四階段為 Observe、Orient、Decide、Act；參見 Air University Press 收錄的 John Boyd <a href="https://www.airuniversity.af.edu/Portals/10/AUPress/Books/B_0151_BOYD_DISCOURSE_WINNING_LOSING.PDF"><cite>A Discourse on Winning and Losing</cite></a>。本章 Agent Loop 是軟體資料流，不把「Loop」冒充 OODA 的一個階段。
+    <strong>術語來源</strong>　OODA 的原典四階段為 Observe、Orient、Decide、Act。參見 Air University Press 收錄的 John Boyd <a href="https://www.airuniversity.af.edu/Portals/10/AUPress/Books/B_0151_BOYD_DISCOURSE_WINNING_LOSING.PDF"><cite>A Discourse on Winning and Losing</cite></a>。本章 Agent Loop 是軟體資料流，不把「Loop」冒充 OODA 的一個階段。
 </aside>
 
 <h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
@@ -211,15 +211,15 @@
 <pre data-lang="sh"><code># 1. 賦予 read 權限：Agent 能夠讀取 README 並正常回答
 tiny-ts --plugin read "讀取 README.md，說明 agent loop"
 
-# 2. 在拋棄式目錄中只賦予 write；Request 不會出現 read Tool Schema
+# 2. 在拋棄式目錄中只賦予 write。Request 不會出現 read Tool Schema
 scratch=$(mktemp -d)
 printf '# disposable fixture\n' > "$scratch/README.md"
-(cd "$scratch" && tiny-ts --plugin write "不要修改檔案；若無法讀取 README.md，說明缺少哪個工具")</code></pre>
+(cd "$scratch" && tiny-ts --plugin write "不要修改檔案。若無法讀取 README.md，說明缺少哪個工具")</code></pre>
 
 <p>
-    <strong>核心收穫</strong>：Agent 的可派發能力由本次 Request 中 Host 實際注入並支援的 Tool Schemas 決定。第二個命令可驗證 Runtime 不會派發未啟用的 <code>read</code>；模型是否以特定措辭拒絕仍具非確定性，不能把自然語言反應當成權限測試。
+    <strong>核心收穫</strong>：Agent 的可派發能力由本次 Request 中 Host 實際注入並支援的 Tool Schemas 決定。第二個命令可驗證 Runtime 不會派發未啟用的 <code>read</code>。模型是否以特定措辭拒絕仍具非確定性，不能把自然語言反應當成權限測試。
 </p>
 
 <p class="bridge">
-    上方教學偽碼若只有 Heap 中的 <code>messages</code>，Process 結束便會失去狀態；但本 repo 的 TypeScript reference implementation 已要求 <code>SessionStore</code>，並在 Run、Model Attempt、Assistant Message 與 Tool Result 等邊界 Append JSONL Facts。下一章先探討 <strong>Message 的規範化 (Normalization) 與 Provider Adapter</strong>，再於後續章節完整說明 Durable Session。
+    上方教學偽碼若只有 Heap 中的 <code>messages</code>，Process 結束便會失去狀態。但本 repo 的 TypeScript reference implementation 已要求 <code>SessionStore</code>，並在 Run、Model Attempt、Assistant Message 與 Tool Result 等邊界 Append JSONL Facts。下一章先探討 <strong>Message 的規範化 (Normalization) 與 Provider Adapter</strong>，再於後續章節完整說明 Durable Session。
 </p>

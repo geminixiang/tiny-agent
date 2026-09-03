@@ -6,7 +6,7 @@ const backdrop = document.querySelector("[data-drawer-backdrop]");
 const sidebar = document.querySelector("[data-sidebar]");
 const mobile = matchMedia("(max-width: 860px)");
 
-// theme.js（render-blocking）已在 first paint 前套用儲存的主題；這裡只同步按鈕狀態與處理切換。
+// theme.js（render-blocking）已在 first paint 前套用儲存的主題。這裡只同步按鈕狀態與處理切換。
 // 未曾手動切換過的讀者不寫 localStorage，讓他們繼續跟隨 OS 偏好。
 function effectiveTheme() {
     return root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");

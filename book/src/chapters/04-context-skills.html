@@ -32,8 +32,8 @@
         <tr><th>Context 層級</th><th>資料來源</th><th>生命週期與特性</th><th>Token 佔用成本</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>1. Base Instructions</strong></td><td>內建 Runtime</td><td>核心 Agent 身分、基本 Workflow 準則；組入 system message</td><td>固定文字，但 token 數依 tokenizer／model 而異</td></tr>
-        <tr><td><strong>2. Project Rules</strong></td><td><code>./AGENTS.md</code></td><td>目前專案特定的 Coding Style、禁忌與指令；同樣組入 system message</td><td>隨檔案長度增加；穩定 prefix 可能符合 Prompt Cache 條件</td></tr>
+        <tr><td><strong>1. Base Instructions</strong></td><td>內建 Runtime</td><td>核心 Agent 身分、基本 Workflow 準則。組入 system message</td><td>固定文字，但 token 數依 tokenizer／model 而異</td></tr>
+        <tr><td><strong>2. Project Rules</strong></td><td><code>./AGENTS.md</code></td><td>目前專案特定的 Coding Style、禁忌與指令。同樣組入 system message</td><td>隨檔案長度增加。穩定 prefix 可能符合 Prompt Cache 條件</td></tr>
         <tr><td><strong>3. Skill Metadata</strong></td><td><code>.tiny-agent/skills/**/SKILL.md</code> 與 <code>--skill</code></td><td>索引只放 Name、Description 與 Location，不預載正文</td><td>仍會隨 skill 數量、描述與路徑長度線性增加，但通常遠小於全文</td></tr>
         <tr><td><strong>4. Conversation</strong></td><td>即時對話歷程</td><td>動態 Append 的 User 指令、Tool Calls 與 Observations</td><td>持續成長（需透過 Compaction 治理）</td></tr>
     </tbody>
@@ -54,7 +54,7 @@ Project-specific instructions and guidelines:
 &lt;/project_context&gt;</code></pre>
 
 <aside class="note">
-    <strong>最佳實踐與信任邊界</strong>：<code>AGENTS.md</code> 適合存放架構決策、團隊規範與測試命令；API 金鑰、密碼等敏感憑證應交由 secrets manager／環境注入，不應提交到這類專案文字檔。XML-like 標籤只提供模型可讀的語意分隔，沒有 escaping、簽章或權限隔離；檔案內容仍是 prompt text，不能把標籤視為 prompt-injection 防線。
+    <strong>最佳實踐與信任邊界</strong>：<code>AGENTS.md</code> 適合存放架構決策、團隊規範與測試命令。API 金鑰、密碼等敏感憑證應交由 secrets manager／環境注入，不應提交到這類專案文字檔。XML-like 標籤只提供模型可讀的語意分隔，沒有 escaping、簽章或權限隔離。檔案內容仍是 prompt text，不能把標籤視為 prompt-injection 防線。
 </aside>
 
 <h2 id="skills">Skills 的漸進式載入 (Progressive Loading)</h2>
@@ -62,7 +62,7 @@ Project-specific instructions and guidelines:
     <strong>核心設計哲學</strong>：不要在啟動時把所有 Skill 的正文全數灌入！
 </p>
 <p>
-    系統啟動時遞迴掃描目錄，以小型 parser 從 frontmatter 抽取單行 <code>name</code> 與 <code>description</code>，再加上檔案 location 建立輕量索引。它不是完整 YAML parser；多行 scalar、巢狀結構等一般 YAML 語法不在此教學實作的 contract 內：
+    系統啟動時遞迴掃描目錄，以小型 parser 從 frontmatter 抽取單行 <code>name</code> 與 <code>description</code>，再加上檔案 location 建立輕量索引。它不是完整 YAML parser。多行 scalar、巢狀結構等一般 YAML 語法不在此教學實作的 contract 內：
 </p>
 
 <pre data-lang="yaml"><code>---
@@ -75,16 +75,16 @@ description: 針對 ADHD 讀者最佳化輸出結構，提供結論先行、高�
         <tr><th>比較項目</th><th>全部預先載入 (Eager All-in)</th><th>漸進式按需載入 (Progressive Loading)</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>初始 Token 消耗</strong></td><td>隨 Skill 全文總長線性增加</td><td>也會隨 metadata 數量線性增加，但斜率通常較低；應以目標 model tokenizer 實測</td></tr>
+        <tr><td><strong>初始 Token 消耗</strong></td><td>隨 Skill 全文總長線性增加</td><td>也會隨 metadata 數量線性增加，但斜率通常較低。應以目標 model tokenizer 實測</td></tr>
         <tr><td><strong>模型注意力聚焦</strong></td><td>❌ 充斥大量無關領域規則，干擾推論</td><td>✅ 保持上下文純淨，模型只關注當前任務</td></tr>
-        <tr><td><strong>可稽核性 (Auditability)</strong></td><td>正文從 request 一開始就存在，較難分辨何時真正使用</td><td>Autonomous route 若呼叫 <code>read(SKILL.md)</code>，該 tool call/result 會進 durable Session；這能證明曾讀取，不證明模型確實遵循或正確理解</td></tr>
+        <tr><td><strong>可稽核性 (Auditability)</strong></td><td>正文從 request 一開始就存在，較難分辨何時真正使用</td><td>Autonomous route 若呼叫 <code>read(SKILL.md)</code>，該 tool call/result 會進 durable Session。這能證明曾讀取，不證明模型確實遵循或正確理解</td></tr>
     </tbody>
 </table>
 
 <h3 id="skill-loading-paths">兩種合法的 Skill 載入路徑</h3>
 <ol>
     <li><strong>模型自主觸發（Autonomous Route）</strong>：<br>
-        模型閱讀 Metadata 後，判斷當前任務匹配該 Skill，主動呼叫 <code>read(path: ".tiny-agent/skills/.../SKILL.md")</code>。System prompt 要求缺少能力時說明限制，而 runtime 能保證的是「未提供的 tool 不會被派發」；它無法保證模型一定誠實、一定選中正確 Skill 或一定產生特定措辭。
+        模型閱讀 Metadata 後，判斷當前任務匹配該 Skill，主動呼叫 <code>read(path: ".tiny-agent/skills/.../SKILL.md")</code>。System prompt 要求缺少能力時說明限制，而 runtime 能保證的是「未提供的 tool 不會被派發」。它無法保證模型一定誠實、一定選中正確 Skill 或一定產生特定措辭。
     </li>
     <li><strong>使用者顯式指定（CLI Slash Command Route）</strong>：<br>
         使用者輸入 <code>/skill:i-have-adhd 說明架構</code>。CLI 作為 Trusted Host 會直接讀取本機 Skill 檔案，將全文附加至本次 User Message 送入，<strong>此路徑完全不需要賦予模型 <code>read</code> 權限</strong>。
@@ -104,7 +104,7 @@ Round 3: ... + [Tool: bash test] ─────────→ 12,000 Tokens (�
     即使 Provider 支援 Prompt Cache 降低費用，<strong>Context Window 的物理上限依然存在</strong>。完整的 Context 治理必須包含：
 </p>
 <ul>
-    <li><strong>Tool 邊界截斷</strong>：單次 <code>read</code> 最多 2,000 行 / 50KB；<code>bash</code> 輸出限制長度。</li>
+    <li><strong>Tool 邊界截斷</strong>：單次 <code>read</code> 最多 2,000 行 / 50KB。<code>bash</code> 輸出限制長度。</li>
     <li><strong>Skill 漸進載入</strong>：維持極小 Initial Context。</li>
     <li><strong>Durable Compaction（歷史壓縮）</strong>：適時將舊對話總結為精確 Facts（詳見第 7 章）。</li>
 </ul>
@@ -187,7 +187,7 @@ tiny-ts --plugin write "/skill:taiwan-locale 校驗這句話：'釋放未使用�
 </ol>
 
 <p class="bridge">
-    至此，我們已經掌握了 Agent 的大腦（Model）、手腳（Tools）與注意力（Context）。實際 CLI 在開始工作前就會建立或開啟 JSONL Session，並在每一步追加 facts；記憶體中的 <code>messages</code> 只是可由 durable log 重建的 active view。下一章將把這條已存在的持久化路徑拆開，說明<strong>先記 Intent，再發動 Effect</strong>的寫入順序、torn-tail 修復與明確的 durability 限制。
+    至此，我們已經掌握了 Agent 的大腦（Model）、手腳（Tools）與注意力（Context）。實際 CLI 在開始工作前就會建立或開啟 JSONL Session，並在每一步追加 facts。記憶體中的 <code>messages</code> 只是可由 durable log 重建的 active view。下一章將把這條已存在的持久化路徑拆開，說明<strong>先記 Intent，再發動 Effect</strong>的寫入順序、torn-tail 修復與明確的 durability 限制。
 
 </p>
 

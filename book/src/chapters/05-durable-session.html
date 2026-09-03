@@ -1,5 +1,5 @@
 <p class="lead">
-    <strong>一句話掌握本章核心</strong>：如果假設網路永遠正常、工具永遠成功、行程絕不崩潰，幾十行就能寫出 Agent；但生產環境的硬核挑戰在於<strong>崩潰之後仍能辨認已知與未知</strong>。tiny-agent 採用 WAL（Write-Ahead Logging）啟發的 append-only 設計：<strong>先記意圖（Intent），再發動副作用（Effect）</strong>。
+    <strong>一句話掌握本章核心</strong>：如果假設網路永遠正常、工具永遠成功、行程絕不崩潰，幾十行就能寫出 Agent。但生產環境的硬核挑戰在於<strong>崩潰之後仍能辨認已知與未知</strong>。tiny-agent 採用 WAL（Write-Ahead Logging）啟發的 append-only 設計：<strong>先記意圖（Intent），再發動副作用（Effect）</strong>。
 </p>
 
 <h2 id="mental-model">經典問題：被 <code>kill -9</code> 強制關閉後，指令到底執行了沒？</h2>
@@ -12,8 +12,8 @@
         <tr><th>若採用錯誤的「先做再記」策略</th><th>崩潰重啟後的致命困境</th><th>系統被迫面臨的代價</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>執行完畢才寫磁碟</strong><br><code>execute() -&gt; append()</code></td><td>磁碟中可能完全沒有這筆記錄，系統無法判斷 effect 是否已發生。</td><td><strong>猜錯代價巨大</strong>：若重新執行會造成重複部署；若以為沒事則遺漏關鍵變更。</td></tr>
-        <tr><td><strong>先寫意圖才發動副作用</strong><br><code>append(toolStarted) -&gt; execute() -&gt; append(toolResult)</code></td><td>磁碟明確記錄「我打算執行 <code>deploy.sh</code>」，但缺少結束記錄。</td><td><strong>確定的未知</strong>：復原規則會依狀態與 Replay Policy 決定下一步；尚未開始的 effect 可正常啟動，符合 identity/key 的 builtin read 可 replay，執行狀態不明且不可安全 replay 的 effect 才補 <code>interrupted</code>。</td></tr>
+        <tr><td><strong>執行完畢才寫磁碟</strong><br><code>execute() -&gt; append()</code></td><td>磁碟中可能完全沒有這筆記錄，系統無法判斷 effect 是否已發生。</td><td><strong>猜錯代價巨大</strong>：若重新執行會造成重複部署。若以為沒事則遺漏關鍵變更。</td></tr>
+        <tr><td><strong>先寫意圖才發動副作用</strong><br><code>append(toolStarted) -&gt; execute() -&gt; append(toolResult)</code></td><td>磁碟明確記錄「我打算執行 <code>deploy.sh</code>」，但缺少結束記錄。</td><td><strong>確定的未知</strong>：復原規則會依狀態與 Replay Policy 決定下一步。尚未開始的 effect 可正常啟動，符合 identity/key 的 builtin read 可 replay，執行狀態不明且不可安全 replay 的 effect 才補 <code>interrupted</code>。</td></tr>
     </tbody>
 </table>
 
@@ -53,7 +53,7 @@
 
 <h2 id="framing">單一 JSONL 檔案的兩類核心紀錄</h2>
 <p>
-    Session 檔案由第一行的全域 Header 與後續的交易行（Transactions）組成。每行是 reducer 與 torn-tail 修復使用的 <strong>atomic recovery unit</strong>；這不表示任意 OS/filesystem 都保證單次 write 在硬體層永遠全有或全無：
+    Session 檔案由第一行的全域 Header 與後續的交易行（Transactions）組成。每行是 reducer 與 torn-tail 修復使用的 <strong>atomic recovery unit</strong>。這不表示任意 OS/filesystem 都保證單次 write 在硬體層永遠全有或全無：
 </p>
 
 <pre data-lang="json"><code>// Line 1: Header（Session 建立時寫入的設定與環境身分）
@@ -77,16 +77,16 @@
     <tbody>
         <tr><td><code>entry</code></td><td>User/Assistant 訊息、Tool 結果、Compaction 摘要</td><td>✅ <strong>會</strong>（依 Active Context 規則選入）</td><td>維持模型推論所需的上下文與語意歷史</td></tr>
         <tr><td><code>record</code></td><td><code>runStarted</code>, <code>stepAttempt</code>, <code>toolStarted</code>, <code>abortRequested</code></td><td>❌ <strong>不會</strong></td><td>供 Reducer 與 Planner 進行狀態轉移與崩潰復原</td></tr>
-        <tr><td><code>usage</code></td><td>每次物理 API 請求由 provider 回報並經 adapter 正規化的 Token/Cache 明細</td><td>❌ <strong>不會</strong></td><td>獨立的 Usage Ledger；精度與欄位完整性受 provider response 影響</td></tr>
+        <tr><td><code>usage</code></td><td>每次物理 API 請求由 provider 回報並經 adapter 正規化的 Token/Cache 明細</td><td>❌ <strong>不會</strong></td><td>獨立的 Usage Ledger。精度與欄位完整性受 provider response 影響</td></tr>
     </tbody>
 </table>
 
 <h2 id="transaction-invariants">交易不變量 (Transaction Invariants)</h2>
 <ol>
     <li><strong>單調遞增 <code>seq</code></strong>：流水號從 1 開始，檔案內每一筆 Fact（包含 Array 內部）嚴格遞增 +1，絕不允許跳號或重複。</li>
-    <li><strong>本機 UUIDv7 與外部 ID 分工</strong>：tiny-agent 配置的 Fact、Operation、Entry、Step 等 ID 使用 UUIDv7 並受引用不變量約束；provider 傳入的 <code>tool_call_id</code> 是外部 protocol ID，不要求是 UUID。</li>
+    <li><strong>本機 UUIDv7 與外部 ID 分工</strong>：tiny-agent 配置的 Fact、Operation、Entry、Step 等 ID 使用 UUIDv7 並受引用不變量約束。provider 傳入的 <code>tool_call_id</code> 是外部 protocol ID，不要求是 UUID。</li>
     <li><strong>先持久化再更新記憶體（WAL 原則）</strong>：資料必須先以 LF 格式 Append 至磁碟，成功後才允許更新記憶體狀態機。</li>
-    <li><strong>Torn-Tail 容錯修復</strong>：最後一個 <code>\n</code>（LF）之後未完成的殘缺 Bytes 視為 Torn Tail，在開啟 Session 時自動截斷修復；但如果某一行在 LF 之前就存在語法或欄位錯誤，則視為嚴重的 <strong>Corruption</strong>，系統選擇 Fail-closed 拒絕載入。</li>
+    <li><strong>Torn-Tail 容錯修復</strong>：最後一個 <code>\n</code>（LF）之後未完成的殘缺 Bytes 視為 Torn Tail，在開啟 Session 時自動截斷修復。但如果某一行在 LF 之前就存在語法或欄位錯誤，則視為嚴重的 <strong>Corruption</strong>，系統選擇 Fail-closed 拒絕載入。</li>
 </ol>
 
 <h2 id="store">深而小的 Storage 介面</h2>
@@ -94,7 +94,7 @@
     SessionStore 是標準的 <strong>Deep Module</strong>——以極簡的介面隱藏了極其複雜的交易流水號、ID 生成、佇列排程與尾端修復：
 </p>
 
-<pre data-lang="ts"><code>// 教學化摘錄；實際 public method 名稱與核心語意如下
+<pre data-lang="ts"><code>// 教學化摘錄。實際 public method 名稱與核心語意如下
 interface SessionStore {
     append(input: NewFact | NewFact[]): Promise&lt;CommittedFact[]&gt;; // 驗證後追加一個 recovery unit
     load(): Promise&lt;SessionState&gt;;                                // 取得 reducer 投影的目前狀態
@@ -120,7 +120,7 @@ interface SessionStore {
 
 <h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
 <p>
-    先用任意 JSONL 示範 LF framing，再執行真正的 SessionStore contract test（不需消耗 API 額度）。前兩步只展示「最後完整 LF prefix」概念；手工 header/fact 並不符合完整 session schema，不能當成合法 Session fixture：
+    先用任意 JSONL 示範 LF framing，再執行真正的 SessionStore contract test（不需消耗 API 額度）。前兩步只展示「最後完整 LF prefix」概念。手工 header/fact 並不符合完整 session schema，不能當成合法 Session fixture：
 </p>
 
 <pre data-lang="sh"><code># 1. 手工建立帶有殘缺尾部的 JSONL 檔案
@@ -142,7 +142,7 @@ cd typescript
 node --import tsx --test --test-name-pattern="repairs a torn tail" tests/session.test.ts</code></pre>
 
 <p class="bridge">
-    透過 WAL 順序與 append-only JSONL，tiny-agent 為正常 runtime 寫入提供可追溯、可驗證內部一致性的 session history；但沒有 MAC、signature、trusted timestamp 或外部 anchor，因此它不是能抵抗有寫檔權限攻擊者的「不可竄改合規 audit log」。當行程重啟並讀入整份日誌後，<strong>我們該如何從數百筆時序事件中計算目前狀態並決定下一步？</strong>下一章將深入探討 <strong>Pure Reducer 與 Planner 的復原狀態機</strong>。
+    透過 WAL 順序與 append-only JSONL，tiny-agent 為正常 runtime 寫入提供可追溯、可驗證內部一致性的 session history。但沒有 MAC、signature、trusted timestamp 或外部 anchor，因此它不是能抵抗有寫檔權限攻擊者的「不可竄改合規 audit log」。當行程重啟並讀入整份日誌後，<strong>我們該如何從數百筆時序事件中計算目前狀態並決定下一步？</strong>下一章將深入探討 <strong>Pure Reducer 與 Planner 的復原狀態機</strong>。
 </p>
 
 <aside class="note">

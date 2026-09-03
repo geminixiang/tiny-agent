@@ -1,10 +1,10 @@
 <p class="lead">
-    <strong>一句話掌握本章核心</strong>：崩潰重啟後最危險的直覺，就是「把上次沒做完的指令再跑一次」。tiny-agent 將復原判斷拆成兩個 <strong>Pure Functions（純函式）</strong>：第一步由 WAL bytes<strong>還原狀態（Reducer）</strong>；第二步比對當前環境與設定，產生<strong>復原計畫（Planner）</strong>；真正的 I/O 留給外層 Runtime 執行。
+    <strong>一句話掌握本章核心</strong>：崩潰重啟後最危險的直覺，就是「把上次沒做完的指令再跑一次」。tiny-agent 將復原判斷拆成兩個 <strong>Pure Functions（純函式）</strong>：第一步由 WAL bytes<strong>還原狀態（Reducer）</strong>。第二步比對當前環境與設定，產生<strong>復原計畫（Planner）</strong>。真正的 I/O 留給外層 Runtime 執行。
 </p>
 
 <h2 id="two-functions">兩個不執行外部 Effect 的 Pure Functions</h2>
 <p>
-    將狀態計算與外部 I/O 分離，能讓復原決策更容易重播與測試；可預測性仍取決於嚴格解析、不變量與外層 executor 是否正確遵守計畫：
+    將狀態計算與外部 I/O 分離，能讓復原決策更容易重播與測試。可預測性仍取決於嚴格解析、不變量與外層 executor 是否正確遵守計畫：
 </p>
 
 <pre data-lang="text"><code>1. Reducer（純狀態重組）: reduceSession(wal_bytes) ──────────→ SessionState
@@ -39,7 +39,7 @@
 
 <h2 id="retry-replay">RecoveryPlan 與常見復原語意</h2>
 <p>
-    實際 <code>RecoveryPlan</code> 是 <code>finish | startStep | startTool | appendSynthetic | closeAttempt | blocked</code> 的 discriminated union。下表用較高階的語意解釋其中常見分支；它不是型別本身的完整列舉：
+    實際 <code>RecoveryPlan</code> 是 <code>finish | startStep | startTool | appendSynthetic | closeAttempt | blocked</code> 的 discriminated union。下表用較高階的語意解釋其中常見分支。它不是型別本身的完整列舉：
 </p>
 
 <!-- [IMAGE_PROMPT_START]
@@ -64,27 +64,27 @@
         <tr><th>復原結局</th><th>精確定義與適用情境</th><th>處理方式與責任方</th></tr>
     </thead>
     <tbody>
-        <tr><td><strong>Retry</strong></td><td><strong>模型請求重試</strong>：WAL 顯示前次 attempt 尚未結算。</td><td>以記錄的 context boundary 再發送一次請求；configuration 必須相符，且最多進入 Attempt 2。這不是 exactly-once，輸出、路由與費用仍可能不同。</td></tr>
-        <tr><td><strong>Replay</strong></td><td><strong>安全工具重放</strong>：已寫 <code>toolStarted</code>、結果未知，且 persisted/current replay declaration 與 implementation identity 相符。</td><td>目前內建工具僅真正的 <code>builtin:read:v1</code> 會標為 safe；重新讀取時檔案內容仍可能已改變。</td></tr>
-        <tr><td><strong>Blocked</strong></td><td><strong>相容性阻斷</strong>：configuration、environment 或 safe replay declaration 不一致。</td><td>停止自動 effect 並拋出 blocked error，不寫終局；但 <code>attempts_exhausted</code> 是例外：一般 run 由 executor 轉成 failed 終局，compaction 則維持 blocked。</td></tr>
-        <tr><td><strong>Finish / Synthetic</strong></td><td>已存在 <code>stepFailed</code>、正常/截斷/取消終局，或需要補 <code>interrupted</code>、<code>truncated</code> 等 synthetic result。</td><td>Planner 只描述下一步；<code>resumeSession()</code> 才 append facts、呼叫 model/tool 或完成 operation。</td></tr>
+        <tr><td><strong>Retry</strong></td><td><strong>模型請求重試</strong>：WAL 顯示前次 attempt 尚未結算。</td><td>以記錄的 context boundary 再發送一次請求。configuration 必須相符，且最多進入 Attempt 2。這不是 exactly-once，輸出、路由與費用仍可能不同。</td></tr>
+        <tr><td><strong>Replay</strong></td><td><strong>安全工具重放</strong>：已寫 <code>toolStarted</code>、結果未知，且 persisted/current replay declaration 與 implementation identity 相符。</td><td>目前內建工具僅真正的 <code>builtin:read:v1</code> 會標為 safe。重新讀取時檔案內容仍可能已改變。</td></tr>
+        <tr><td><strong>Blocked</strong></td><td><strong>相容性阻斷</strong>：configuration、environment 或 safe replay declaration 不一致。</td><td>停止自動 effect 並拋出 blocked error，不寫終局。但 <code>attempts_exhausted</code> 是例外：一般 run 由 executor 轉成 failed 終局，compaction 則維持 blocked。</td></tr>
+        <tr><td><strong>Finish / Synthetic</strong></td><td>已存在 <code>stepFailed</code>、正常/截斷/取消終局，或需要補 <code>interrupted</code>、<code>truncated</code> 等 synthetic result。</td><td>Planner 只描述下一步。<code>resumeSession()</code> 才 append facts、呼叫 model/tool 或完成 operation。</td></tr>
     </tbody>
 </table>
 
 <h2 id="configuration">三道 Identity / Compatibility 檢查</h2>
 <p>
-    在發動 Retry 或 Replay 前，Planner 會比對三類 identity；它們用來判斷復原相容性，不是 MAC、signature 或防惡意改寫的 tamper proof：
+    在發動 Retry 或 Replay 前，Planner 會比對三類 identity。它們用來判斷復原相容性，不是 MAC、signature 或防惡意改寫的 tamper proof：
 </p>
 
 <ol>
     <li><strong>Configuration Identity 閘門</strong>：<br>
-        比對 Model、System Prompt digest、排序後的 Tool definitions，以及 adapter/routing/output identities。正常升級 Model、Prompt 或 Tool Schema 也可能得到 <code>configuration_changed</code>；這代表不相容，不等同偵測到竄改。
+        比對 Model、System Prompt digest、排序後的 Tool definitions，以及 adapter/routing/output identities。正常升級 Model、Prompt 或 Tool Schema 也可能得到 <code>configuration_changed</code>。這代表不相容，不等同偵測到竄改。
     </li>
     <li><strong>Environment Identity 閘門</strong>：<br>
-        比對 header/tool intent 記錄的 environment identity 與復原時計算值。預設 identity 來自建立 Session 時 cwd 的 canonical realpath，也可由部署環境覆寫；不是以 JSONL 檔案本身的位置直接判定。
+        比對 header/tool intent 記錄的 environment identity 與復原時計算值。預設 identity 來自建立 Session 時 cwd 的 canonical realpath，也可由部署環境覆寫。不是以 JSONL 檔案本身的位置直接判定。
     </li>
     <li><strong>Replay Declaration 閘門</strong>：<br>
-        比對 persisted/current tool definition、replay declaration 與 <code>replayKey</code>。Runtime 同時拒絕同一工具清單中的 duplicate names，且只有內建 <code>readTool</code> 物件會被標為 safe；自訂同名 <code>read</code> 不會自動取得 safe replay。
+        比對 persisted/current tool definition、replay declaration 與 <code>replayKey</code>。Runtime 同時拒絕同一工具清單中的 duplicate names，且只有內建 <code>readTool</code> 物件會被標為 safe。自訂同名 <code>read</code> 不會自動取得 safe replay。
     </li>
 </ol>
 
@@ -95,8 +95,8 @@
     </thead>
     <tbody>
         <tr><td>Run 已接受，尚未發起任何 Model Attempt</td><td>發起 <code>startAssistantAttempt(1)</code></td></tr>
-        <tr><td>Attempt 1 處於 Open 狀態，未收到完整 Response</td><td>若 Config 一致則發起 Attempt 2；若不符則判定 <code>Blocked</code></td></tr>
-        <tr><td>Attempt 2 仍處於 Open 狀態</td><td>Planner 回 <code>blocked: attempts_exhausted</code>；一般 run 的 executor 接著寫 failed 終局，compaction 則停止並回報 blocked。</td></tr>
+        <tr><td>Attempt 1 處於 Open 狀態，未收到完整 Response</td><td>若 Config 一致則發起 Attempt 2。若不符則判定 <code>Blocked</code></td></tr>
+        <tr><td>Attempt 2 仍處於 Open 狀態</td><td>Planner 回 <code>blocked: attempts_exhausted</code>。一般 run 的 executor 接著寫 failed 終局，compaction 則停止並回報 blocked。</td></tr>
         <tr><td>Provider 回傳 <code>length</code> 截斷且包含殘缺 Tool Calls</td><td>補寫 <code>truncated</code> synthetic results，<strong>絕不執行</strong></td></tr>
         <tr><td>內建 <code>read</code> 工具已記錄 <code>toolStarted</code>，缺少 Result</td><td>比對環境一致後發起 <code>Replay</code></td></tr>
         <tr><td>危險工具（<code>bash</code>/<code>write</code>/<code>edit</code>）記錄 <code>toolStarted</code>，缺少 Result</td><td>補寫 <code>interrupted</code> synthetic results，<strong>絕不重跑</strong></td></tr>
@@ -145,7 +145,7 @@
 
 <h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
 <p>
-    本實驗分為兩部分：首先透過 TypeScript 離線測試驗證 Planner 的 16 種邊界決策；接著利用命令列手動製造一個「未完成的 Tool Call」日誌，親眼觀察 Planner 如何拒絕盲目重跑危險指令：
+    本實驗分為兩部分：首先透過 TypeScript 離線測試驗證 Planner 的 16 種邊界決策。接著利用命令列手動製造一個「未完成的 Tool Call」日誌，親眼觀察 Planner 如何拒絕盲目重跑危險指令：
 </p>
 
 <h3 id="lab-1">實驗一：執行離線 Planner 決策測試矩陣</h3>

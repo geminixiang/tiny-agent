@@ -7,9 +7,9 @@ export const chapters = [
         file: "00-foundations.html",
         minutes: 28,
         takeaways: [
-            "tiny-agent 目前的 Chat Completions adapter 只把本次 request 的 active context 送給模型；其他 API 可能提供 server-managed conversation state。",
+            "tiny-agent 目前的 Chat Completions 轉接器只會把這次請求的有效上下文送給模型。其他 API 則可能由伺服器管理對話狀態。",
             "Context 不只是聊天記錄，還包括 instructions、tool definitions、檢索資料與選入的歷史。",
-            "Tool call 是模型產生的結構化提議；真正的驗證、授權與副作用都發生在 host。",
+            "Tool call 是模型產生的結構化提議。真正的驗證、授權與副作用都發生在 host。",
             "Transcript、active context、Session 與 memory 是不同層次的狀態，不應混為一談。",
         ],
     },
@@ -23,7 +23,7 @@ export const chapters = [
         takeaways: [
             "tiny-agent 以 host 重送 messages 維持對話，但這不是所有 provider API 的唯一狀態模型。",
             "教學閉環依序呼叫 model、檢查 tool_calls、執行 tool，再把結果寫回 messages。",
-            "read/write/edit/bash 是 tiny-agent 選用的四個基本 coding tool；最小能力集合仍取決於產品需求。",
+            "read/write/edit/bash 是 tiny-agent 選用的四個基本 coding tool。最小能力集合仍取決於產品需求。",
         ],
     },
     {
@@ -34,9 +34,9 @@ export const chapters = [
         file: "02-messages-provider.html",
         minutes: 18,
         takeaways: [
-            "Provider 回傳的原始資料不能直接當成 Message；type assertion 不會移除危險欄位。",
+            "Provider 回傳的原始資料不能直接當成 Message。type assertion 不會移除危險欄位。",
             "Normalization seam 逐欄驗證後重建，不合法欄位一律丟棄。",
-            "finish_reason 與 tool_calls 必須交叉驗證；length 截斷時 tool arguments 不可執行。",
+            "finish_reason 與 tool_calls 必須交叉驗證。length 截斷時 tool arguments 不可執行。",
         ],
     },
     {
@@ -48,8 +48,8 @@ export const chapters = [
         minutes: 20,
         takeaways: [
             "Tool 的 name、schema、guard、execute 應放在同一處，不要拆成別表 + dispatch if。",
-            "JSON Schema 只是介面說明，不是安全檢查；runtime 驗證仍必須做。",
-            "tiny-agent 的 file tools 不做 cwd containment；真正隔離來自外層 execution capsule。",
+            "JSON Schema 只是介面說明，不是安全檢查。runtime 驗證仍必須做。",
+            "tiny-agent 的 file tools 不做 cwd containment。真正隔離來自外層 execution capsule。",
             "bg 把長時間執行的 server 變成可 list、logs、status、stop 的背景 process。",
             "Replay policy 是 effect semantics，不是模型可以選的選項：只有 built-in read 是 safe。",
         ],
@@ -62,9 +62,9 @@ export const chapters = [
         file: "04-context-skills.html",
         minutes: 15,
         takeaways: [
-            "Context 由 system prompt、AGENTS.md、skill metadata 與 conversation 四種來源組裝；它們不是四個 wire-protocol priority。",
+            "Context 由 system prompt、AGENTS.md、skill metadata 與 conversation 四種來源組裝。它們不是四個 wire-protocol priority。",
             "Skills 用 progressive loading：啟動只讀 metadata，命中才讀正文。",
-            "/skill:name 是 CLI 直接讀檔，不需要 read tool；模型自動判斷則需要。",
+            "/skill:name 是 CLI 直接讀檔，不需要 read tool。模型自動判斷則需要。",
         ],
     },
     {
@@ -77,7 +77,7 @@ export const chapters = [
         takeaways: [
             "核心規則只有一句：intent 必須早於 effect——先寫硬碟，才去執行。",
             "tiny-agent 支援範圍明確的 process-crash recovery，不承諾 power-loss durability。",
-            "一行 JSONL 是 atomic recovery unit；最後 LF 之後的 bytes 是 torn tail，會被捨棄。",
+            "一行 JSONL 是 atomic recovery unit。最後 LF 之後的 bytes 是 torn tail，會被捨棄。",
             "append/load 是小而深的 storage 介面，隱藏 seq、ID、framing 與 torn-tail repair。",
         ],
     },
@@ -106,7 +106,7 @@ export const chapters = [
             "Abort 順序不能反：先 durable 寫 abortRequested，再 signal 正在執行的 phase。",
             "Abort race 由 durable settlement 與 abortRequested 的序列化邊界裁決。",
             "本文把 compaction 分成 active-context cut 與 durable source partition 兩個視角。",
-            "壓縮不會在當下刪除原始 facts；實際保存期限仍由部署層 retention policy 決定。",
+            "壓縮不會在當下刪除原始 facts。實際保存期限仍由部署層 retention policy 決定。",
         ],
     },
     {
@@ -118,9 +118,9 @@ export const chapters = [
         minutes: 24,
         takeaways: [
             "測試、observability、安全邊界是三件不同的事：結果對、過程對、沒越界。",
-            "PR gate 應以可離線重現的 contract tests 為主；capability eval 才呼叫真實模型。",
-            "MCP 是 Tool adapter，不是 authorization 或 sandbox；--plugin 不是 tenant ACL。",
-            "多租戶需要專用 execution capsule；tiny-agent 本身不提供 tenant isolation。",
+            "PR gate 應以可離線重現的 contract tests 為主。capability eval 才呼叫真實模型。",
+            "MCP 是 Tool adapter，不是 authorization 或 sandbox。--plugin 不是 tenant ACL。",
+            "多租戶需要專用 execution capsule。tiny-agent 本身不提供 tenant isolation。",
         ],
     },
     {
@@ -131,8 +131,8 @@ export const chapters = [
         file: "09-committed-lifecycle-telemetry.html",
         minutes: 22,
         takeaways: [
-            "Append-only Session facts 是 recovery authority；JSON、OTLP 與 Phoenix 都只是 lossy projection。",
-            "Logical terminal 只能由 committed settlement 推導；physical tool attempt 與 durable tool identity 必須分開。",
+            "Append-only Session facts 是 recovery authority。JSON、OTLP 與 Phoenix 都只是 lossy projection。",
+            "Logical terminal 只能由 committed settlement 推導。physical tool attempt 與 durable tool identity 必須分開。",
             "OpenInference 的 AGENT、LLM、TOOL spans 以 Session ID 關聯，同時保留 tiny.* durable identities。",
             "OTLP 採 metadata-first allowlist，不輸出 prompt、answer、tool payload、error message、endpoint 或 headers。",
             "四語言以相同 lifecycle v2 ordering、recovery、identity、span 與 privacy contracts 驗證一致性。",

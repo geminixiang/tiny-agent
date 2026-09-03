@@ -6,7 +6,7 @@
 
 這本書與 tiny-agent 的許多設計思考受到 [Pi](https://github.com/earendil-works/pi) 啟發，尤其是精簡的 agent loop、Tool 模型、skills 漸進載入、compaction，以及讓 coding agent 保持可理解與可操作的工程取向。感謝 Pi 及其貢獻者公開實作與文件。
 
-Tiny-agent 不是 Pi 的 fork 或移植；它是獨立的四語言教學實作，並針對 transactional Session、crash recovery 與跨語言 conformance 發展自己的 contract。
+Tiny-agent 不是 Pi 的 fork 或移植。它是獨立的四語言教學實作，並針對 transactional Session、crash recovery 與跨語言 conformance 發展自己的 contract。
 
 ## 本機開發
 
@@ -29,14 +29,14 @@ book/dist/
 npx serve book/dist
 ```
 
-`npx serve` 只是預覽選項，不是本專案的相依套件；也可使用既有的 HTTP 伺服器。
+`npx serve` 只是預覽選項，不是本專案的相依套件。也可使用既有的 HTTP 伺服器。
 
 ## 內容結構
 
 - `src/chapters.js`：章節 metadata 的 single source of truth。
 - `src/chapters/*.html`：受控 HTML fragments，不使用自製 Markdown parser。
 - `src/assets/`：共用 CSS 與 enhancement-only JavaScript。
-- `vite.config.js`：Vite 設定與書籍頁面產生插件；負責組裝章節、語法上色、CSP 與靜態部署檔案。
+- `vite.config.js`：Vite 設定與書籍頁面產生插件，負責組裝章節、語法上色、CSP 與靜態部署檔案。
 
 產生的 `dist/` 是 build artifact，不應手動修改。Vite 會依內容雜湊產生資源檔名，供 Cloudflare Pages 安全地使用 immutable cache。
 
