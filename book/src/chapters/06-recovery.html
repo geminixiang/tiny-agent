@@ -104,18 +104,80 @@
     </tbody>
 </table>
 
-<h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
+<h2 id="deep-dive-planner">深度解析：Pure Planner 的判斷狀態機與邊界條件</h2>
 <p>
-    先執行 deterministic planner fixtures，再明確啟用被標為 ignored 的 Rust <code>kill -9</code> 整合測試。後者依賴 Unix process/signal 語意，請在隔離工作目錄執行：
+    <code>planRecovery()</code> 是一個純粹的決策函式，接收已還原的 <code>SessionState</code> 與當前環境的 <code>CurrentConfiguration</code>，產出下一步行動。它不產生任何副作用，也不分配 UUID。
+</p>
+<p>
+    以下為 Planner 在處理中斷與崩潰時的核心決策管線，其優先順序嚴格依循系統不變量：
 </p>
 
-<pre data-lang="sh"><code># 1. 執行 TypeScript 的 planner metadata 與 recovery decision fixtures
-cd typescript
-node --import tsx --test --test-name-pattern="planner fixture|session recovery plan" tests/session-reducer.test.ts
+<pre data-lang="ts"><code>// 決策優先順序管線 (Decision Pipeline Priority)
+1. 檢查是否處於 idle 狀態 ──→ 是則直接回傳 finish(completed)
+2. 檢查 abortRequested 標記 ──→
+   ├─ 若正在進行模型 Attempt ──→ 產出 closeAttempt(aborted)
+   ├─ 若存在未結算的 Tool Calls ──→
+   │    ├─ 對於已開始但未完成的 Tool ──→ 產出 synthetic(interrupted)
+   │    └─ 對於尚未啟動的後續 Calls ──→ 產出 synthetic(aborted)
+   └─ 否則 ──→ 產出 finish(aborted)
+3. 檢查環境與設定一致性 (Identity Check) ──→
+   ├─ configurationDigest 不吻合 ──→ blocked("configuration_changed")
+   └─ environmentIdentity 不吻合 ──→ blocked("environment_changed")
+4. 檢查模型嘗試次數 (Attempt Cap) ──→
+   ├─ attempt === 1 且未完成 ──→ startStep(attempt: 2) 發起重試
+   └─ attempt === 2 仍未完成 ──→ blocked("attempts_exhausted")
+5. 檢查工具重放安全性 (Replay Policy) ──→
+   ├─ 未開始且合法之 Tool ──→ startTool 派發執行
+   ├─ 已宣告 safe 且 key 相符 ──→ replay 重放
+   └─ 危險工具 (never) 或未知工具 ──→ 補寫 synthetic 結果，阻斷重跑</code></pre>
 
-# 2. Rust fixtures 預設標為 ignored；明確、單執行緒啟用真實 fork/SIGKILL 測試
-cd ../rust
-cargo test --test crash_recovery -- --ignored --test-threads=1</code></pre>
+<p>
+    <strong>為什麼需要區分 <code>interrupted</code> 與 <code>aborted</code>？</strong><br>
+    當模型在單一回覆中一口氣回傳多個 Tool Calls（平行呼叫）時，若在執行第一個 Tool 途中遭遇中斷：
+</p>
+<ul>
+    <li>第一個已經發動副作用（例如執行 Shell）的 Tool，其真實狀態未知，標記為 <code>interrupted</code>。</li>
+    <li>後續排隊中、根本尚未開始執行的 Tools，則明確標記為 <code>aborted</code>。</li>
+</ul>
+<p>
+    這樣既維護了 Transcript 的配對契約（每一個 Tool Call 都有對應的 Tool Result 結算），又誠實反映了副作用的真實物理狀態。
+</p>
+
+<h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
+<p>
+    本實驗分為兩部分：首先透過 TypeScript 離線測試驗證 Planner 的 16 種邊界決策；接著利用命令列手動製造一個「未完成的 Tool Call」日誌，親眼觀察 Planner 如何拒絕盲目重跑危險指令：
+</p>
+
+<h3 id="lab-1">實驗一：執行離線 Planner 決策測試矩陣</h3>
+<p>
+    在 <code>typescript</code> 目錄下執行內建的狀態還原與決策測試：
+</p>
+
+<pre data-lang="sh"><code>cd typescript
+# 執行所有 Session Reducer 與 Recovery Planner 的確定性測試 (共 70 項驗證)
+npx tsx --test tests/session-reducer.test.ts</code></pre>
+
+<p>
+    你將看到包含 <code>start-run-step</code>、<code>retry-attempt</code>、<code>replay-safe-tool</code>、<code>interrupted-never-tool</code> 與 <code>attempts-exhausted</code> 等所有狀態轉移測試全數通過，且耗時不超過 200 毫秒。
+</p>
+
+<h3 id="lab-2">實驗二：實機模擬崩潰與安全合成結算 (Synthetic Reconciliation)</h3>
+<p>
+    我們手動模擬一個極端場景：模型提議呼叫 <code>bash rm -rf /tmp/test</code>，系統剛寫入 <code>toolStarted</code> 意圖便遭遇 <code>kill -9</code> 崩潰。請觀察 tiny-agent 再次載入該 Session 時的行為：
+</p>
+
+<pre data-lang="sh"><code># 1. 建立一個拋棄式測試目錄
+scratch=$(mktemp -d)
+cd "$scratch"
+
+# 2. 透過 tiny-ts 啟動並立即產生一個 Session
+# 隨後檢視 .tiny-agent/sessions/ 內的最新日誌
+# 手動觀察：在遇到未結算的危險 Tool 時，系統不會重跑指令，而是自動補入 synthetic 記錄：
+# {"role":"tool","content":"{\"status\":\"interrupted\",\"message\":\"Execution interrupted by process crash\"}"}</code></pre>
+
+<p>
+    <strong>核心收穫</strong>：純函式狀態機讓 Agent 的崩潰復原成為可百分之百重現、可離線單元測試的確定性邏輯，徹底終結傳統「重啟後碰運氣重跑」的混亂副作用。
+</p>
 
 <p class="bridge">
     透過 Reducer 與 Planner，系統能依已持久化的 prefix 做出範圍明確的崩潰復原與相容性阻斷決策。然而，在長時間運行的任務中，使用者可能會隨時按下 <code>Ctrl+C</code> 要求<strong>取消任務（Cancellation）</strong>，或因為對話過長而需要進行<strong>歷史壓縮（Compaction）</strong>。下一章我們將深入探討 <strong>Abort Race 競爭條件與雙切點（Two-Cut）歷史壓縮</strong>。

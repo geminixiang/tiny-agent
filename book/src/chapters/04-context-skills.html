@@ -109,16 +109,82 @@ Round 3: ... + [Tool: bash test] ─────────→ 12,000 Tokens (�
     <li><strong>Durable Compaction（歷史壓縮）</strong>：適時將舊對話總結為精確 Facts（詳見第 7 章）。</li>
 </ul>
 
-<h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
+<h2 id="deep-dive-parsing">深度解析：Frontmatter 小型解析器的邊界與設計取捨</h2>
 <p>
-    在終端機中體驗 Slash Command 如何由 Trusted Host 注入 Skill：
+    tiny-agent 在讀取 <code>SKILL.md</code> 時，並未引入肥大的外部 YAML 解析套件，而是採用了一個幾十行的輕量解析器。這個設計取捨貫徹了「教學專案保持核心清晰」的原則，但也確立了嚴格的語法契約：
 </p>
 
-<pre data-lang="sh"><code># 不提供 read plugin；Slash Command 仍由 Trusted Host 直接載入 Skill
-tiny-ts --plugin write
+<pre data-lang="ts"><code>// tiny-agent 內建 Skill Frontmatter 解析契約
+// 1. 僅辨識檔案最前端以 --- 包裹的標頭
+// 2. 僅抽取單行鍵值對：name 與 description
+// 3. 不支援巢狀結構、多行字串、錨點 (Anchors) 或複雜類型
+function parseSkillMetadata(content: string): { name: string; description: string } | null {
+    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!match) return null;
+    
+    // 嚴格比對頂層的 name 與 description 欄位
+    const nameMatch = match[1].match(/^name:\s*(.+)$/m);
+    const descMatch = match[1].match(/^description:\s*(.+)$/m);
+    if (!nameMatch || !descMatch) return null;
 
-# 在互動提示字元中輸入：
-/skill:i-have-adhd 幫我把工作拆解為可執行的具體步驟</code></pre>
+    return {
+        name: nameMatch[1].trim(),
+        description: descMatch[1].trim(),
+    };
+}</code></pre>
+
+<p>
+    <strong>為什麼不用標準 YAML 套件？</strong><br>
+    在 Agent 的啟動流程中，可能需要掃描專案內數十個 Skills。引入完整的 YAML Parser 會帶來額外的相依性包袱，甚至引入潛在的 Prototype Pollution 或 ReDoS 安全風險。透過限制語法為極簡契約，系統在啟動階段只需花費數毫秒即可完成所有 Skill 中繼資料的抽取。
+</p>
+
+<h2 id="hands-on">動手驗證 (Hands-on Lab)</h2>
+<p>
+    本實驗將引導你動手打造一個專屬的自訂 Skill，並親自驗證 Agent 如何透過漸進式按需載入（Progressive Loading）來維持極簡的初始上下文：
+</p>
+
+<h3 id="lab-1">實驗一：撰寫自訂 Skill 並觀察中繼資料索引</h3>
+<p>
+    在當前目錄建立一個符合 tiny-agent 規範的 Skill 定義檔：
+</p>
+
+<pre data-lang="sh"><code># 1. 建立技能目錄結構
+mkdir -p .tiny-agent/skills/taiwan-locale
+
+# 2. 撰寫 SKILL.md，包含 Frontmatter 標頭與具體操作指引
+cat &lt;&lt;'EOF' &gt; .tiny-agent/skills/taiwan-locale/SKILL.md
+---
+name: taiwan-locale
+description: 協助校驗文字符合臺灣繁體資工習慣用語，例如呼叫、記憶體、行程。
+---
+
+# 臺灣資工詞彙校正指南
+當使用者詢問用語時，請務必依據下列規範：
+- 「調用」請轉換為「呼叫 (Call)」
+- 「內存」請轉換為「記憶體 (Memory)」
+- 「進程 / 線程」請轉換為「行程 (Process) / 執行緒 (Thread)」
+EOF</code></pre>
+
+<h3 id="lab-2">實驗二：自主觸發載入 vs. 顯式指令載入</h3>
+<p>
+    現在我們分別以兩種路徑觀察系統的行為差異：
+</p>
+
+<pre data-lang="sh"><code># 路徑 A：模型自主觸發（需要 read 工具權限）
+# 模型看見中繼資料後，主動呼叫 read 讀取 SKILL.md 全文
+tiny-ts --plugin read "請確認這段程式碼中是否包含非臺灣用語：'這個函數會調用系統底層進程'"
+
+# 路徑 B：Trusted Host 顯式載入（完全不需 read 工具）
+# CLI 作為信任外殼，在啟動前直接將 SKILL.md 注入至 User Message
+tiny-ts --plugin write "/skill:taiwan-locale 校驗這句話：'釋放未使用的內存'"</code></pre>
+
+<p>
+    <strong>實驗觀察重點</strong>：
+</p>
+<ol>
+    <li>在路徑 A 中，檢視 <code>.tiny-agent/sessions/</code> 內的 JSONL 日誌，你會發現一筆具體的 <code>read</code> Tool Call 及其 Observation，這留下了完整的可稽核軌跡。</li>
+    <li>在路徑 B 中，模型在未被賦予 <code>read</code> 權限的狀態下，依然成功獲得了領域知識。這證明了「Host 端 Trusted Seam」可以在不對模型放寬系統特權的前提下，靈活注入必要的情境。</li>
+</ol>
 
 <p class="bridge">
     至此，我們已經掌握了 Agent 的大腦（Model）、手腳（Tools）與注意力（Context）。實際 CLI 在開始工作前就會建立或開啟 JSONL Session，並在每一步追加 facts；記憶體中的 <code>messages</code> 只是可由 durable log 重建的 active view。下一章將把這條已存在的持久化路徑拆開，說明<strong>先記 Intent，再發動 Effect</strong>的寫入順序、torn-tail 修復與明確的 durability 限制。
