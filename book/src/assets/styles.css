@@ -92,6 +92,7 @@ body {
     background-size: 28px 28px;
     color: var(--ink);
     line-height: 1.75;
+    letter-spacing: 0.08em;
 }
 ::selection { background: var(--accent); color: var(--paper); }
 a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: .2em; }
@@ -155,7 +156,7 @@ h1 { margin: 0; max-width: 15ch; font-family: "Iowan Old Style", "Palatino Linot
 h2 { margin: 5rem 0 1.15rem; font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Noto Serif TC", serif; font-weight: 700; font-size: 1.7rem; line-height: 1.25; letter-spacing: -.015em; }
 h2::before { content: "§ "; color: var(--rust); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 h3 { margin: 2rem 0 .65rem; font-size: 1.15rem; font-weight: 700; }
-p, li { max-width: 45rem; }
+p, li { max-width: 45rem; letter-spacing: .08em; }
 li + li { margin-top: .35rem; }
 blockquote { margin: 1.5rem 0; padding: .6rem 1rem; color: var(--muted); border-left: 3px solid var(--rust); background: var(--bg); font-style: italic; }
 
