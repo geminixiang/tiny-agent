@@ -139,6 +139,21 @@ OTEL_SERVICE_NAME=tiny-rs tiny-rs "讀取 README 並摘要"</code></pre>
 <p>
     開啟 <a href="http://localhost:6006">Phoenix UI</a> 後，以 project/service、Session ID 或 operation ID 篩選。應能看到 Agent root、LLM children、Tool children、duration、outcome 與 token usage。不應看到 prompt、answer 或 tool payload。若同一 Session crash 後恢復，應看到帶相同 durable operation identity 的新 recovery segment，而不是一條偽造的跨 process span。
 </p>
+
+<figure class="diagram-embed" id="fig-09-phoenix-trace" aria-labelledby="fig-09-phoenix-trace-caption">
+    <img src="<!-- ASSET:09-phoenix-trace.png -->" alt="Phoenix UI 顯示 tiny-ts Agent、模型與工具 Span 的實際追蹤畫面" loading="lazy" />
+    <figcaption id="fig-09-phoenix-trace-caption">
+        圖 9.1：實際啟動 Phoenix 並執行 <code>tiny-ts --plugin read</code> 後的 Trace。中央 Trace Tree 依序顯示 <code>tiny.agent.operation</code>、兩次 <code>tiny.model.request</code> 與一次 <code>tiny.tool.execute</code>；右側則顯示由 committed lifecycle 投影而來的 durable identity 與 OpenInference attributes。
+    </figcaption>
+</figure>
+
+<h3 id="phoenix-reading-guide">如何閱讀這張 Trace？</h3>
+<ol>
+    <li><strong>先看根節點</strong>：<code>tiny.agent.operation</code> 代表一次已提交的 Run，狀態為 <code>OK</code>，總延遲約 5.5 秒。</li>
+    <li><strong>再看子節點順序</strong>：第一次 Model Request 提出 <code>read</code> Tool Call，Tool 執行後回填結果，第二次 Model Request 才產生最終回答。</li>
+    <li><strong>最後核對 Attributes</strong>：<code>tiny.operation.id</code>、<code>tiny.session.id</code>、<code>session.id</code> 與 <code>gen_ai.conversation.id</code> 用來跨 Trace 關聯 durable Session；畫面中不應出現 README 內容、完整 Prompt 或模型答案。</li>
+</ol>
+
 <aside class="note">
     <strong>部署規則</strong>：未設定 <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> 或 traces endpoint 時，telemetry 完全停用。設定 <code>OTEL_SDK_DISABLED=true</code> 也會停用。Endpoint、headers、TLS 與 credential 只來自標準 <code>OTEL_*</code> 環境變數，不接受 model、tool 或 CLI task 內容注入。
 </aside>
