@@ -69,7 +69,7 @@ format-go:
 	gofmt -w go/cmd
 
 format-py:
-	@true
+	uv run --project python --group dev ruff format python
 
 build: build-ts build-go build-py build-rs book-build
 

@@ -164,8 +164,8 @@ async def _await_sdk(awaitable, cancelled: asyncio.Event | None, timeout_ms: flo
     except asyncio.CancelledError:
         if cancelled is not None and cancelled.is_set(): raise InterruptedError("Operation aborted") from None
         raise
-    except Exception:
-        raise RuntimeError("MCP request failed") from None
+    except Exception as error:
+        raise RuntimeError("MCP request failed") from error
     finally:
         if abort is not None:
             abort.cancel()

@@ -23,3 +23,11 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-root = ""
 module-name = "tiny_agent"
+
+[dependency-groups]
+dev = ["ruff>=0.6"]
+
+[tool.ruff]
+line-length = 200
+target-version = "py314"
+

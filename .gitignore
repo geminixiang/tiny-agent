@@ -9,6 +9,7 @@ dist/
 go/tiny-go
 rust/target/
 __pycache__/
+.ruff_cache/
 *.py[cod]
 .venv/
 *.egg-info/

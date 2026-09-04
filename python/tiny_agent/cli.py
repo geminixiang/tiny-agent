@@ -178,7 +178,7 @@ async def run_session(args: argparse.Namespace, aliases: list[str], local_tools:
         tools = [*local_tools, *(tool for loaded in loaded_mcp for tool in loaded.tools)]
         try:
             agent = Agent(skills, session, instructions, tools=tools, lifecycle=lifecycle)
-        except Exception:
+        except (ValueError, RuntimeError, OSError, TypeError):
             complete_startup("failed", "agent_setup_error")
             raise
         complete_startup("succeeded")
@@ -187,7 +187,8 @@ async def run_session(args: argparse.Namespace, aliases: list[str], local_tools:
                 if args.session: await agent.resume_session()
                 await agent.run_agent_loop(" ".join(args.prompt))
                 return 0
-            except Exception:
+            except (ValueError, RuntimeError, OSError, TimeoutError) as error:
+                print(error, file=sys.stderr)
                 return 1
 
         install_tool_printer(agent)
@@ -197,9 +198,9 @@ async def run_session(args: argparse.Namespace, aliases: list[str], local_tools:
         print(f"\nResume: tiny-py --session {session.id}")
         return 0
     finally:
-        with suppress(Exception): session.close()
+        with suppress(OSError, ValueError): session.close()
         await close_mcp(loaded_mcp)
-        with suppress(Exception): lifecycle.close()
+        with suppress(OSError, ValueError): lifecycle.close()
 
 
 async def run_cli(argv: list[str] | None = None) -> int:
@@ -224,4 +225,4 @@ def main() -> None:
         raise SystemExit(asyncio.run(run_cli()))
     except (ValueError, RuntimeError, OSError) as error:
         print(error, file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
