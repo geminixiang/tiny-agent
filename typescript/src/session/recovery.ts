@@ -5,7 +5,7 @@ import {
     type SessionState,
     type SyntheticReason,
     type ToolCallState,
-} from "./session-reducer.js";
+} from "./reducer.js";
 
 export { SYNTHETIC_CONTENT };
 export type CurrentTool = ConfigurationTool & { replay: "safe" | "never"; replayKey: string };

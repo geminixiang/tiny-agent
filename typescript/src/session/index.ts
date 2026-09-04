@@ -2,8 +2,8 @@ import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, readdir, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { environmentIdentityOverride } from "./env.js";
-import { reduceSession, type SessionState } from "./session-reducer.js";
+import { environmentIdentityOverride } from "../env.js";
+import { reduceSession, type SessionState } from "./reducer.js";
 
 export type SessionFact = Record<string, unknown>;
 export type SessionFactInput = Omit<SessionFact, "seq" | "timestamp"> & { id?: string };

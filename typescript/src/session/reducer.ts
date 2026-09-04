@@ -1,4 +1,4 @@
-import { canonicalDigest } from "./canonical-json.js";
+import { canonicalDigest } from "../canonical-json.js";
 
 export type SessionMessage =
     | { role: "user"; content: string }

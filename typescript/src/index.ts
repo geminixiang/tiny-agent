@@ -11,10 +11,10 @@ import {
     syntheticToolResult,
     type RuntimeMessage as Message,
     type RuntimeUsage as Usage,
-} from "./session-runtime.js";
-import { environmentIdentity, SessionStore } from "./session.js";
-import { planRecovery, SYNTHETIC_CONTENT } from "./session-recovery.js";
-import { expect } from "./session-reducer.js";
+} from "./session/runtime.js";
+import { environmentIdentity, SessionStore } from "./session/index.js";
+import { planRecovery, SYNTHETIC_CONTENT } from "./session/recovery.js";
+import { expect } from "./session/reducer.js";
 import {
     builtInTools,
     durableToolReplay,
@@ -41,7 +41,7 @@ export {
     type CurrentConfiguration,
     type CurrentTool,
     type RecoveryPlan,
-} from "./session-recovery.js";
+} from "./session/recovery.js";
 export {
     buildConfiguration,
     currentConfiguration,
@@ -52,9 +52,9 @@ export {
     type RuntimeConfiguration,
     type RuntimeMessage,
     type RuntimeUsage,
-} from "./session-runtime.js";
-export { SessionStore, SessionStore as Session, environmentIdentity } from "./session.js";
-export { reduceSession, SessionCorruption, type SessionCorruptionCode, type SessionState } from "./session-reducer.js";
+} from "./session/runtime.js";
+export { SessionStore, SessionStore as Session, environmentIdentity } from "./session/index.js";
+export { reduceSession, SessionCorruption, type SessionCorruptionCode, type SessionState } from "./session/reducer.js";
 export {
     builtInPlugins,
     builtInTools,
@@ -73,7 +73,7 @@ function root() {
     return process.cwd();
 }
 type Skill = { name: string; description: string; path: string };
-export type { RuntimeUsage as Usage } from "./session-runtime.js";
+export type { RuntimeUsage as Usage } from "./session/runtime.js";
 
 class ModelResponseError extends Error {
     constructor(

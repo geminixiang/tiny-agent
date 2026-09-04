@@ -1,9 +1,9 @@
-import { canonicalDigest } from "./canonical-json.js";
-import { MODEL } from "./env.js";
-import type { SessionFactInput, SessionStore } from "./session.js";
-import type { CurrentConfiguration, SyntheticResult } from "./session-recovery.js";
-import type { ConfigurationSnapshot, SessionState, ToolCall } from "./session-reducer.js";
-import { durableToolReplay, type Tool } from "./tools.js";
+import { canonicalDigest } from "../canonical-json.js";
+import { MODEL } from "../env.js";
+import type { SessionFactInput, SessionStore } from "./index.js";
+import type { CurrentConfiguration, SyntheticResult } from "./recovery.js";
+import type { ConfigurationSnapshot, SessionState, ToolCall } from "./reducer.js";
+import { durableToolReplay, type Tool } from "../tools.js";
 
 export type RuntimeMessage = {
     role: "system" | "user" | "assistant" | "tool";

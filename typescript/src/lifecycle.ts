@@ -1,4 +1,4 @@
-import type { SessionFact } from "./session.js";
+import type { SessionFact } from "./session/index.js";
 
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number; cacheHitRate?: number };
 export type LifecycleOutcome = "succeeded" | "failed" | "cancelled" | "effect_unknown";

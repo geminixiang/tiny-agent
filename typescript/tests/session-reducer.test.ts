@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { reduceSession, SessionCorruption } from "../src/session-reducer.js";
-import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "../src/session-recovery.js";
+import { reduceSession, SessionCorruption } from "../src/session/reducer.js";
+import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "../src/session/recovery.js";
 
 const fixtures = resolve(dirname(fileURLToPath(import.meta.url)), "../../schemas/session/fixtures");
 const manifestSchema = JSON.parse(await readFile(resolve(fixtures, "manifest.schema.json"), "utf8"));

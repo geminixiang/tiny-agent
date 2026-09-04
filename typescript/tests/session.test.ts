@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { SessionStore, environmentIdentity } from "../src/session.js";
+import { SessionStore, environmentIdentity } from "../src/session/index.js";
 
 const MODEL = "test/model";
 const USER_ID = "018f0000-0000-7000-8000-000000000002";

@@ -175,7 +175,7 @@ test("loads cwd AGENTS.md into the system prompt", async () => {
 
 test("buildConfiguration rejects a lone surrogate instead of silently digesting it", () => {
     // The digest producer (buildConfiguration, here) and the durable-log verifier
-    // (session-reducer.ts's configurationDigest) must run the exact same canonicalization, or a
+    // (the session reducer's configurationDigest) must run the exact same canonicalization, or a
     // configuration written to disk could fail replay later. A lone UTF-16 surrogate in project
     // instructions or a tool's own fields must fail here, before anything is durably appended --
     // not succeed here and only be discovered unrecoverable on resume.
