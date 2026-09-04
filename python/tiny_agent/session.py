@@ -56,9 +56,13 @@ class Session:
         stamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
         path = directory / f"{stamp.replace(':', '-').replace('.', '-')}_{session_id}.jsonl"
         header = {
-            "kind": "header", "version": 2, "id": session_id,
-            "createdAt": int(now.timestamp() * 1000), "cwd": str(cwd.resolve()),
-            "provider": "openrouter", "model": Settings().tiny_model,
+            "kind": "header",
+            "version": 2,
+            "id": session_id,
+            "createdAt": int(now.timestamp() * 1000),
+            "cwd": str(cwd.resolve()),
+            "provider": "openrouter",
+            "model": Settings().tiny_model,
             "environmentIdentity": environment_identity(cwd),
         }
         data = (json.dumps(header, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
@@ -93,13 +97,17 @@ class Session:
         fd = _open_nofollow(path, os.O_RDWR | os.O_APPEND)
         file = os.fdopen(fd, "r+b", buffering=0)
         try:
-            file.seek(0); data = file.read(); state = reduce_session(data)
+            file.seek(0)
+            data = file.read()
+            state = reduce_session(data)
             if state["header"]["id"] != session_id:
                 raise ValueError("session filename does not match header")
             repaired = state["repairedLength"]
             if repaired != len(data):
-                file.truncate(repaired); data = data[:repaired]
-            os.fchmod(fd, 0o600); file.seek(0, os.SEEK_END)
+                file.truncate(repaired)
+                data = data[:repaired]
+            os.fchmod(fd, 0o600)
+            file.seek(0, os.SEEK_END)
             with _WRITERS_LOCK:
                 if path in _WRITERS:
                     raise ValueError(f"Session is already open for writing: {session_id}")
@@ -115,18 +123,22 @@ class Session:
 
     def load(self) -> dict:
         with self.lock:
-            if self.closed: raise ValueError("Session is closed")
+            if self.closed:
+                raise ValueError("Session is closed")
             return self.state
 
     def append(self, *facts: dict) -> list[dict]:
-        if not facts: raise ValueError("Session transaction must not be empty")
+        if not facts:
+            raise ValueError("Session transaction must not be empty")
         with self.lock:
-            if self.closed: raise ValueError("Session is closed")
+            if self.closed:
+                raise ValueError("Session is closed")
             return self._append_locked(facts)
 
     def request_abort(self, operation_id: str, cancelled: asyncio.Event, fact: dict) -> bool:
         with self.lock:
-            if self.closed: raise ValueError("Session is closed")
+            if self.closed:
+                raise ValueError("Session is closed")
             operation = self.state["operation"]
             if operation["kind"] == "idle" or operation.get("operationId") != operation_id or operation.get("abortRequested"):
                 return False
@@ -142,16 +154,19 @@ class Session:
 
     def append_aborted_attempt(self, operation_id: str, cancelled: asyncio.Event, failure: dict, usage: dict) -> list[dict]:
         with self.lock:
-            if self.closed: raise ValueError("Session is closed")
+            if self.closed:
+                raise ValueError("Session is closed")
             operation = self.state["operation"]
             if operation["kind"] == "idle" or operation.get("operationId") != operation_id or not (cancelled.is_set() or operation.get("abortRequested")):
                 raise ValueError("Operation is not aborted")
             return self._append_locked((failure, usage))
 
     def append_if_active(self, operation_id: str, cancelled: asyncio.Event, *facts: dict) -> list[dict] | None:
-        if not facts: raise ValueError("Session transaction must not be empty")
+        if not facts:
+            raise ValueError("Session transaction must not be empty")
         with self.lock:
-            if self.closed: raise ValueError("Session is closed")
+            if self.closed:
+                raise ValueError("Session is closed")
             operation = self.state["operation"]
             if cancelled.is_set() or operation["kind"] == "idle" or operation.get("operationId") != operation_id or operation.get("abortRequested"):
                 return None
@@ -166,22 +181,29 @@ class Session:
         state = reduce_session(candidate)
         self.file.write(line)
         self.data, self.state, self.next_seq = candidate, state, self.next_seq + len(committed)
-        try: self.on_committed(committed)
-        except Exception: pass
+        try:
+            self.on_committed(committed)
+        except Exception:
+            pass
         return committed
 
     def close(self) -> None:
         with self.lock:
-            if self.closed: return
+            if self.closed:
+                return
             self.closed = True
-            try: self.file.close()
+            try:
+                self.file.close()
             finally:
-                with _WRITERS_LOCK: _WRITERS.discard(self.path)
+                with _WRITERS_LOCK:
+                    _WRITERS.discard(self.path)
 
 
 def _next_seq(data: bytes) -> int:
     last = 0
     for line in data.decode("utf-8").splitlines()[1:]:
-        value = json.loads(line); facts = value if isinstance(value, list) else [value]
-        if facts: last = facts[-1]["seq"]
+        value = json.loads(line)
+        facts = value if isinstance(value, list) else [value]
+        if facts:
+            last = facts[-1]["seq"]
     return last + 1

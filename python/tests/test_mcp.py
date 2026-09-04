@@ -30,17 +30,21 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
                 ({"url": "https://example.com", "auth": {"type": "metabaseApiKey", "tokenEnv": "bad-name"}}, "auth tokenEnv must be an environment variable name"),
             ):
                 path.write_text(json.dumps({"servers": {"fixture": server}}), encoding="utf-8")
-                with self.assertRaisesRegex(ValueError, error): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path), "TOKEN": "secret"})
+                with self.assertRaisesRegex(ValueError, error):
+                    load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path), "TOKEN": "secret"})
             path.write_text(json.dumps({"servers": {"fixture": {"url": "https://example.com", "extra": True}}}), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "Unknown MCP server fixture field: extra"): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
+            with self.assertRaisesRegex(ValueError, "Unknown MCP server fixture field: extra"):
+                load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
             path.write_text(json.dumps({"servers": {"fixture": {"url": "https://example.com", "tokenEnv": "TOKEN"}}}), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "environment variable is not set"): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
+            with self.assertRaisesRegex(ValueError, "environment variable is not set"):
+                load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
             with self.assertRaisesRegex(ValueError, "invalid HTTP header characters") as raised:
                 load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path), "TOKEN": "secret\r\nX-Injected: yes"})
             self.assertNotIn("secret", str(raised.exception))
             for url, error in (("not a URL", "valid URL"), ("http://example.com/mcp", "use HTTPS"), ("https://user:pass@example.com/mcp", "credentials")):
                 path.write_text(json.dumps({"servers": {"fixture": {"url": url}}}), encoding="utf-8")
-                with self.assertRaisesRegex(ValueError, error): load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
+                with self.assertRaisesRegex(ValueError, error):
+                    load_mcp_configs(["fixture"], {"TINY_MCP_CONFIG": str(path)})
 
     async def test_modern_json_and_sse_list_call_auth_normalization_and_errors(self):
         for sse, chunked in ((False, False), (False, True), (True, False), (True, True)):
@@ -53,17 +57,23 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(display_tool_name(loaded.tools[0]["function"]["name"]), "mcp:fixture/echo")
                     self.assertEqual(await loaded.tools[0]["execute"]({"message": "hello"}), "hello")
                     self.assertEqual(await loaded.tools[1]["execute"]({}), 'count: 2\n\nStructured content:\n{"count":2}')
-                    with self.assertRaisesRegex(RuntimeError, "MCP tool error: not found"): await loaded.tools[2]["execute"]({})
-                    with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: image"): await loaded.tools[3]["execute"]({})
+                    with self.assertRaisesRegex(RuntimeError, "MCP tool error: not found"):
+                        await loaded.tools[2]["execute"]({})
+                    with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: image"):
+                        await loaded.tools[3]["execute"]({})
                     self.assertEqual(await loaded.tools[5]["execute"]({}), "Resource: file:///README.md\nresource body")
                     truncated = await loaded.tools[5]["execute"]({"text": "你" * 20_000})
                     self.assertLessEqual(len(truncated.encode()), 50 * 1024)
                     self.assertTrue(truncated.endswith("[MCP result truncated to 50KB]"))
-                    with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: resource"): await loaded.tools[6]["execute"]({})
+                    with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: resource"):
+                        await loaded.tools[6]["execute"]({})
                     self.assertTrue(all(call["authorization"] == "Bearer secret" for call in fixture.calls))
-                    await loaded.close(); await loaded.close()
-                    with self.assertRaisesRegex(RuntimeError, "connection is closed"): await loaded.tools[0]["execute"]({"message": "x"})
-                finally: fixture.close()
+                    await loaded.close()
+                    await loaded.close()
+                    with self.assertRaisesRegex(RuntimeError, "connection is closed"):
+                        await loaded.tools[0]["execute"]({"message": "x"})
+                finally:
+                    fixture.close()
 
     async def test_chunked_sse_returns_before_terminal_chunk_with_fragmented_event(self):
         fixture = McpFixture(sse=True, chunked=True, sse_terminal_delay=0.3)
@@ -77,7 +87,8 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
                 "prompt",
             )
             await loaded.close()
-        finally: fixture.close()
+        finally:
+            fixture.close()
 
     async def test_truncated_http_framing_is_normalized(self):
         responses = (
@@ -88,7 +99,8 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
         for response in responses:
             with self.subTest(response=response):
                 reader = asyncio.StreamReader()
-                reader.feed_data(response); reader.feed_eof()
+                reader.feed_data(response)
+                reader.feed_eof()
                 with self.assertRaisesRegex(RuntimeError, "invalid fixture response"):
                     await read_http_response(reader, time.monotonic() + 1, 1024, "invalid fixture response", "too large")
 
@@ -98,9 +110,7 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
             "body",
         )
         with self.assertRaisesRegex(RuntimeError, "Unsupported MCP content type: resource"):
-            _normalize_result({
-                "content": [{"type": "resource", "resource": {"text": "body", "blob": "AA=="}}]
-            })
+            _normalize_result({"content": [{"type": "resource", "resource": {"text": "body", "blob": "AA=="}}]})
 
     async def test_http_errors_are_sanitized_and_never_fall_back(self):
         canary = "SECRET-CANARY-DO-NOT-LEAK"
@@ -113,7 +123,8 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(str(raised.exception), "MCP request failed")
                     self.assertNotIn(canary, str(raised.exception))
                     self.assertEqual([call["request"]["method"] for call in fixture.calls], ["server/discover", "initialize"])
-                finally: fixture.close()
+                finally:
+                    fixture.close()
 
     async def test_json_rpc_errors_are_sanitized_for_json_and_sse(self):
         canary = "SECRET-RPC-CANARY"
@@ -128,7 +139,8 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
                             self.addCleanup(loaded.close)
                             await loaded.tools[0]["execute"]({"message": "hello"})
                         self.assertNotIn(canary, str(raised.exception))
-                    finally: fixture.close()
+                    finally:
+                        fixture.close()
 
     async def test_legacy_initialize_negotiation_is_sdk_owned(self):
         fixture = McpFixture(legacy=True)
@@ -140,15 +152,18 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fixture.method_counts["server/discover"], 1)
             self.assertEqual(fixture.method_counts["initialize"], 1)
             self.assertEqual(fixture.method_counts["notifications/initialized"], 1)
-        finally: fixture.close()
+        finally:
+            fixture.close()
 
     async def test_negotiation_corrective_retry_and_loud_rejection(self):
         mutual = {"code": -32022, "message": "retry", "data": {"supported": ["2026-07-28"], "requested": "2026-07-28"}}
         fixture = McpFixture(rpc_errors={"server/discover": [mutual, None]})
         try:
-            loaded = await load_mcp_tools(McpConfig("fixture", fixture.url)); await loaded.close()
+            loaded = await load_mcp_tools(McpConfig("fixture", fixture.url))
+            await loaded.close()
             self.assertEqual(fixture.method_counts["server/discover"], 2)
-        finally: fixture.close()
+        finally:
+            fixture.close()
 
         cases = [
             ({"code": -32022, "data": {"supported": ["2027-01-01"], "requested": "2026-07-28"}}, 0),
@@ -164,13 +179,17 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
                         await load_mcp_tools(McpConfig("fixture", fixture.url))
                     self.assertEqual(fixture.method_counts["server/discover"], 1)
                     self.assertEqual(fixture.method_counts.get("initialize", 0), initialize_count)
-                finally: fixture.close()
+                finally:
+                    fixture.close()
 
     async def test_mcp_header_encoding_mirroring_and_invalid_declaration_exclusion(self):
-        schema = {"type": "object", "properties": {
-            "message": {"type": "string", "x-mcp-header": "Message"},
-            "nested": {"type": "object", "properties": {"enabled": {"type": "boolean", "x-mcp-header": "Enabled"}}},
-        }}
+        schema = {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "x-mcp-header": "Message"},
+                "nested": {"type": "object", "properties": {"enabled": {"type": "boolean", "x-mcp-header": "Enabled"}}},
+            },
+        }
         fixture = McpFixture(tools=[{"name": "echo", "inputSchema": schema}])
         try:
             loaded = await load_mcp_tools(McpConfig("fixture", fixture.url))
@@ -180,12 +199,15 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call["mcp-param-message"], "=?base64?IGNhZsOpIA==?=")
             self.assertEqual(call["mcp-param-enabled"], "true")
             await loaded.close()
-        finally: fixture.close()
+        finally:
+            fixture.close()
         invalid = McpFixture(tools=[{"name": "echo", "inputSchema": {"type": "object", "items": {"type": "string", "x-mcp-header": "Bad"}}}])
         try:
             loaded = await load_mcp_tools(McpConfig("fixture", invalid.url))
-            self.assertEqual(loaded.tools, []); await loaded.close()
-        finally: invalid.close()
+            self.assertEqual(loaded.tools, [])
+            await loaded.close()
+        finally:
+            invalid.close()
 
     async def test_tools_list_pagination_aggregates_under_bounds(self):
         pages = [
@@ -199,35 +221,47 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
             list_calls = [call["request"]["params"] for call in fixture.calls if call["request"]["method"] == "tools/list"]
             self.assertEqual(list_calls, [{"_meta": list_calls[0]["_meta"]}, {"cursor": "1", "_meta": list_calls[1]["_meta"]}])
             await loaded.close()
-        finally: fixture.close()
+        finally:
+            fixture.close()
 
     async def test_allowlist_bounds_mapping_timeout_and_cancellation(self):
         fixture = McpFixture(list_delay=0.05)
         try:
             loaded = await load_mcp_tools(McpConfig("fixture", fixture.url, allowed_tools=["slow"], call_timeout_ms=30))
             self.assertEqual(len(loaded.tools), 1)
-            with self.assertRaisesRegex(TimeoutError, "timed out"): await loaded.tools[0]["execute"]({"delay": 1})
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                await loaded.tools[0]["execute"]({"delay": 1})
             await loaded.close()
             with self.assertRaisesRegex(RuntimeError, "allowed tools were not found"):
                 await load_mcp_tools(McpConfig("fixture", fixture.url, allowed_tools=["missing"]))
-            cancelled = asyncio.Event(); loaded = await load_mcp_tools(McpConfig("fixture", fixture.url, allowed_tools=["slow"]))
+            cancelled = asyncio.Event()
+            loaded = await load_mcp_tools(McpConfig("fixture", fixture.url, allowed_tools=["slow"]))
             task = asyncio.create_task(loaded.tools[0]["execute"]({"delay": 1}, cancelled))
-            await asyncio.sleep(0.05); cancelled.set()
-            with self.assertRaisesRegex(InterruptedError, "aborted"): await asyncio.wait_for(task, 1)
+            await asyncio.sleep(0.05)
+            cancelled.set()
+            with self.assertRaisesRegex(InterruptedError, "aborted"):
+                await asyncio.wait_for(task, 1)
             await loaded.close()
-        finally: fixture.close()
+        finally:
+            fixture.close()
         too_many = McpFixture(tools=[{"name": f"tool{i}", "inputSchema": {}} for i in range(65)])
         try:
-            with self.assertRaisesRegex(RuntimeError, "MCP request failed"): await load_mcp_tools(McpConfig("fixture", too_many.url))
-        finally: too_many.close()
+            with self.assertRaisesRegex(RuntimeError, "MCP request failed"):
+                await load_mcp_tools(McpConfig("fixture", too_many.url))
+        finally:
+            too_many.close()
         malformed = McpFixture(tools=[{"name": "bad", "inputSchema": None}])
         try:
-            with self.assertRaisesRegex(RuntimeError, "MCP request failed"): await load_mcp_tools(McpConfig("fixture", malformed.url))
-        finally: malformed.close()
+            with self.assertRaisesRegex(RuntimeError, "MCP request failed"):
+                await load_mcp_tools(McpConfig("fixture", malformed.url))
+        finally:
+            malformed.close()
         long_name = McpFixture(tools=[{"name": "x" * 60, "inputSchema": {}}])
         try:
-            with self.assertRaisesRegex(RuntimeError, "MCP request failed"): await load_mcp_tools(McpConfig("fixture", long_name.url))
-        finally: long_name.close()
+            with self.assertRaisesRegex(RuntimeError, "MCP request failed"):
+                await load_mcp_tools(McpConfig("fixture", long_name.url))
+        finally:
+            long_name.close()
 
     async def test_close_cancels_only_owned_request(self):
         fixture = McpFixture()
@@ -245,7 +279,9 @@ class McpTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(loaded.close(), 1)
             await asyncio.wait_for(continued.wait(), 1)
             await caller_task
-        finally: fixture.close()
+        finally:
+            fixture.close()
 
 
-if __name__ == "__main__": unittest.main()
+if __name__ == "__main__":
+    unittest.main()

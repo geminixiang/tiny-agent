@@ -47,7 +47,8 @@ class SessionStoreTest(unittest.TestCase):
 
     def test_invalid_append_identity_permissions_and_symlink(self):
         with TemporaryDirectory() as root:
-            cwd = Path(root); session = Session.create(cwd)
+            cwd = Path(root)
+            session = Session.create(cwd)
             before = session.path.read_bytes()
             with self.assertRaises(Exception):
                 session.append({"kind": "record", "record": {"type": "runStarted"}})
@@ -57,7 +58,8 @@ class SessionStoreTest(unittest.TestCase):
                 session.append()
             committed = session.append({"kind": "entry", "entry": {"type": "message", "message": {"role": "user", "content": "valid"}}})
             self.assertEqual(committed[0]["seq"], 1)
-            session_id, path = session.id, session.path; session.close()
+            session_id, path = session.id, session.path
+            session.close()
             header = json.loads(path.read_text().splitlines()[0])
             path.write_text(json.dumps({**header, "id": uuid7()}) + "\n")
             with self.assertRaisesRegex(ValueError, "filename does not match header"):
@@ -67,19 +69,29 @@ class SessionStoreTest(unittest.TestCase):
             reopened = Session.open(session_id, cwd)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             reopened.close()
-            symlink_id = uuid7(); outside = cwd / "outside.jsonl"; outside.write_text(json.dumps(header) + "\n")
+            symlink_id = uuid7()
+            outside = cwd / "outside.jsonl"
+            outside.write_text(json.dumps(header) + "\n")
             (cwd / ".tiny-agent/sessions" / f"only_{symlink_id}.jsonl").symlink_to(outside)
             with self.assertRaisesRegex(ValueError, "Session not found"):
                 Session.open(symlink_id, cwd)
+
     def test_append_is_serialized_and_environment_override(self):
         with TemporaryDirectory() as root:
-            session = Session.create(Path(root)); errors = []
+            session = Session.create(Path(root))
+            errors = []
+
             def append(index):
-                try: session.append({"kind": "entry", "entry": {"type": "message", "message": {"role": "user", "content": str(index)}}})
-                except Exception as error: errors.append(error)
+                try:
+                    session.append({"kind": "entry", "entry": {"type": "message", "message": {"role": "user", "content": str(index)}}})
+                except Exception as error:
+                    errors.append(error)
+
             threads = [threading.Thread(target=append, args=(index,)) for index in range(10)]
-            for thread in threads: thread.start()
-            for thread in threads: thread.join()
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
             self.assertFalse(errors)
             self.assertEqual(len(session.load()["transcript"]), 10)
             session.close()
@@ -88,8 +100,11 @@ class SessionStoreTest(unittest.TestCase):
             os.environ["TINY_AGENT_ENVIRONMENT_IDENTITY"] = " job-1 "
             self.assertEqual(environment_identity(), "job-1")
         finally:
-            if old is None: os.environ.pop("TINY_AGENT_ENVIRONMENT_IDENTITY", None)
-            else: os.environ["TINY_AGENT_ENVIRONMENT_IDENTITY"] = old
+            if old is None:
+                os.environ.pop("TINY_AGENT_ENVIRONMENT_IDENTITY", None)
+            else:
+                os.environ["TINY_AGENT_ENVIRONMENT_IDENTITY"] = old
 
 
-if __name__ == "__main__": unittest.main()
+if __name__ == "__main__":
+    unittest.main()

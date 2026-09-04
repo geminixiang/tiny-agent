@@ -9,12 +9,14 @@ class LifecycleTest(unittest.TestCase):
     def recorder(self):
         events = []
         lifecycle = ExecutionLifecycle([CallbackSink(events.append)])
-        lifecycle.observe({
-            "type": "session.attached",
-            "timestamp": "2026-01-01T00:00:00.000Z",
-            "sessionId": "session-1",
-            "resumed": False,
-        })
+        lifecycle.observe(
+            {
+                "type": "session.attached",
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "sessionId": "session-1",
+                "resumed": False,
+            }
+        )
         return events, lifecycle
 
     def test_session_notifies_after_write_and_ignores_observer_failure(self):
@@ -30,31 +32,37 @@ class LifecycleTest(unittest.TestCase):
 
     def test_projects_committed_tool_admission_separately_from_physical_attempt(self):
         events, lifecycle = self.recorder()
-        lifecycle.committed([{
-            "kind": "record",
-            "id": "tool-started-1",
-            "timestamp": 10,
-            "record": {
-                "type": "toolStarted",
+        lifecycle.committed(
+            [
+                {
+                    "kind": "record",
+                    "id": "tool-started-1",
+                    "timestamp": 10,
+                    "record": {
+                        "type": "toolStarted",
+                        "operationId": "operation-1",
+                        "stepId": "step-1",
+                        "toolCallId": "call-1",
+                        "toolName": "read",
+                        "replay": "safe",
+                    },
+                }
+            ]
+        )
+        lifecycle.observe(
+            {
+                "type": "tool.started",
+                "timestamp": "2026-01-01T00:00:00.020Z",
                 "operationId": "operation-1",
                 "stepId": "step-1",
+                "attemptId": "physical-1",
+                "parentAttemptId": "model-1",
+                "toolStartedId": "tool-started-1",
                 "toolCallId": "call-1",
-                "toolName": "read",
-                "replay": "safe",
-            },
-        }])
-        lifecycle.observe({
-            "type": "tool.started",
-            "timestamp": "2026-01-01T00:00:00.020Z",
-            "operationId": "operation-1",
-            "stepId": "step-1",
-            "attemptId": "physical-1",
-            "parentAttemptId": "model-1",
-            "toolStartedId": "tool-started-1",
-            "toolCallId": "call-1",
-            "tool": "read",
-            "recovery": False,
-        })
+                "tool": "read",
+                "recovery": False,
+            }
+        )
 
         self.assertEqual([event["type"] for event in events if event["type"].startswith("tool.")], ["tool.admitted", "tool.started"])
         lifecycle.close()
@@ -63,23 +71,29 @@ class LifecycleTest(unittest.TestCase):
 
     def test_recovery_reconciles_without_inventing_cross_process_model_attempt(self):
         events, lifecycle = self.recorder()
-        lifecycle.observe({
-            "type": "recovery.attached",
-            "timestamp": "2026-01-01T00:00:00.010Z",
-            "operationId": "operation-1",
-            "operationKind": "run",
-        })
-        lifecycle.committed([{
-            "kind": "record",
-            "timestamp": 20,
-            "record": {
-                "type": "stepFailed",
+        lifecycle.observe(
+            {
+                "type": "recovery.attached",
+                "timestamp": "2026-01-01T00:00:00.010Z",
                 "operationId": "operation-1",
-                "stepId": "step-1",
-                "attemptId": "old-process-attempt",
-                "error": {"code": "aborted"},
-            },
-        }])
+                "operationKind": "run",
+            }
+        )
+        lifecycle.committed(
+            [
+                {
+                    "kind": "record",
+                    "timestamp": 20,
+                    "record": {
+                        "type": "stepFailed",
+                        "operationId": "operation-1",
+                        "stepId": "step-1",
+                        "attemptId": "old-process-attempt",
+                        "error": {"code": "aborted"},
+                    },
+                }
+            ]
+        )
 
         reconciled = next(event for event in events if event["type"] == "model.reconciled")
         self.assertEqual(reconciled["outcome"], "cancelled")

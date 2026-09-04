@@ -141,10 +141,12 @@ async def run_session(args: argparse.Namespace, aliases: list[str], local_tools:
 
     def complete_startup(outcome: str, error_type: str | None = None) -> None:
         nonlocal startup_completed
-        if startup_completed: return
+        if startup_completed:
+            return
         startup_completed = True
         event = {"type": "startup.completed", "timestamp": timestamp(), "durationMs": (time.monotonic() - startup_started) * 1000, "outcome": outcome}
-        if error_type: event["errorType"] = error_type
+        if error_type:
+            event["errorType"] = error_type
         lifecycle.observe(event)
 
     try:
@@ -166,25 +168,39 @@ async def run_session(args: argparse.Namespace, aliases: list[str], local_tools:
                 loaded = await load_mcp_tools(config)
             except (ValueError, RuntimeError, OSError, TimeoutError) as error:
                 cause = mcp_failure_cause(error)
-                lifecycle.observe({"type": "mcp.completed", "timestamp": timestamp(), "server": config.alias, "durationMs": (time.monotonic() - started) * 1000, "outcome": "failed", "errorType": cause})
+                lifecycle.observe(
+                    {"type": "mcp.completed", "timestamp": timestamp(), "server": config.alias, "durationMs": (time.monotonic() - started) * 1000, "outcome": "failed", "errorType": cause}
+                )
                 complete_startup("failed", "mcp_setup_error")
-                if not args.json: raise RuntimeError(f"MCP {config.alias} failed: {error}") from error
+                if not args.json:
+                    raise RuntimeError(f"MCP {config.alias} failed: {error}") from error
                 return 1
             loaded_mcp.append(loaded)
-            lifecycle.observe({"type": "mcp.completed", "timestamp": timestamp(), "server": config.alias, "durationMs": (time.monotonic() - started) * 1000, "outcome": "succeeded", "protocolVersion": loaded.protocol_version, "toolCount": len(loaded.tools)})
+            lifecycle.observe(
+                {
+                    "type": "mcp.completed",
+                    "timestamp": timestamp(),
+                    "server": config.alias,
+                    "durationMs": (time.monotonic() - started) * 1000,
+                    "outcome": "succeeded",
+                    "protocolVersion": loaded.protocol_version,
+                    "toolCount": len(loaded.tools),
+                }
+            )
             if not args.json:
                 print(f"MCP {config.alias}: connected ({loaded.protocol_version}, {len(loaded.tools)} tools)")
 
         tools = [*local_tools, *(tool for loaded in loaded_mcp for tool in loaded.tools)]
         try:
             agent = Agent(skills, session, instructions, tools=tools, lifecycle=lifecycle)
-        except (ValueError, RuntimeError, OSError, TypeError):
+        except ValueError, RuntimeError, OSError, TypeError:
             complete_startup("failed", "agent_setup_error")
             raise
         complete_startup("succeeded")
         if args.json:
             try:
-                if args.session: await agent.resume_session()
+                if args.session:
+                    await agent.resume_session()
                 await agent.run_agent_loop(" ".join(args.prompt))
                 return 0
             except (ValueError, RuntimeError, OSError, TimeoutError) as error:
@@ -198,16 +214,19 @@ async def run_session(args: argparse.Namespace, aliases: list[str], local_tools:
         print(f"\nResume: tiny-py --session {session.id}")
         return 0
     finally:
-        with suppress(OSError, ValueError): session.close()
+        with suppress(OSError, ValueError):
+            session.close()
         await close_mcp(loaded_mcp)
-        with suppress(OSError, ValueError): lifecycle.close()
+        with suppress(OSError, ValueError):
+            lifecycle.close()
 
 
 async def run_cli(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.cwd:
         path = Path(args.cwd).resolve()
-        if not path.is_dir(): raise ValueError(f"--cwd must be a directory: {args.cwd}")
+        if not path.is_dir():
+            raise ValueError(f"--cwd must be a directory: {args.cwd}")
         os.chdir(path)
         set_root(path)
     if args.json and not args.prompt:

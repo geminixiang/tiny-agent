@@ -19,4 +19,5 @@ class Settings(BaseSettings):
     _environment: dict[str, str] = PrivateAttr(default_factory=lambda: dict(os.environ))
 
     @property
-    def environment(self) -> dict[str, str]: return self._environment
+    def environment(self) -> dict[str, str]:
+        return self._environment

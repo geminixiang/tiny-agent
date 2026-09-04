@@ -23,11 +23,80 @@ class TelemetryTest(unittest.TestCase):
         monitor.emit({"type": "mcp.completed", "timestamp": "2026-01-01T00:00:00.020Z", "server": "fixture", "outcome": "succeeded", "protocolVersion": "2026-07-28", "toolCount": 1})
         monitor.emit({"type": "startup.completed", "timestamp": "2026-01-01T00:00:00.030Z", "outcome": "succeeded"})
         monitor.emit({"type": "operation.started", "timestamp": "2026-01-01T00:00:00.040Z", "sessionId": session_id, "operationId": operation_id, "operationKind": "run", "recovery": False})
-        monitor.emit({"type": "model.started", "timestamp": "2026-01-01T00:00:00.050Z", "sessionId": session_id, "operationId": operation_id, "operationKind": "run", "stepId": "step-1", "attemptId": "attempt-1", "attempt": 1, "recovery": False})
-        monitor.emit({"type": "model.completed", "timestamp": "2026-01-01T00:00:00.100Z", "sessionId": session_id, "operationId": operation_id, "operationKind": "run", "stepId": "step-1", "attemptId": "attempt-1", "recovery": False, "outcome": "succeeded", "usage": {"input": 7, "output": 2, "cacheRead": 3, "cacheWrite": 1}})
-        monitor.emit({"type": "tool.started", "timestamp": "2026-01-01T00:00:00.110Z", "sessionId": session_id, "operationId": operation_id, "stepId": "step-1", "attemptId": "tool-attempt-1", "parentAttemptId": "attempt-1", "toolStartedId": "tool-started-1", "toolCallId": "call-1", "tool": "read", "recovery": False, "args": {"path": "/secret"}})
-        monitor.emit({"type": "tool.completed", "timestamp": "2026-01-01T00:00:00.130Z", "sessionId": session_id, "operationId": operation_id, "stepId": "step-1", "attemptId": "tool-attempt-1", "parentAttemptId": "attempt-1", "toolStartedId": "tool-started-1", "toolCallId": "call-1", "tool": "read", "recovery": False, "outcome": "succeeded", "result": "secret contents"})
-        monitor.emit({"type": "operation.completed", "timestamp": "2026-01-01T00:00:00.150Z", "sessionId": session_id, "operationId": operation_id, "operationKind": "run", "recovery": False, "outcome": "succeeded", "completion": "normal", "answer": "private answer", "errorMessage": "private error"})
+        monitor.emit(
+            {
+                "type": "model.started",
+                "timestamp": "2026-01-01T00:00:00.050Z",
+                "sessionId": session_id,
+                "operationId": operation_id,
+                "operationKind": "run",
+                "stepId": "step-1",
+                "attemptId": "attempt-1",
+                "attempt": 1,
+                "recovery": False,
+            }
+        )
+        monitor.emit(
+            {
+                "type": "model.completed",
+                "timestamp": "2026-01-01T00:00:00.100Z",
+                "sessionId": session_id,
+                "operationId": operation_id,
+                "operationKind": "run",
+                "stepId": "step-1",
+                "attemptId": "attempt-1",
+                "recovery": False,
+                "outcome": "succeeded",
+                "usage": {"input": 7, "output": 2, "cacheRead": 3, "cacheWrite": 1},
+            }
+        )
+        monitor.emit(
+            {
+                "type": "tool.started",
+                "timestamp": "2026-01-01T00:00:00.110Z",
+                "sessionId": session_id,
+                "operationId": operation_id,
+                "stepId": "step-1",
+                "attemptId": "tool-attempt-1",
+                "parentAttemptId": "attempt-1",
+                "toolStartedId": "tool-started-1",
+                "toolCallId": "call-1",
+                "tool": "read",
+                "recovery": False,
+                "args": {"path": "/secret"},
+            }
+        )
+        monitor.emit(
+            {
+                "type": "tool.completed",
+                "timestamp": "2026-01-01T00:00:00.130Z",
+                "sessionId": session_id,
+                "operationId": operation_id,
+                "stepId": "step-1",
+                "attemptId": "tool-attempt-1",
+                "parentAttemptId": "attempt-1",
+                "toolStartedId": "tool-started-1",
+                "toolCallId": "call-1",
+                "tool": "read",
+                "recovery": False,
+                "outcome": "succeeded",
+                "result": "secret contents",
+            }
+        )
+        monitor.emit(
+            {
+                "type": "operation.completed",
+                "timestamp": "2026-01-01T00:00:00.150Z",
+                "sessionId": session_id,
+                "operationId": operation_id,
+                "operationKind": "run",
+                "recovery": False,
+                "outcome": "succeeded",
+                "completion": "normal",
+                "answer": "private answer",
+                "errorMessage": "private error",
+            }
+        )
         provider.force_flush()
 
         spans = exporter.get_finished_spans()
