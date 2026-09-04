@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin, type UserConfig } from "vite";
 import hljs from "highlight.js/lib/core";
 import json from "highlight.js/lib/languages/json";
 import shell from "highlight.js/lib/languages/shell";
@@ -21,11 +21,11 @@ const bookRoot = dirname(fileURLToPath(import.meta.url));
 const out = resolve(process.env.BOOK_OUT_DIR || join(bookRoot, "dist"));
 const origin = "https://tiny-agent.geminixiang.com";
 const repo = "https://github.com/geminixiang/tiny-agent";
-const escape = (value) =>
+const escape = (value: string): string =>
     String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-const cspHash = (content) => `'sha256-${createHash("sha256").update(content).digest("base64")}'`;
+const cspHash = (content: string): string => `'sha256-${createHash("sha256").update(content).digest("base64")}'`;
 
-function architectureCsp(html) {
+function architectureCsp(html: string): { scripts: string; styles: string } {
     const scripts = [...html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)]
         .filter((match) => !match[1].includes("type="))
         .map((match) => cspHash(match[2]));
@@ -150,7 +150,7 @@ function homePage(assets) {
     });
 }
 
-function bookPlugin() {
+function bookPlugin(): Plugin {
     const assetRefs = new Map();
     let assetCount = 0;
 
@@ -237,7 +237,7 @@ function bookPlugin() {
     };
 }
 
-export default defineConfig({
+const config: UserConfig = {
     build: {
         outDir: out,
         emptyOutDir: true,
@@ -247,4 +247,6 @@ export default defineConfig({
         },
     },
     plugins: [bookPlugin()],
-});
+};
+
+export default defineConfig(config);
