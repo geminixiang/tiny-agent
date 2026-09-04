@@ -45,6 +45,12 @@ changes:
 - VibeGuard's error-handling strictness (U-17/U-29) applies to real error
   paths inside the requested change; it never justifies adding new
   validators, checks, or compatibility layers.
+- File size is not a reason to split a file. Split a file only when its
+  contents have different responsibilities (e.g. agent loop vs. session
+  storage vs. MCP client), not because the file is long. A single file
+  with a single responsibility stays one file even at thousands of lines.
+  "God module" is defined by responsibility count, not by line count; do
+  not flag line count as a smell in review.
 - When the user says something is over-designed: cut it, do not defend it.
 
 ## Problem framing and tool choice
