@@ -1,6 +1,6 @@
 import unittest
 
-from tiny_agent.session_runtime import current_configuration, entry_fact, project_session, record_fact, replay_declaration, runtime_configuration, step_failed_record, usage_fact
+from tiny_agent.session.runtime import current_configuration, entry_fact, project_session, record_fact, replay_declaration, runtime_configuration, step_failed_record, usage_fact
 
 
 class SessionRuntimeTest(unittest.TestCase):

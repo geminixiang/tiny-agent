@@ -16,7 +16,7 @@ from unittest.mock import patch
 from tiny_agent import agent as tiny
 from tiny_agent import cli
 from tiny_agent.cli import Terminal
-from tiny_agent.session_reducer import configuration_digest, reduce_session, source_digest
+from tiny_agent.session.reducer import configuration_digest, reduce_session, source_digest
 
 FIXTURES = Path(__file__).resolve().parents[2] / "schemas/session/fixtures"
 LOCAL_TOOL_CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "schemas/tools/local-tool-contract.json").read_text(encoding="utf-8"))

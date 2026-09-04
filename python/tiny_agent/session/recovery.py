@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from .session_reducer import SYNTHETIC_CONTENT
+from .reducer import SYNTHETIC_CONTENT
 
 
 def _synthetic(assistant_id, index, call, reason, tool=None):

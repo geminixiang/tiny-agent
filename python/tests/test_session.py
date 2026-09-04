@@ -8,8 +8,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from tiny_agent.session import Session, environment_identity, uuid7
-from tiny_agent.session_recovery import plan_recovery
-from tiny_agent.session_reducer import reduce_session
+from tiny_agent.session.recovery import plan_recovery
+from tiny_agent.session.reducer import reduce_session
 
 ROOT = Path(__file__).resolve().parents[2]
 PLANNERS = ROOT / "schemas/session/planner-fixtures"

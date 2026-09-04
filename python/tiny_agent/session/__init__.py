@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
-from .session_reducer import reduce_session
-from .settings import Settings
+from ..settings import Settings
+from .reducer import reduce_session
 
 ROOT = Path.cwd().resolve()
 _WRITERS: set[Path] = set()

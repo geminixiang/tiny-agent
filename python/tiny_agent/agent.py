@@ -17,9 +17,9 @@ from urllib.parse import urlsplit
 from .http import close_writer, read_http_response, remaining, wait_owned
 from .lifecycle import ExecutionLifecycle
 from .session import Session, environment_identity, uuid7
-from .session_recovery import plan_recovery
-from .session_reducer import source_digest
-from .session_runtime import current_configuration, entry_fact, project_session, record_fact, replay_declaration, runtime_configuration, step_failed_record, usage_fact
+from .session.recovery import plan_recovery
+from .session.reducer import source_digest
+from .session.runtime import current_configuration, entry_fact, project_session, record_fact, replay_declaration, runtime_configuration, step_failed_record, usage_fact
 from .settings import DEFAULT_ENDPOINT, DEFAULT_MODEL, Settings
 
 

@@ -1,6 +1,6 @@
 import hashlib
 import json
-from .session_reducer import configuration_digest
+from .reducer import configuration_digest
 
 
 def entry_fact(fact_id: str, entry: dict) -> dict:

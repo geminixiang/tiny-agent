@@ -30,8 +30,11 @@ use crate::session_runtime::{
 pub mod lifecycle;
 pub mod mcp;
 pub mod session;
+#[path = "session/recovery.rs"]
 pub mod session_recovery;
+#[path = "session/reducer.rs"]
 pub mod session_reducer;
+#[path = "session/runtime.rs"]
 pub mod session_runtime;
 pub mod telemetry;
 pub mod terminal;

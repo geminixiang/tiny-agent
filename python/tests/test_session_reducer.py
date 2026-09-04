@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
-from tiny_agent.session_reducer import SessionCorruption, reduce_session
+from tiny_agent.session.reducer import SessionCorruption, reduce_session
 
 FIXTURES = Path(__file__).resolve().parents[2] / "schemas/session/fixtures"
 
