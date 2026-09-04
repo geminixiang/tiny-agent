@@ -1,11 +1,20 @@
 import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { canonicalDigest } from "./canonical-json.js";
 import { ENDPOINT, MODEL, chatCompletionsUrl, requireOpenRouterApiKey } from "./env.js";
 import { type ExecutionLifecycle, noLifecycle } from "./lifecycle.js";
-import { environmentIdentity, SessionStore, type SessionFactInput } from "./session.js";
-import { planRecovery, SYNTHETIC_CONTENT, type SyntheticResult } from "./session-recovery.js";
-import { expect, type ConfigurationSnapshot, type ToolCall } from "./session-reducer.js";
+import {
+    buildConfiguration,
+    currentConfiguration,
+    projectSession,
+    runFacts,
+    sourceDigest,
+    syntheticToolResult,
+    type RuntimeMessage as Message,
+    type RuntimeUsage as Usage,
+} from "./session-runtime.js";
+import { environmentIdentity, SessionStore } from "./session.js";
+import { planRecovery, SYNTHETIC_CONTENT } from "./session-recovery.js";
+import { expect } from "./session-reducer.js";
 import {
     builtInTools,
     durableToolReplay,
@@ -33,6 +42,17 @@ export {
     type CurrentTool,
     type RecoveryPlan,
 } from "./session-recovery.js";
+export {
+    buildConfiguration,
+    currentConfiguration,
+    projectSession,
+    runFacts,
+    sourceDigest,
+    syntheticToolResult,
+    type RuntimeConfiguration,
+    type RuntimeMessage,
+    type RuntimeUsage,
+} from "./session-runtime.js";
 export { SessionStore, SessionStore as Session, environmentIdentity } from "./session.js";
 export { reduceSession, SessionCorruption, type SessionCorruptionCode, type SessionState } from "./session-reducer.js";
 export {
@@ -52,20 +72,8 @@ export { ENDPOINT, MODEL };
 function root() {
     return process.cwd();
 }
-type Message = {
-    role: "system" | "user" | "assistant" | "tool";
-    content: string | null;
-    tool_call_id?: string;
-    tool_calls?: ToolCall[];
-};
 type Skill = { name: string; description: string; path: string };
-export type Usage = {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-    cacheHitRate?: number;
-};
+export type { RuntimeUsage as Usage } from "./session-runtime.js";
 
 class ModelResponseError extends Error {
     constructor(
@@ -86,44 +94,6 @@ function usageFactIfModelError(error: unknown, operationId: string, attemptId: s
 // key in an object literal, instead of repeating the ternary-spread at every call site.
 function when<T extends object>(condition: unknown, value: T): T | Record<string, never> {
     return condition ? value : {};
-}
-
-const digest = canonicalDigest;
-
-export function buildConfiguration(systemPrompt: string, tools: readonly Tool[]) {
-    const configurationSnapshot: ConfigurationSnapshot = {
-        model: MODEL,
-        systemPromptDigest: digest(systemPrompt),
-        tools: tools.map((tool) => ({
-            name: tool.name,
-            definitionDigest: digest({
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.parameters,
-                ...when(tool.definitionIdentity, { definitionIdentity: tool.definitionIdentity }),
-            }),
-        })),
-        adapterIdentity: "openrouter:chat-completions:v1",
-        routingIdentity: `openrouter:${MODEL}`,
-        outputOptionsDigest: digest({}),
-    };
-    return { configurationSnapshot, configurationDigest: digest(configurationSnapshot) };
-}
-
-export function runFacts(session: SessionStore, content: string) {
-    const inputEntryId = session.allocateId();
-    const operationId = session.allocateId();
-    return {
-        inputEntryId,
-        operationId,
-        facts: [
-            { kind: "entry", id: inputEntryId, entry: { type: "message", message: { role: "user", content } } },
-            {
-                kind: "record",
-                record: { type: "runStarted", operationId, operationKind: "run", inputEntryId },
-            },
-        ] satisfies SessionFactInput[],
-    };
 }
 
 // prettier-ignore
@@ -415,16 +385,11 @@ ${list}
             }
 
             const configuration = buildConfiguration(this.systemPrompt, this.tools);
-            const current = {
-                configurationDigest: configuration.configurationDigest,
-                environmentIdentity: await environmentIdentity(state.header.cwd),
-                // this.tools and configurationSnapshot.tools come from the same buildConfiguration map,
-                // so they line up index-for-index without needing to re-find each tool by name.
-                tools: this.tools.map((tool, index) => ({
-                    ...configuration.configurationSnapshot.tools[index],
-                    ...durableToolReplay(tool),
-                })),
-            };
+            const current = currentConfiguration(
+                configuration,
+                this.tools,
+                await environmentIdentity(state.header.cwd),
+            );
             const plan = planRecovery(state, current);
             const operationId = operation.operationId;
             if (plan.type === "blocked") {
@@ -473,9 +438,7 @@ ${list}
             }
             if (plan.type === "appendSynthetic") {
                 const step = expect(state.operation.step, "resumeSession: appendSynthetic without an active step");
-                await this.session.append(
-                    plan.results.map((result) => this.syntheticRecoveryFact(step.stepId, result)),
-                );
+                await this.session.append(plan.results.map((result) => syntheticToolResult(step.stepId, result)));
                 continue;
             }
             if (plan.type === "startTool") {
@@ -554,8 +517,9 @@ ${list}
         }
     }
     private restoreState(state: Awaited<ReturnType<SessionStore["load"]>>) {
-        this.messages = [this.messages[0], ...state.activeContext];
-        this.usage = { ...state.usage };
+        const projection = projectSession(state, this.messages[0]);
+        this.messages = projection.messages;
+        this.usage = projection.usage;
     }
     private setLatestCacheHitRate(usage: Usage) {
         const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
@@ -579,22 +543,6 @@ ${list}
             if (prompt > 0) this.setLatestCacheHitRate(requestUsage);
             return;
         }
-    }
-    private syntheticRecoveryFact(stepId: string, result: SyntheticResult): SessionFactInput {
-        return {
-            kind: "entry",
-            id: result.resultEntryId,
-            entry: {
-                type: "message",
-                stepId,
-                ...(result.toolStartedId
-                    ? { toolStartedId: result.toolStartedId }
-                    : { assistantEntryId: result.assistantEntryId, toolIndex: result.toolIndex }),
-                message: { role: "tool", tool_call_id: result.toolCallId, content: result.content },
-                toolName: result.toolName,
-                result: { type: "synthetic", reason: result.reason },
-            },
-        };
     }
     private async executeRecoveryTool(
         state: Awaited<ReturnType<SessionStore["load"]>>,
@@ -958,7 +906,7 @@ ${list}
                 resultEntryId,
                 compactedEntryIds: compacted.map((item) => item.id),
                 retainedEntryIds: retained.map((item) => item.id),
-                sourceDigest: digest(source.map((item) => ({ sourceEntryId: item.id, message: item.message }))),
+                sourceDigest: sourceDigest(source),
             },
         });
         const result = await this.continueCompaction(

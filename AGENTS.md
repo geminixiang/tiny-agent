@@ -11,7 +11,18 @@
 - Use four spaces, never tabs. Run the language formatter instead of hand-aligning code.
 - Preserve valid model transcripts, append-only sessions, resumability, and cancellation semantics when simplifying.
 - Prefer unit tests under a `tests` directory when the language tooling supports it cleanly; keep Go tests beside code for Go conventions, and keep Rust inline `mod tests` only when testing private helpers is simpler than exposing them.
-- Keep TypeScript, Go, and Python behavior equivalent unless a language constraint is documented.
+- TypeScript is the primary reading entry point and reference implementation.
+  Keep TypeScript, Go, Python, and Rust conceptually isomorphic: core concepts,
+  responsibility boundaries, execution stages, and protocol operations should
+  map directly across languages even when syntax, types, error handling,
+  concurrency, and resource management follow language-native conventions.
+  Do not require line-for-line translation, but do not scatter a shared concept
+  so widely that maintainers must rediscover its counterpart.
+- Keep cross-language behavior and durable protocols equivalent unless a
+  language constraint is documented. A session written or interrupted by one
+  implementation must be readable, reducible, and recoverable by the others;
+  canonical digests, replay policy, environment identity, state transitions,
+  corruption handling, and recovery actions must retain the same meaning.
 - Treat terminal input as structured key sequences, not independent bytes; consume complete ANSI escape sequences so arrow keys never leak as `[A`/`[D` or trigger a standalone `Esc` action.
 - For hand-written line editing, keep the buffer and cursor in Unicode code points, but calculate rendering in terminal display cells: CJK/fullwidth characters use two cells and combining/format characters use zero.
 - Redraw the complete prompt and line from a known origin after every edit, then reposition from the terminal width; do not patch the screen with one-column moves or cursor save/restore because wide characters and wrapped lines will drift.

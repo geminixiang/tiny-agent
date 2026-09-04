@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import importlib.util
 import json
 import math
@@ -19,7 +18,8 @@ from .http import close_writer, read_http_response, remaining, wait_owned
 from .lifecycle import ExecutionLifecycle
 from .session import Session, environment_identity, uuid7
 from .session_recovery import plan_recovery
-from .session_reducer import configuration_digest, source_digest
+from .session_reducer import source_digest
+from .session_runtime import current_configuration, entry_fact, project_session, record_fact, replay_declaration, runtime_configuration, step_failed_record, usage_fact
 from .settings import DEFAULT_ENDPOINT, DEFAULT_MODEL, Settings
 
 
@@ -278,31 +278,6 @@ def provider_stop_reason(finish: object, answer: dict) -> str:
     if finish not in (None, "stop"):
         raise RuntimeError(f"Unknown provider finish_reason: {finish}")
     return "toolUse" if answer.get("tool_calls") else "stop"
-
-
-def entry_fact(fact_id: str, entry: dict) -> dict:
-    return {"kind": "entry", "id": fact_id, "entry": entry}
-
-
-def record_fact(record: dict, fact_id: str | None = None) -> dict:
-    fact = {"kind": "record", "record": record}
-    if fact_id:
-        fact["id"] = fact_id
-    return fact
-
-
-def usage_fact(operation_id: str, attempt_id: str, usage: dict) -> dict:
-    return {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage}
-
-
-def step_failed_record(operation_id: str, step_id: str, attempt_id: str, code: str, message: str) -> dict:
-    return {
-        "type": "stepFailed",
-        "operationId": operation_id,
-        "stepId": step_id,
-        "attemptId": attempt_id,
-        "error": {"code": code, "message": message},
-    }
 
 
 def json_object(text: object) -> dict | None:
@@ -772,25 +747,7 @@ class Agent:
         )
         prompt = f"You are tiny-agent, a concise coding agent in {ROOT}. Use only the tools provided in this request. If the available tools cannot complete the task, explain the missing capability instead of calling an unavailable tool. Follow the project instructions below. When a task matches an available skill, use its location only when a provided tool can read it.\n\nFor implementation tasks, inspect only what is needed, then make the changes and run focused tests. Do not keep researching the same uncertainty when a mature dependency or direct implementation is available.\nUse the provided tool descriptions to choose the right capability. Not every run enables file access, shell access, or file modification.\nPrefer completing a small working implementation over exhaustively researching every option. If repeated experiments fail, reconsider the approach instead of making another similar attempt.{project}\n\n<available_skills>\n{listing}\n</available_skills>"
         self.messages = [{"role": "system", "content": prompt}]
-        self.configuration = self._configuration(prompt)
-        self.configuration_digest = configuration_digest(self.configuration)
-
-    def _configuration(self, prompt: str) -> dict:
-        digest = lambda value: "sha256:" + hashlib.sha256(value.encode()).hexdigest()
-        declarations = []
-        for tool in self.tools:
-            function = tool["function"]
-            definition = json.dumps({key: function[key] for key in ("name", "description", "parameters")}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            declarations.append({"name": function["name"], "definitionDigest": digest(definition)})
-        model = Settings().tiny_model
-        return {
-            "model": model,
-            "systemPromptDigest": digest(prompt),
-            "tools": declarations,
-            "adapterIdentity": "openrouter:chat-completions:v1",
-            "routingIdentity": f"openrouter:{model}",
-            "outputOptionsDigest": digest("{}"),
-        }
+        self.configuration, self.configuration_digest = runtime_configuration(prompt, self.tools, Settings().tiny_model)
 
     @property
     def busy(self) -> bool:
@@ -862,27 +819,12 @@ class Agent:
         if cache_rate and prompt:
             self.usage["cacheHitRate"] = usage.get("cacheRead", 0) / prompt * 100
 
-    def _replay_declaration(self, tool: dict) -> tuple[str, str]:
-        if tool is TOOL_DEFINITIONS[1]:
-            return "safe", "builtin:read:v1"
-        return "never", f"tool:{tool['function']['name']}:v1"
-
     def _current_recovery_configuration(self) -> dict:
-        declarations = []
-        for configured in self.configuration["tools"]:
-            tool = next((item for item in self.tools if item["function"]["name"] == configured["name"]), None)
-            replay, replay_key = self._replay_declaration(tool) if tool else ("never", f"tool:{configured['name']}:v1")
-            declarations.append({**configured, "replay": replay, "replayKey": replay_key})
-        return {
-            "configurationDigest": self.configuration_digest,
-            "environmentIdentity": environment_identity(ROOT),
-            "tools": declarations,
-        }
+        return current_configuration(self.configuration, self.configuration_digest, self.tools, TOOL_DEFINITIONS[1], environment_identity(ROOT))
 
     def _restore_projection(self) -> None:
         state = self.session.load()
-        self.messages = [self.messages[0], *state["activeContext"]]
-        self.usage = {**state["usage"]}
+        self.messages, self.usage = project_session(state, self.messages[0])
         usage_by_attempt = {fact["attemptId"]: fact["usage"] for fact in self._facts() if fact.get("kind") == "usage" and "attemptId" in fact}
         for fact in reversed(self._facts()):
             entry = fact.get("entry", {})
@@ -1017,7 +959,7 @@ class Agent:
         name = tool["function"]["name"]
         if started_id is None:
             started_id, result_id = uuid7(), uuid7()
-            replay, replay_key = self._replay_declaration(tool)
+            replay, replay_key = replay_declaration(tool, TOOL_DEFINITIONS[1], name)
             record = {
                 "type": "toolStarted",
                 "operationId": operation_id,
