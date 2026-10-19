@@ -18,13 +18,15 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::lifecycle::ExecutionLifecycle;
 use crate::session::ConditionalAppend;
 pub use crate::session::Session;
+use crate::session::facts::{
+    abort_requested, assistant_message, compaction_entry, compaction_started, operation_finished,
+    step_attempt, step_failed, synthetic_tool_result, tool_result, tool_started, usage_fact,
+};
 use crate::session_recovery::{CurrentConfiguration, CurrentTool, plan_recovery};
 use crate::session_reducer::OperationState;
 use crate::session_runtime::{
-    RuntimeConfiguration, RuntimeTool, abort_requested, assistant_entry, compaction_entry,
-    operation_finished, project_idle, runtime_configuration, source_digest, start_compaction,
-    start_run, step_attempt, step_failed, synthetic_tool_result, tool_declaration, tool_result,
-    tool_started, usage,
+    RuntimeConfiguration, RuntimeTool, project_idle, runtime_configuration, source_digest,
+    start_run, tool_declaration,
 };
 
 pub mod lifecycle;
@@ -831,8 +833,8 @@ impl Agent {
             let answer_id = uuid7();
             let stop_reason = stop_reason_name(data.stop_reason);
             self.session.as_ref().unwrap().append(vec![
-                assistant_entry(&answer_id, &step_id, &attempt_id, stop_reason, &answer),
-                usage(&uuid7(), operation_id, Some(&attempt_id), None, data.usage),
+                assistant_message(&answer_id, &step_id, &attempt_id, stop_reason, &answer),
+                usage_fact(&uuid7(), operation_id, Some(&attempt_id), None, data.usage),
             ])?;
             self.messages.push(answer.clone());
 
@@ -1758,7 +1760,7 @@ impl Agent {
         let (coordination_lock, ready) = &*self.abort_coordination;
         let mut coordination = coordination_lock.lock().unwrap();
         self.cancel.store(false, Ordering::SeqCst);
-        if let Err(error) = session.append(vec![start_compaction(
+        if let Err(error) = session.append(vec![compaction_started(
             &uuid7(),
             &operation_id,
             &input_through_entry_id,
@@ -1969,7 +1971,7 @@ impl Agent {
             operation_id,
             &attempt_id,
             vec![
-                usage(&uuid7(), operation_id, Some(&attempt_id), None, data.usage),
+                usage_fact(&uuid7(), operation_id, Some(&attempt_id), None, data.usage),
                 compaction_entry(
                     &result_id,
                     operation_id,

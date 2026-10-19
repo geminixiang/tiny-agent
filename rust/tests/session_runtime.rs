@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, json};
 use tiny_agent_rust::session::Session;
+use tiny_agent_rust::session::facts::{
+    abort_requested, assistant_message, operation_finished, step_attempt, step_failed, tool_result,
+    tool_started, usage_fact,
+};
 use tiny_agent_rust::session_reducer::OperationState;
 use tiny_agent_rust::session_runtime::{
-    RuntimeTool, abort_requested, assistant_entry, operation_finished, project_idle,
-    runtime_configuration, start_run, step_attempt, step_failed, tool_declaration, tool_result,
-    tool_started, usage,
+    RuntimeTool, project_idle, runtime_configuration, start_run, tool_declaration,
 };
 use tiny_agent_rust::{Message, ToolCall, ToolFunction, UsageJSON};
 
@@ -92,7 +94,7 @@ fn commits_normal_run_and_projects_idle_transcript_and_usage() {
     let (root, store) = create();
     begin(&store);
     store
-        .append(vec![assistant_entry(
+        .append(vec![assistant_message(
             ASSISTANT,
             STEP,
             ATTEMPT,
@@ -111,7 +113,7 @@ fn commits_normal_run_and_projects_idle_transcript_and_usage() {
         )])
         .unwrap();
     store
-        .append(vec![usage(
+        .append(vec![usage_fact(
             "018f1000-0000-7000-8000-000000000009",
             OPERATION,
             Some(ATTEMPT),
@@ -229,7 +231,7 @@ fn commits_length_settlement_without_executing_tool() {
         },
     };
     store
-        .append(vec![assistant_entry(
+        .append(vec![assistant_message(
             ASSISTANT,
             STEP,
             ATTEMPT,
@@ -257,7 +259,7 @@ fn commits_tool_intent_result_and_followup_completion() {
         },
     };
     store
-        .append(vec![assistant_entry(
+        .append(vec![assistant_message(
             ASSISTANT,
             STEP,
             ATTEMPT,
@@ -289,7 +291,7 @@ fn commits_tool_intent_result_and_followup_completion() {
         )])
         .unwrap();
     store
-        .append(vec![usage(
+        .append(vec![usage_fact(
             "018f1000-0000-7000-8000-000000000022",
             OPERATION,
             None,
@@ -318,7 +320,7 @@ fn commits_tool_intent_result_and_followup_completion() {
         .unwrap();
     let final_entry = "018f1000-0000-7000-8000-000000000026";
     store
-        .append(vec![assistant_entry(
+        .append(vec![assistant_message(
             final_entry,
             second_step,
             second_attempt,

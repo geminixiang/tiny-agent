@@ -1215,13 +1215,8 @@ func (a *Agent) compact() (string, error) {
 	inputID := state.messageFacts[len(state.messageFacts)-1].ID
 	operationID := a.Session.NewID(time.Now())
 	resultID := a.Session.NewID(time.Now().Add(time.Nanosecond))
-	record := map[string]any{
-		"type": "compactionStarted", "operationId": operationID, "operationKind": "compaction",
-		"inputThroughEntryId": inputID, "resultEntryId": resultID,
-		"compactedEntryIds": compactedIDs, "retainedEntryIds": retainedIDs,
-		"sourceDigest": digestSourceFacts(state.messageFacts),
-	}
-	if err := a.Session.Commit([]map[string]any{recordFact(record)}); err != nil {
+	started := compactionStartedFact(operationID, inputID, resultID, compactedIDs, retainedIDs, digestSourceFacts(state.messageFacts))
+	if err := a.Session.Commit([]map[string]any{started}); err != nil {
 		return "", err
 	}
 	run := durableRun{OperationID: operationID, ContextEntryID: inputID, Attempt: 1}

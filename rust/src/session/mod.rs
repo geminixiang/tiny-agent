@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value};
 
 use crate::session_reducer::{SessionState, reduce_session};
+
+pub mod facts;
 use crate::{UsageJSON, model_name, uuid7, uuid7_at};
 
 pub type SessionFact = Map<String, Value>;

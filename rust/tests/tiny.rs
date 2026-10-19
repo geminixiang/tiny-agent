@@ -348,7 +348,7 @@ fn compaction_recovery_mismatch_appends_nothing_and_makes_no_request() {
     let (operation_id, input_id) = append_compaction_prefix(&session);
     let configuration = recovery_configuration(&seed);
     session
-        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+        .append(vec![tiny_agent_rust::session::facts::step_attempt(
             &session.allocate_id(),
             &operation_id,
             &session.allocate_id(),
@@ -394,7 +394,7 @@ fn compaction_abort_after_start_before_attempt_makes_no_request() {
     }
     let (operation_id, _) = append_compaction_prefix(&session);
     session
-        .append(vec![tiny_agent_rust::session_runtime::abort_requested(
+        .append(vec![tiny_agent_rust::session::facts::abort_requested(
             &session.allocate_id(),
             &operation_id,
             "compaction",
@@ -790,7 +790,7 @@ fn append_compaction_prefix(session: &Session) -> (String, String) {
         .collect::<Vec<_>>();
     let operation_id = session.allocate_id();
     session
-        .append(vec![tiny_agent_rust::session_runtime::start_compaction(
+        .append(vec![tiny_agent_rust::session::facts::compaction_started(
             &session.allocate_id(),
             &operation_id,
             &input_id,
@@ -826,7 +826,7 @@ fn append_tool_prefix(session: &Session, agent: &Agent, calls: Vec<ToolCall>) ->
         ))
         .unwrap();
     session
-        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+        .append(vec![tiny_agent_rust::session::facts::step_attempt(
             &session.allocate_id(),
             &operation_id,
             &step_id,
@@ -838,7 +838,7 @@ fn append_tool_prefix(session: &Session, agent: &Agent, calls: Vec<ToolCall>) ->
         )])
         .unwrap();
     session
-        .append(vec![tiny_agent_rust::session_runtime::assistant_entry(
+        .append(vec![tiny_agent_rust::session::facts::assistant_message(
             &assistant_id,
             &step_id,
             &attempt_id,
@@ -889,7 +889,7 @@ fn non_idle_session_recovers_open_attempt_once_and_retry_two_is_terminal() {
     let configuration = recovery_configuration(&seed_agent);
     let step_id = session.allocate_id();
     session
-        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+        .append(vec![tiny_agent_rust::session::facts::step_attempt(
             &session.allocate_id(),
             &operation_id,
             &step_id,
@@ -934,7 +934,7 @@ fn non_idle_session_recovers_open_attempt_once_and_retry_two_is_terminal() {
     let first_attempt_id = session.allocate_id();
     let exhausted_step_id = session.allocate_id();
     session
-        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+        .append(vec![tiny_agent_rust::session::facts::step_attempt(
             &session.allocate_id(),
             &operation_id,
             &exhausted_step_id,
@@ -946,7 +946,7 @@ fn non_idle_session_recovers_open_attempt_once_and_retry_two_is_terminal() {
         )])
         .unwrap();
     session
-        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+        .append(vec![tiny_agent_rust::session::facts::step_attempt(
             &session.allocate_id(),
             &operation_id,
             &exhausted_step_id,
@@ -990,7 +990,7 @@ fn pending_safe_read_replays_once_then_closes_and_finishes_idempotently() {
         .find(|tool| tool.name == "read")
         .unwrap();
     session
-        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+        .append(vec![tiny_agent_rust::session::facts::tool_started(
             &started_id,
             &prefix.operation_id,
             &prefix.step_id,
@@ -1097,7 +1097,7 @@ fn safe_replay_then_plain_stop_attempt_does_not_corrupt_the_session() {
         .find(|tool| tool.name == "read")
         .unwrap();
     session
-        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+        .append(vec![tiny_agent_rust::session::facts::tool_started(
             &session.allocate_id(),
             &prefix.operation_id,
             &prefix.step_id,
@@ -1168,7 +1168,7 @@ fn pending_never_replay_tool_is_interrupted_without_effect_then_run_continues() 
         .find(|tool| tool.name == "write")
         .unwrap();
     session
-        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+        .append(vec![tiny_agent_rust::session::facts::tool_started(
             &session.allocate_id(),
             &prefix.operation_id,
             &prefix.step_id,
@@ -1247,7 +1247,7 @@ fn abort_recovery_orders_current_interrupted_before_remaining_aborted() {
         .find(|tool| tool.name == "write")
         .unwrap();
     session
-        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+        .append(vec![tiny_agent_rust::session::facts::tool_started(
             &session.allocate_id(),
             &prefix.operation_id,
             &prefix.step_id,
@@ -1265,7 +1265,7 @@ fn abort_recovery_orders_current_interrupted_before_remaining_aborted() {
         )])
         .unwrap();
     session
-        .append(vec![tiny_agent_rust::session_runtime::abort_requested(
+        .append(vec![tiny_agent_rust::session::facts::abort_requested(
             &session.allocate_id(),
             &prefix.operation_id,
             "run",
@@ -1316,7 +1316,7 @@ fn recovery_mismatches_append_nothing_and_execute_nothing() {
         .unwrap();
     let configuration = recovery_configuration(&test_agent(&cwd, "", None));
     session
-        .append(vec![tiny_agent_rust::session_runtime::step_attempt(
+        .append(vec![tiny_agent_rust::session::facts::step_attempt(
             &session.allocate_id(),
             &operation_id,
             &session.allocate_id(),
@@ -1364,7 +1364,7 @@ fn recovery_mismatches_append_nothing_and_execute_nothing() {
         .find(|tool| tool.name == "read")
         .unwrap();
     session
-        .append(vec![tiny_agent_rust::session_runtime::tool_started(
+        .append(vec![tiny_agent_rust::session::facts::tool_started(
             &session.allocate_id(),
             &prefix.operation_id,
             &prefix.step_id,

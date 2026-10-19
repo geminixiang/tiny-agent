@@ -84,30 +84,6 @@ func messageFromMap(message sessionMessage) (Message, error) {
 	return result, json.Unmarshal(encoded, &result)
 }
 
-func entryFact(id string, entry map[string]any) map[string]any {
-	return map[string]any{"kind": "entry", "id": id, "entry": entry}
-}
-
-func recordFact(record map[string]any) map[string]any {
-	return map[string]any{"kind": "record", "record": record}
-}
-
-func usageMap(usage Usage) map[string]any {
-	return map[string]any{"input": usage.Input, "output": usage.Output, "cacheRead": usage.CacheRead, "cacheWrite": usage.CacheWrite}
-}
-
-func usageFact(operationID, attemptID string, usage Usage) map[string]any {
-	return map[string]any{"kind": "usage", "operationId": operationID, "attemptId": attemptID, "usage": usageMap(usage)}
-}
-
-func stepFailedRecord(run durableRun, code string, err error) map[string]any {
-	return map[string]any{"type": "stepFailed", "operationId": run.OperationID, "stepId": run.StepID, "attemptId": run.AttemptID, "error": map[string]any{"code": code, "message": err.Error()}}
-}
-
-func operationFinishedRecord(operationID, operationKind, outcome string) map[string]any {
-	return map[string]any{"type": "operationFinished", "operationId": operationID, "operationKind": operationKind, "outcome": outcome}
-}
-
 func (a *Agent) projectSession() error {
 	state := a.Session.State()
 	a.Messages = a.Messages[:1]
@@ -146,8 +122,8 @@ func (a *Agent) startDurableRun(input string) (durableRun, error) {
 	now := time.Now()
 	run.OperationID, run.ContextEntryID = a.Session.NewID(now), a.Session.NewID(now.Add(time.Nanosecond))
 	return run, a.Session.Commit([]map[string]any{
-		entryFact(run.ContextEntryID, map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": input}}),
-		recordFact(map[string]any{"type": "runStarted", "operationId": run.OperationID, "operationKind": "run", "inputEntryId": run.ContextEntryID}),
+		userMessageFact(run.ContextEntryID, input),
+		runStartedFact(run.OperationID, run.ContextEntryID),
 	})
 }
 
@@ -163,23 +139,17 @@ func (a *Agent) startAttempt(run *durableRun, kind string, attempt int) error {
 		run.StepID = a.Session.NewID(time.Now())
 	}
 	run.AttemptID, run.Attempt = a.Session.NewID(time.Now().Add(time.Nanosecond)), attempt
-	record := map[string]any{
-		"type": "stepAttempt", "operationId": run.OperationID, "stepId": run.StepID, "attemptId": run.AttemptID,
-		"stepKind": kind, "attempt": attempt, "contextThroughEntryId": run.ContextEntryID,
-		"configurationSnapshot": configurationMap(configuration), "configurationDigest": sessionConfigurationDigest(configuration),
-	}
-	return a.Session.Commit([]map[string]any{recordFact(record)})
+	return a.Session.Commit([]map[string]any{stepAttemptFact(*run, kind, configuration)})
 }
 
 func (a *Agent) failOperationAttempt(run durableRun, operationKind, code string, err error, finish bool) error {
 	if a.Session == nil {
 		return err
 	}
-	facts := []map[string]any{recordFact(stepFailedRecord(run, code, err))}
+	failure := factError(code, err.Error())
+	facts := []map[string]any{stepFailedFact(run.OperationID, run.StepID, run.AttemptID, failure)}
 	if finish {
-		record := operationFinishedRecord(run.OperationID, operationKind, "failed")
-		record["error"] = map[string]any{"code": code, "message": err.Error()}
-		facts = append(facts, recordFact(record))
+		facts = append(facts, operationFinishedFact(run.OperationID, operationKind, "failed", operationFinishedExtra{Error: failure}))
 	}
 	return errors.Join(err, a.Session.Commit(facts))
 }
@@ -192,12 +162,11 @@ func (a *Agent) failModelResponse(run durableRun, response ModelResponse, err er
 	if a.Session == nil {
 		return err
 	}
-	finished := operationFinishedRecord(run.OperationID, "run", "failed")
-	finished["error"] = map[string]any{"code": "model_error", "message": err.Error()}
+	failure := factError("model_error", err.Error())
 	facts := []map[string]any{
 		usageFact(run.OperationID, run.AttemptID, response.Usage),
-		recordFact(stepFailedRecord(run, "model_error", err)),
-		recordFact(finished),
+		stepFailedFact(run.OperationID, run.StepID, run.AttemptID, failure),
+		operationFinishedFact(run.OperationID, "run", "failed", operationFinishedExtra{Error: failure}),
 	}
 	return errors.Join(err, a.Session.Commit(facts))
 }
@@ -208,12 +177,10 @@ func (a *Agent) settleFailedAssistant(run *durableRun, response ModelResponse, e
 		return err
 	}
 	entryID := a.Session.NewID(time.Now())
-	finished := operationFinishedRecord(run.OperationID, "run", "failed")
-	finished["error"] = map[string]any{"code": "model_error", "message": err.Error()}
 	facts := []map[string]any{
-		entryFact(entryID, map[string]any{"type": "message", "stepId": run.StepID, "attemptId": run.AttemptID, "stopReason": response.StopReason, "message": messageMap(response.Message)}),
+		assistantMessageFact(entryID, run.StepID, run.AttemptID, response.StopReason, response.Message),
 		usageFact(run.OperationID, run.AttemptID, response.Usage),
-		recordFact(finished),
+		operationFinishedFact(run.OperationID, "run", "failed", operationFinishedExtra{Error: factError("model_error", err.Error())}),
 	}
 	return errors.Join(err, a.Session.Commit(facts))
 }
@@ -225,13 +192,11 @@ func (a *Agent) settleAssistant(run *durableRun, response ModelResponse, finish 
 	}
 	entryID := a.Session.NewID(time.Now())
 	facts := []map[string]any{
-		entryFact(entryID, map[string]any{"type": "message", "stepId": run.StepID, "attemptId": run.AttemptID, "stopReason": response.StopReason, "message": messageMap(response.Message)}),
+		assistantMessageFact(entryID, run.StepID, run.AttemptID, response.StopReason, response.Message),
 		usageFact(run.OperationID, run.AttemptID, response.Usage),
 	}
 	if finish {
-		record := operationFinishedRecord(run.OperationID, "run", "completed")
-		record["completion"], record["finalEntryId"] = "normal", entryID
-		facts = append(facts, recordFact(record))
+		facts = append(facts, operationFinishedFact(run.OperationID, "run", "completed", operationFinishedExtra{Completion: "normal", FinalEntryID: entryID}))
 	}
 	if err := a.Session.Commit(facts); err != nil {
 		return "", err
@@ -265,15 +230,11 @@ func toolResultMessage(callID, content string) Message {
 }
 
 func (a *Agent) appendSynthetic(run *durableRun, index int, call ToolCall, reason string) error {
-	content := syntheticContent[reason]
-	message := toolResultMessage(call.ID, content)
+	message := toolResultMessage(call.ID, syntheticContent[reason])
 	if a.Session != nil {
 		id := a.Session.NewID(time.Now())
-		entry := map[string]any{
-			"type": "message", "stepId": run.StepID, "assistantEntryId": run.AssistantEntryID, "toolIndex": index,
-			"message": messageMap(message), "toolName": call.Function.Name, "result": map[string]any{"type": "synthetic", "reason": reason},
-		}
-		if err := a.Session.Commit([]map[string]any{entryFact(id, entry)}); err != nil {
+		result := syntheticResult(run.AssistantEntryID, index, call.ID, call.Function.Name, reason)
+		if err := a.Session.Commit([]map[string]any{syntheticToolResultFact(id, run.StepID, result)}); err != nil {
 			return err
 		}
 		run.ContextEntryID = id
@@ -314,13 +275,7 @@ func (a *Agent) executeDurableTool(run *durableRun, index int, call ToolCall, se
 		}
 		if replay == nil {
 			startedID, resultID = a.Session.NewID(time.Now()), a.Session.NewID(time.Now().Add(time.Nanosecond))
-			record := map[string]any{
-				"type": "toolStarted", "operationId": run.OperationID, "stepId": run.StepID, "assistantEntryId": run.AssistantEntryID,
-				"toolIndex": index, "toolCallId": call.ID, "toolName": call.Function.Name, "arguments": args,
-				"replay": selected.Replay, "replayKey": selected.ReplayKey, "environmentIdentity": identity, "resultEntryId": resultID,
-			}
-			fact := recordFact(record)
-			fact["id"] = startedID
+			fact := toolStartedFact(startedID, *run, index, call, args, selected, identity, resultID)
 			if err := a.Session.Commit([]map[string]any{fact}); err != nil {
 				return err
 			}
@@ -354,11 +309,8 @@ func (a *Agent) executeDurableTool(run *durableRun, index int, call ToolCall, se
 	}
 	message := toolResultMessage(call.ID, result)
 	if a.Session != nil {
-		entry := map[string]any{
-			"type": "message", "stepId": run.StepID, "message": messageMap(message), "toolName": call.Function.Name,
-			"toolStartedId": startedID, "result": map[string]any{"type": resultType},
-		}
-		if err := a.Session.Commit([]map[string]any{entryFact(resultID, entry)}); err != nil {
+		fact := toolResultFact(resultID, run.StepID, startedID, call.Function.Name, message, resultType)
+		if err := a.Session.Commit([]map[string]any{fact}); err != nil {
 			return err
 		}
 		run.ContextEntryID = resultID
@@ -387,11 +339,11 @@ func (a *Agent) requestAbort() error {
 		return nil
 	}
 	if a.Session != nil {
-		record := map[string]any{"type": "abortRequested", "operationId": active.OperationID, "operationKind": active.Kind, "phase": active.Phase, "reason": "escape"}
+		toolCallID := ""
 		if active.Phase == "tool" {
-			record["toolCallId"] = active.ToolCallID
+			toolCallID = active.ToolCallID
 		}
-		if err := a.Session.Commit([]map[string]any{recordFact(record)}); err != nil {
+		if err := a.Session.Commit([]map[string]any{abortRequestedFact(active.OperationID, active.Kind, active.Phase, toolCallID)}); err != nil {
 			return err
 		}
 	}
@@ -470,33 +422,19 @@ func (a *Agent) applyRecoveryPlan(plan recoveryPlan) error {
 		results := plan["results"].([]any)
 		facts := make([]map[string]any, 0, len(results))
 		for _, raw := range results {
-			result := raw.(map[string]any)
-			message := toolResultMessage(result["toolCallId"].(string), result["content"].(string))
-			entry := map[string]any{"type": "message", "stepId": operation.Step.StepID, "message": messageMap(message), "toolName": result["toolName"], "result": map[string]any{"type": "synthetic", "reason": result["reason"]}}
-			id := a.Session.NewID(time.Now())
-			if started, ok := result["toolStartedId"]; ok {
-				id, entry["toolStartedId"] = result["resultEntryId"].(string), started
-			} else {
-				entry["assistantEntryId"], entry["toolIndex"] = result["assistantEntryId"], result["toolIndex"]
-			}
-			facts = append(facts, entryFact(id, entry))
+			facts = append(facts, syntheticToolResultFact(a.Session.NewID(time.Now()), operation.Step.StepID, raw.(map[string]any)))
 		}
 		return a.Session.Commit(facts)
 	case "closeAttempt":
-		record := map[string]any{"type": "stepFailed", "operationId": operation.OperationID, "stepId": operation.Step.StepID, "attemptId": operation.Step.AttemptID, "error": plan["error"]}
-		return a.Session.Commit([]map[string]any{recordFact(record)})
+		failure := plan["error"].(map[string]any)
+		return a.Session.Commit([]map[string]any{stepFailedFact(operation.OperationID, operation.Step.StepID, operation.Step.AttemptID, failure)})
 	case "finish":
-		record := map[string]any{"type": "operationFinished", "operationId": operation.OperationID, "operationKind": operation.Kind, "outcome": plan["outcome"]}
-		if final, ok := plan["finalEntryId"]; ok {
-			record["finalEntryId"] = final
+		outcome := plan["outcome"].(string)
+		extra := operationFinishedExtra{Completion: stringValue(plan["completion"]), FinalEntryID: stringValue(plan["finalEntryId"])}
+		if outcome == "failed" {
+			extra.Error, _ = plan["error"].(map[string]any)
 		}
-		if completion, ok := plan["completion"]; ok {
-			record["completion"] = completion
-		}
-		if record["outcome"] == "failed" {
-			record["error"] = plan["error"]
-		}
-		return a.Session.Commit([]map[string]any{recordFact(record)})
+		return a.Session.Commit([]map[string]any{operationFinishedFact(operation.OperationID, operation.Kind, outcome, extra)})
 	case "startStep":
 		if operation.Kind == "compaction" {
 			return a.recoverCompaction(plan, recoveryInteger(plan["attempt"]))
@@ -608,16 +546,15 @@ func (a *Agent) executeCompaction(run durableRun) error {
 	for index, item := range retained {
 		retainedTail[index] = map[string]any{"sourceEntryId": item.ID, "message": item.Message}
 	}
-	entry := map[string]any{"type": "compaction", "operationId": run.OperationID, "summary": summary, "compactedThroughEntryId": state.Operation.compactedEntryIDs[len(state.Operation.compactedEntryIDs)-1], "retainedTail": retainedTail}
+	compactedThroughID := state.Operation.compactedEntryIDs[len(state.Operation.compactedEntryIDs)-1]
 	if err := a.Session.Commit([]map[string]any{
 		usageFact(run.OperationID, run.AttemptID, response.Usage),
-		entryFact(state.Operation.ResultEntryID, entry),
+		compactionEntryFact(state.Operation.ResultEntryID, run.OperationID, summary, compactedThroughID, retainedTail),
 	}); err != nil {
 		return err
 	}
-	record := operationFinishedRecord(run.OperationID, "compaction", "completed")
-	record["finalEntryId"] = state.Operation.ResultEntryID
-	return a.Session.Commit([]map[string]any{recordFact(record)})
+	finished := operationFinishedFact(run.OperationID, "compaction", "completed", operationFinishedExtra{FinalEntryID: state.Operation.ResultEntryID})
+	return a.Session.Commit([]map[string]any{finished})
 }
 
 func (a *Agent) recoverCompaction(plan recoveryPlan, attempt int) error {

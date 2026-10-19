@@ -1,6 +1,6 @@
 import unittest
 
-from tiny_agent.session.runtime import current_configuration, entry_fact, project_session, record_fact, replay_declaration, runtime_configuration, step_failed_record, usage_fact
+from tiny_agent.session.runtime import current_configuration, project_session, replay_declaration, runtime_configuration
 
 
 class SessionRuntimeTest(unittest.TestCase):
@@ -18,11 +18,7 @@ class SessionRuntimeTest(unittest.TestCase):
         self.assertEqual(current["environmentIdentity"], "workspace")
         self.assertEqual([(tool["name"], tool["replay"]) for tool in current["tools"]], [("read", "safe"), ("write", "never")])
 
-    def test_fact_builders_and_projection(self):
-        self.assertEqual(entry_fact("entry", {"type": "message"})["id"], "entry")
-        self.assertEqual(record_fact({"type": "runStarted"}, "record")["id"], "record")
-        self.assertEqual(usage_fact("run", "attempt", {"input": 1})["kind"], "usage")
-        self.assertEqual(step_failed_record("run", "step", "attempt", "model_error", "failed")["error"]["code"], "model_error")
+    def test_projection(self):
         messages, usage = project_session({"activeContext": [{"role": "user", "content": "hello"}], "usage": {"input": 1}}, {"role": "system", "content": "system"})
         self.assertEqual(messages, [{"role": "system", "content": "system"}, {"role": "user", "content": "hello"}])
         self.assertEqual(usage, {"input": 1})

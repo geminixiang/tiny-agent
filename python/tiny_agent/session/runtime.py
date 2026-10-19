@@ -3,31 +3,6 @@ import json
 from .reducer import configuration_digest
 
 
-def entry_fact(fact_id: str, entry: dict) -> dict:
-    return {"kind": "entry", "id": fact_id, "entry": entry}
-
-
-def record_fact(record: dict, fact_id: str | None = None) -> dict:
-    fact = {"kind": "record", "record": record}
-    if fact_id:
-        fact["id"] = fact_id
-    return fact
-
-
-def usage_fact(operation_id: str, attempt_id: str, usage: dict) -> dict:
-    return {"kind": "usage", "operationId": operation_id, "attemptId": attempt_id, "usage": usage}
-
-
-def step_failed_record(operation_id: str, step_id: str, attempt_id: str, code: str, message: str) -> dict:
-    return {
-        "type": "stepFailed",
-        "operationId": operation_id,
-        "stepId": step_id,
-        "attemptId": attempt_id,
-        "error": {"code": code, "message": message},
-    }
-
-
 def runtime_configuration(prompt: str, tools: list[dict], model: str) -> tuple[dict, str]:
     digest = lambda value: "sha256:" + hashlib.sha256(value.encode()).hexdigest()
     declarations = []
