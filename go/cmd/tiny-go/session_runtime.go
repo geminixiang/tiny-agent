@@ -95,6 +95,7 @@ func (a *Agent) projectSession() error {
 		a.Messages = append(a.Messages, message)
 	}
 	a.Usage = Usage{Input: int(state.Usage.Input), Output: int(state.Usage.Output), CacheRead: int(state.Usage.CacheRead), CacheWrite: int(state.Usage.CacheWrite)}
+	a.latestPromptTokens = 0
 	if usage, ok := a.Session.LatestAssistantUsage(); ok {
 		a.setLatestCacheHitRate(usage)
 	}

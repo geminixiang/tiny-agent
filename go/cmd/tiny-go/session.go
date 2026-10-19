@@ -250,6 +250,10 @@ func (s *SessionStore) LatestAssistantUsage() (Usage, bool) {
 		entry, ok := facts[index]["entry"].(map[string]any)
 		message, messageOK := entry["message"].(map[string]any)
 		attempt, attemptOK := entry["attemptId"].(string)
+		// A later compaction replaced that context, so its size no longer applies.
+		if facts[index]["kind"] == "entry" && ok && entry["type"] == "compaction" {
+			return Usage{}, false
+		}
 		if facts[index]["kind"] != "entry" || !ok || !messageOK || message["role"] != "assistant" || !attemptOK {
 			continue
 		}

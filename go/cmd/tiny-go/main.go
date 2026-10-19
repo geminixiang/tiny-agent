@@ -920,6 +920,10 @@ func uuid7(now time.Time) string {
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
+// autoCompactTokens triggers compaction before a new prompt once the latest model request used this many prompt tokens.
+const autoCompactTokens = 100_000
+const compactionAborted = "Compaction aborted."
+
 type Agent struct {
 	Messages  []Message
 	Usage     Usage
@@ -935,6 +939,8 @@ type Agent struct {
 	cancel    context.CancelFunc
 	active    *activeOperation
 	recovery  bool
+
+	latestPromptTokens int
 }
 
 func newAgent(skills []Skill, session *SessionStore, instructions string) *Agent {
@@ -1018,6 +1024,7 @@ func (a *Agent) addUsage(usage Usage) {
 
 func (a *Agent) setLatestCacheHitRate(usage Usage) {
 	prompt := usage.Input + usage.CacheRead + usage.CacheWrite
+	a.latestPromptTokens = prompt
 	if prompt > 0 {
 		rate := float64(usage.CacheRead) / float64(prompt) * 100
 		a.Usage.CacheHitRate = &rate
@@ -1097,6 +1104,9 @@ func (a *Agent) callModel(ctx context.Context, messages []Message, tools any) (M
 }
 
 func (a *Agent) runAgentLoop(input string) (string, error) {
+	if a.autoCompact() {
+		return "Operation aborted.", nil
+	}
 	user := Message{Role: "user", Content: text(input)}
 	run, err := a.startDurableRun(input)
 	if err != nil {
@@ -1184,6 +1194,20 @@ func (a *Agent) runAgentLoop(input string) (string, error) {
 	}
 }
 
+// autoCompact returns true when Esc aborted the automatic compaction, so the new prompt is not accepted.
+func (a *Agent) autoCompact() bool {
+	if a.latestPromptTokens < autoCompactTokens {
+		return false
+	}
+	answer, err := a.compact()
+	if err != nil {
+		// Intentional fallback: the failure is already durable, and the prompt still runs uncompacted.
+		a.latestPromptTokens = 0
+		return false
+	}
+	return answer == compactionAborted
+}
+
 func (a *Agent) compact() (string, error) {
 	if a.Session == nil {
 		return "", errors.New("Compaction requires a durable session")
@@ -1225,7 +1249,7 @@ func (a *Agent) compact() (string, error) {
 	}
 	if err := a.executeCompaction(run); err != nil {
 		if errors.Is(err, context.Canceled) {
-			return "Compaction aborted.", nil
+			return compactionAborted, nil
 		}
 		return "", err
 	}

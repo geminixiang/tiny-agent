@@ -225,11 +225,16 @@ type DurableToolResult = {
     aborted: boolean;
 };
 
+// Compact before a new prompt once the latest model request used this many prompt tokens.
+export const AUTO_COMPACT_TOKENS = 100_000;
+const COMPACTION_ABORTED = "Compaction aborted.";
+
 export class Agent {
     messages: Message[];
     usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     public readonly systemPrompt: string;
     private active?: ActiveOperation;
+    private latestPromptTokens = 0;
     constructor(
         public skills: Skill[] = [],
         public fetcher: typeof fetch = fetch,
@@ -450,10 +455,12 @@ ${list}
     }
     private setLatestCacheHitRate(usage: Usage) {
         const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
+        this.latestPromptTokens = prompt;
         if (prompt > 0) this.usage.cacheHitRate = (usage.cacheRead / prompt) * 100;
     }
     private async restoreLatestCacheHitRate() {
         if (!this.session) return;
+        this.latestPromptTokens = 0;
         const facts = await this.session.facts();
         const usageByAttempt = new Map<string, Usage>();
         for (const fact of facts) {
@@ -463,6 +470,8 @@ ${list}
         for (const fact of facts.toReversed()) {
             const entry = fact.entry as Record<string, unknown> | undefined;
             const message = entry?.message as Record<string, unknown> | undefined;
+            // A later compaction replaced that context, so its size no longer applies.
+            if (fact.kind === "entry" && entry?.type === "compaction") return;
             if (fact.kind !== "entry" || entry?.type !== "message" || message?.role !== "assistant") continue;
             const requestUsage = usageByAttempt.get(String(entry.attemptId));
             if (!requestUsage) continue;
@@ -636,6 +645,7 @@ ${list}
     async runAgentLoop(text: string) {
         if (!this.session) throw Error("Session is required");
         const session = this.session;
+        if (await this.autoCompact()) return "Operation aborted.";
         const accepted = runFacts(session, text);
         await session.append(accepted.facts);
         const user: Message = { role: "user", content: text };
@@ -770,6 +780,17 @@ ${list}
             return answer.content?.trim() || "Model output was truncated.";
         }
     }
+    /** Returns true when Esc aborted the automatic compaction, so the new prompt is not accepted. */
+    private async autoCompact() {
+        if (this.latestPromptTokens < AUTO_COMPACT_TOKENS) return false;
+        try {
+            return (await this.compact()) === COMPACTION_ABORTED;
+        } catch {
+            // Intentional fallback: the failure is already durable, and the prompt still runs uncompacted.
+            this.latestPromptTokens = 0;
+            return false;
+        }
+    }
     async compact() {
         if (!this.session) throw Error("Session is required");
         const state = await this.session.load();
@@ -850,7 +871,7 @@ ${list}
             );
             if (!response) {
                 await this.session.append(fact.operationFinished(operationId, "compaction", "aborted"));
-                return "Compaction aborted.";
+                return COMPACTION_ABORTED;
             }
             await this.session.append(fact.usageFact(operationId, attemptId, response.usage));
             const summary = response.message.content;

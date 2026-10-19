@@ -15,6 +15,7 @@ const dir = await mkdtemp(join(tmpdir(), "tiny-agent-"));
 process.chdir(dir);
 const {
     Agent,
+    AUTO_COMPACT_TOKENS,
     MODEL,
     SessionStore,
     builtInTools,
@@ -1479,6 +1480,36 @@ test("persists durable compaction and keeps repeated context bounded", async () 
     assert.equal(state.activeContext.length, 7);
     assert.match(requests.at(-1)!.messages[1].content, /summary-one/);
     assert.match(String(state.activeContext[0].content), /summary-two/);
+    await session.close();
+});
+
+test("auto-compacts before a new prompt once the latest request crossed the token threshold", async () => {
+    process.env.OPENROUTER_API_KEY = "test";
+    const replies = ["one", "two", "three", "four", "summary", "five", "six"];
+    const promptTokens = [10, 10, 10, AUTO_COMPACT_TOKENS, 10, 10, 10];
+    const requests: Array<{ tools?: unknown; messages: Array<{ role: string; content: string }> }> = [];
+    const session = await openStore(new Date("2026-08-07T00:00:00Z"));
+    const fetcher = (async (_url: unknown, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        return new Response(
+            JSON.stringify({
+                choices: [{ message: { role: "assistant", content: replies.shift() }, finish_reason: "stop" }],
+                usage: { prompt_tokens: promptTokens.shift(), completion_tokens: 2 },
+            }),
+            { status: 200 },
+        );
+    }) as typeof fetch;
+    const agent = new Agent([], fetcher, session);
+    for (const prompt of ["a", "b", "c", "d"]) await agent.runAgentLoop(prompt);
+    assert.equal(requests.length, 4);
+
+    assert.equal(await agent.runAgentLoop("e"), "five");
+    assert.equal(requests.length, 6);
+    assert.match(requests[4].messages[0].content, /^Summarize this coding session/);
+    assert.match(String((await session.load()).activeContext[0].content), /summary/);
+
+    assert.equal(await agent.runAgentLoop("f"), "six");
+    assert.equal(requests.length, 7);
     await session.close();
 });
 

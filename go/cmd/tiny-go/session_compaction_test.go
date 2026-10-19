@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -53,6 +54,49 @@ func TestDurableCompactionPersistsCanonicalFacts(t *testing.T) {
 		if positions[index-1] < 0 || positions[index] <= positions[index-1] {
 			t.Fatalf("fact order=%v", positions)
 		}
+	}
+}
+
+func TestAutoCompactionBeforePromptAfterTokenThreshold(t *testing.T) {
+	replies := []string{"one", "two", "three", "four", "summary", "five", "six"}
+	promptTokens := []int{10, 10, 10, autoCompactTokens, 10, 10, 10}
+	systems := []string{}
+	agent, session, close := durableAgent(t, func(w http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		systems = append(systems, body.Messages[0].Content)
+		index := len(systems) - 1
+		_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":2}}`, replies[index], promptTokens[index])
+	})
+	defer close()
+	for _, prompt := range []string{"a", "b", "c", "d"} {
+		if _, err := agent.runAgentLoop(prompt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(systems) != 4 {
+		t.Fatalf("requests=%d", len(systems))
+	}
+
+	if answer, err := agent.runAgentLoop("e"); err != nil || answer != "five" {
+		t.Fatalf("answer=%q err=%v", answer, err)
+	}
+	if len(systems) != 6 || !strings.HasPrefix(systems[4], "Summarize this coding session") {
+		t.Fatalf("requests=%d systems=%q", len(systems), systems)
+	}
+	if content, _ := session.State().ActiveContext[0]["content"].(string); !strings.Contains(content, "summary") {
+		t.Fatalf("activeContext[0]=%q", content)
+	}
+
+	if answer, err := agent.runAgentLoop("f"); err != nil || answer != "six" {
+		t.Fatalf("answer=%q err=%v", answer, err)
+	}
+	if len(systems) != 7 {
+		t.Fatalf("requests=%d", len(systems))
 	}
 }
 

@@ -488,6 +488,12 @@ impl Session {
             let Some(entry) = fact.get("entry").and_then(Value::as_object) else {
                 continue;
             };
+            // A later compaction replaced that context, so its size no longer applies.
+            if fact.get("kind").and_then(Value::as_str) == Some("entry")
+                && entry.get("type").and_then(Value::as_str) == Some("compaction")
+            {
+                return Ok(None);
+            }
             let role = entry
                 .get("message")
                 .and_then(Value::as_object)

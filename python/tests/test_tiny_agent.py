@@ -552,6 +552,30 @@ class TinyAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.messages[1:], state["activeContext"])
         reopened.close()
 
+    async def test_auto_compacts_before_new_prompt_once_latest_request_crossed_threshold(self):
+        replies = iter(["one", "two", "three", "four", "summary", "five", "six"])
+        prompt_tokens = iter([10, 10, 10, tiny.AUTO_COMPACT_TOKENS, 10, 10, 10])
+        requests = []
+
+        async def reply(body, _cancelled):
+            requests.append(body)
+            return {"choices": [{"message": {"role": "assistant", "content": next(replies)}, "finish_reason": "stop"}], "usage": {"prompt_tokens": next(prompt_tokens), "completion_tokens": 2}}
+
+        session = tiny.Session.create(tiny.ROOT)
+        agent = tiny.Agent(session=session, requester=reply)
+        for prompt in ["a", "b", "c", "d"]:
+            await agent.run_agent_loop(prompt)
+        self.assertEqual(len(requests), 4)
+
+        self.assertEqual(await agent.run_agent_loop("e"), "five")
+        self.assertEqual(len(requests), 6)
+        self.assertTrue(requests[4]["messages"][0]["content"].startswith("Summarize this coding session"))
+        self.assertIn("summary", session.load()["activeContext"][0]["content"])
+
+        self.assertEqual(await agent.run_agent_loop("f"), "six")
+        self.assertEqual(len(requests), 7)
+        session.close()
+
     async def test_repeated_compaction_uses_bounded_active_context(self):
         session = tiny.Session.create(tiny.ROOT)
         agent = await self._completed_conversation(session)

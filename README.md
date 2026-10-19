@@ -83,6 +83,8 @@ Esc      中止目前操作
 Ctrl+C   離開
 ```
 
+當最近一次模型請求的 prompt tokens 達到 100,000 時，下一個 prompt 送出前會先自動 compact（流程與 `/compact` 相同）。自動 compact 失敗時仍會照常送出 prompt；在自動 compact 期間按 Esc，則不會送出該 prompt。
+
 ## MCP
 
 Repository 已提供 [`.tiny-agent/mcp.json`](.tiny-agent/mcp.json)，其中只記錄 GitHub endpoint、tool allowlist 與 credential 的環境變數名稱，不包含 token。

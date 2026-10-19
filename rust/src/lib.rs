@@ -46,6 +46,9 @@ pub const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api/v1";
 pub const MAX_TOOL_OUTPUT: usize = 50 * 1024;
 pub const MAX_BASH_OUTPUT: usize = 10_000_000;
 pub const BASH_TIMEOUT: u64 = 120;
+/// Compact before a new prompt once the latest model request used this many prompt tokens.
+pub const AUTO_COMPACT_TOKENS: u64 = 100_000;
+const COMPACTION_ABORTED: &str = "Compaction aborted.";
 
 pub fn model_name() -> String {
     match std::env::var("TINY_MODEL") {
@@ -481,6 +484,7 @@ pub struct Agent {
     pub mcp_tools: Vec<mcp::McpTool>,
     recovering: bool,
     abort_coordination: Arc<(Mutex<AbortCoordination>, Condvar)>,
+    latest_prompt_tokens: u64,
 }
 
 pub fn new_agent(
@@ -531,6 +535,7 @@ pub fn new_agent(
         mcp_tools: Vec::new(),
         recovering: false,
         abort_coordination: Arc::new((Mutex::new(AbortCoordination::NonDurable), Condvar::new())),
+        latest_prompt_tokens: 0,
     }
 }
 
@@ -1219,6 +1224,7 @@ impl Agent {
     }
 
     fn restore_latest_cache_hit_rate(&mut self) -> Result<(), String> {
+        self.latest_prompt_tokens = 0;
         let Some(request) = self
             .session
             .as_ref()
@@ -1230,6 +1236,7 @@ impl Agent {
         };
         let prompt = request.input + request.cache_read + request.cache_write;
         if prompt > 0 {
+            self.latest_prompt_tokens = prompt;
             self.usage.cache_hit_rate = request.cache_read as f64 / prompt as f64 * 100.0;
         }
         Ok(())
@@ -1588,6 +1595,9 @@ impl Agent {
         let data = parse_model_body(&text)?;
         let prompt = data.usage.input + data.usage.cache_read + data.usage.cache_write;
         self.add_usage(data.usage, update_cache_rate && prompt > 0);
+        if update_cache_rate {
+            self.latest_prompt_tokens = prompt;
+        }
         if update_cache_rate && prompt > 0 {
             self.usage.cache_hit_rate = data.usage.cache_read as f64 / prompt as f64 * 100.0;
         }
@@ -1596,6 +1606,9 @@ impl Agent {
 
     pub fn run_agent_loop(&mut self, input: &str) -> Result<String, String> {
         if self.session.is_some() {
+            if self.auto_compact() {
+                return Ok("Operation aborted.".to_string());
+            }
             return self.run_durable_model(input);
         }
         self.cancel.store(false, Ordering::SeqCst);
@@ -1704,6 +1717,21 @@ impl Agent {
                     self.messages.push(skipped.clone());
                 }
                 return Ok("Operation aborted.".to_string());
+            }
+        }
+    }
+
+    /// Returns true when Esc aborted the automatic compaction, so the new prompt is not accepted.
+    fn auto_compact(&mut self) -> bool {
+        if self.latest_prompt_tokens < AUTO_COMPACT_TOKENS {
+            return false;
+        }
+        match self.compact() {
+            Ok(result) => result == COMPACTION_ABORTED,
+            Err(_) => {
+                // Intentional fallback: the failure is already durable, and the prompt still runs uncompacted.
+                self.latest_prompt_tokens = 0;
+                false
             }
         }
     }
@@ -1826,7 +1854,7 @@ impl Agent {
         )?;
         match admitted {
             ConditionalAppend::Appended => {}
-            ConditionalAppend::Aborted => return Ok("Compaction aborted.".into()),
+            ConditionalAppend::Aborted => return Ok(COMPACTION_ABORTED.into()),
             ConditionalAppend::Inactive => return Ok("Compaction already finished.".into()),
         }
         let data = match self.call_model(&summary_prompt, false, false) {
@@ -1885,7 +1913,7 @@ impl Agent {
                 self.reproject_idle_session()?;
                 return match settled {
                     ConditionalAppend::Appended => Err(error.into()),
-                    ConditionalAppend::Aborted => Ok("Compaction aborted.".into()),
+                    ConditionalAppend::Aborted => Ok(COMPACTION_ABORTED.into()),
                     ConditionalAppend::Inactive => Ok("Compaction already finished.".into()),
                 };
             }
@@ -1939,7 +1967,7 @@ impl Agent {
                 self.reproject_idle_session()?;
                 return match settled {
                     ConditionalAppend::Appended => Err(error),
-                    ConditionalAppend::Aborted => Ok("Compaction aborted.".into()),
+                    ConditionalAppend::Aborted => Ok(COMPACTION_ABORTED.into()),
                     ConditionalAppend::Inactive => Ok("Compaction already finished.".into()),
                 };
             }
@@ -1994,7 +2022,7 @@ impl Agent {
         )?;
         if completed == ConditionalAppend::Aborted {
             self.reproject_idle_session()?;
-            return Ok("Compaction aborted.".into());
+            return Ok(COMPACTION_ABORTED.into());
         }
         if completed == ConditionalAppend::Inactive {
             self.reproject_idle_session()?;

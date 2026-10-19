@@ -592,6 +592,48 @@ fn repeated_compaction_summarizes_bounded_materialized_context() {
     assert_eq!(state.active_context.len(), 7);
 }
 
+#[test]
+fn auto_compacts_before_a_new_prompt_once_the_latest_request_crossed_the_token_threshold() {
+    unsafe { std::env::set_var("OPENROUTER_API_KEY", "test") };
+    let cwd = temp_dir();
+    let session = Session::create_new(std::path::Path::new(&cwd), &model_name()).unwrap();
+    let replies = ["one", "two", "three", "four", "summary", "five", "six"];
+    let prompt_tokens = [10, 10, 10, AUTO_COMPACT_TOKENS, 10, 10, 10];
+    let server = start_serving(
+        replies
+            .iter()
+            .zip(prompt_tokens)
+            .map(|(reply, tokens)| format!(r#"{{"choices":[{{"finish_reason":"stop","message":{{"role":"assistant","content":"{reply}"}}}}],"usage":{{"prompt_tokens":{tokens},"completion_tokens":2}}}}"#))
+            .collect(),
+    );
+    let mut agent = test_agent(&cwd, &server.url, Some(session.clone()));
+    for prompt in ["a", "b", "c", "d"] {
+        agent.run_agent_loop(prompt).unwrap();
+    }
+    assert_eq!(server.requests.lock().unwrap().len(), 4);
+
+    assert_eq!(agent.run_agent_loop("e").unwrap(), "five");
+    let requests = server.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 6);
+    let compaction: serde_json::Value = serde_json::from_str(&requests[4]).unwrap();
+    assert!(
+        compaction["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("Summarize this coding session")
+    );
+    let state = session.load().unwrap();
+    assert!(
+        state.active_context[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("summary")
+    );
+
+    assert_eq!(agent.run_agent_loop("f").unwrap(), "six");
+    assert_eq!(server.requests.lock().unwrap().len(), 7);
+}
+
 // ---------------------------------------------------------------------------
 #[test]
 fn formats_tui_tool_events() {

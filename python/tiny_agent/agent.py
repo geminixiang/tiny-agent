@@ -34,6 +34,9 @@ BASH_TIMEOUT_SECONDS = 120
 MAX_HTTP_RESPONSE = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT = 50 * 1024
 ROOT = Path.cwd().resolve()
+# Compact before a new prompt once the latest model request used this many prompt tokens.
+AUTO_COMPACT_TOKENS = 100_000
+COMPACTION_ABORTED = "Compaction aborted."
 
 
 def set_root(path: Path) -> None:
@@ -743,6 +746,7 @@ class Agent:
         self.usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
         self.cancelled: asyncio.Event | None = None
         self.active: dict | None = None
+        self.latest_prompt_tokens = 0
         self.activity_generation = 0
         listing = "\n".join(f"<skill>\n<name>{s['name']}</name>\n<description>{s['description']}</description>\n<location>{s['path']}</location>\n</skill>" for s in self.skills) or "(none)"
         project = (
@@ -812,7 +816,10 @@ class Agent:
         for key in ("input", "output", "cacheRead", "cacheWrite"):
             self.usage[key] += usage.get(key, 0)
         prompt = sum(usage.get(key, 0) for key in ("input", "cacheRead", "cacheWrite"))
-        if cache_rate and prompt:
+        if not cache_rate:
+            return
+        self.latest_prompt_tokens = prompt
+        if prompt:
             self.usage["cacheHitRate"] = usage.get("cacheRead", 0) / prompt * 100
 
     def _current_recovery_configuration(self) -> dict:
@@ -821,9 +828,13 @@ class Agent:
     def _restore_projection(self) -> None:
         state = self.session.load()
         self.messages, self.usage = project_session(state, self.messages[0])
+        self.latest_prompt_tokens = 0
         usage_by_attempt = {raw_fact["attemptId"]: raw_fact["usage"] for raw_fact in self._facts() if raw_fact.get("kind") == "usage" and "attemptId" in raw_fact}
         for raw_fact in reversed(self._facts()):
             entry = raw_fact.get("entry", {})
+            # A later compaction replaced that context, so its size no longer applies.
+            if raw_fact.get("kind") == "entry" and entry.get("type") == "compaction":
+                return
             if raw_fact.get("kind") != "entry" or entry.get("type") != "message" or entry.get("message", {}).get("role") != "assistant":
                 continue
             request_usage = usage_by_attempt.get(entry.get("attemptId"))
@@ -831,6 +842,7 @@ class Agent:
                 continue
             prompt = sum(request_usage.get(key, 0) for key in ("input", "cacheRead", "cacheWrite"))
             if prompt:
+                self.latest_prompt_tokens = prompt
                 self.usage["cacheHitRate"] = request_usage.get("cacheRead", 0) / prompt * 100
             break
 
@@ -1040,6 +1052,8 @@ class Agent:
     async def run_agent_loop(self, text: str) -> str:
         if not self.session:
             raise RuntimeError("Session is required")
+        if await self._auto_compact():
+            return "Operation aborted."
         user = {"role": "user", "content": text}
         user_id, operation_id = uuid7(), uuid7()
         self.session.append(
@@ -1150,6 +1164,17 @@ class Agent:
                 self._finish(operation_id, "aborted")
                 return "Operation aborted."
 
+    async def _auto_compact(self) -> bool:
+        """Returns True when Esc aborted the automatic compaction, so the new prompt is not accepted."""
+        if self.latest_prompt_tokens < AUTO_COMPACT_TOKENS:
+            return False
+        try:
+            return await self.compact() == COMPACTION_ABORTED
+        except Exception:  # noqa: BLE001
+            # Intentional fallback: the failure is already durable, and the prompt still runs uncompacted.
+            self.latest_prompt_tokens = 0
+            return False
+
     async def compact(self) -> str:
         if not self.session:
             raise RuntimeError("Session is required")
@@ -1226,7 +1251,7 @@ class Agent:
                 raise
             self.session.append(fact.step_failed(operation_id, step_id, attempt_id, {"code": "aborted", "message": "Operation aborted"}))
             self._finish(operation_id, "aborted", operation_kind="compaction")
-            return "Compaction aborted."
+            return COMPACTION_ABORTED
         except Exception as error:
             aborted = self._is_aborted(operation_id, cancelled)
             self.end()
@@ -1235,7 +1260,7 @@ class Agent:
             self.session.append(fact.step_failed(operation_id, step_id, attempt_id, {"code": code, "message": message}))
             self._finish(operation_id, "aborted" if aborted else "failed", error=None if aborted else error, operation_kind="compaction")
             if aborted:
-                return "Compaction aborted."
+                return COMPACTION_ABORTED
             raise
         retained_ids = set(self._compaction_record(operation_id)["retainedEntryIds"])
         retained = [{"sourceEntryId": item["id"], "message": item["message"]} for item in source if item["id"] in retained_ids]
@@ -1250,7 +1275,7 @@ class Agent:
         if committed is None:
             self._fail_aborted_attempt(operation_id, step_id, attempt_id, cancelled, usage, cache_rate=False)
             self._finish(operation_id, "aborted", operation_kind="compaction")
-            return "Compaction aborted."
+            return COMPACTION_ABORTED
         self.add_usage(usage, cache_rate=False)
         self._finish(operation_id, "completed", result_id, operation_kind="compaction")
         return f"Compacted {len(source) - len(retained)} messages (kept last {len(retained)})."
