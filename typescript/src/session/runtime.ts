@@ -1,7 +1,8 @@
 import { canonicalDigest } from "../canonical-json.js";
 import { MODEL } from "../env.js";
 import type { SessionFactInput, SessionStore } from "./index.js";
-import type { CurrentConfiguration, SyntheticResult } from "./recovery.js";
+import type { CurrentConfiguration } from "./recovery.js";
+import { runStarted, userMessage } from "./facts.js";
 import type { ConfigurationSnapshot, SessionState, ToolCall } from "./reducer.js";
 import { durableToolReplay, type Tool } from "../tools.js";
 
@@ -66,30 +67,7 @@ export function runFacts(session: SessionStore, content: string) {
     return {
         inputEntryId,
         operationId,
-        facts: [
-            { kind: "entry", id: inputEntryId, entry: { type: "message", message: { role: "user", content } } },
-            {
-                kind: "record",
-                record: { type: "runStarted", operationId, operationKind: "run", inputEntryId },
-            },
-        ] satisfies SessionFactInput[],
-    };
-}
-
-export function syntheticToolResult(stepId: string, result: SyntheticResult): SessionFactInput {
-    return {
-        kind: "entry",
-        id: result.resultEntryId,
-        entry: {
-            type: "message",
-            stepId,
-            ...(result.toolStartedId
-                ? { toolStartedId: result.toolStartedId }
-                : { assistantEntryId: result.assistantEntryId, toolIndex: result.toolIndex }),
-            message: { role: "tool", tool_call_id: result.toolCallId, content: result.content },
-            toolName: result.toolName,
-            result: { type: "synthetic", reason: result.reason },
-        },
+        facts: [userMessage(inputEntryId, content), runStarted(operationId, inputEntryId)] satisfies SessionFactInput[],
     };
 }
 

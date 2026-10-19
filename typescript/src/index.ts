@@ -8,10 +8,10 @@ import {
     projectSession,
     runFacts,
     sourceDigest,
-    syntheticToolResult,
     type RuntimeMessage as Message,
     type RuntimeUsage as Usage,
 } from "./session/runtime.js";
+import * as fact from "./session/facts.js";
 import { environmentIdentity, SessionStore } from "./session/index.js";
 import { planRecovery, SYNTHETIC_CONTENT } from "./session/recovery.js";
 import { expect } from "./session/reducer.js";
@@ -48,11 +48,11 @@ export {
     projectSession,
     runFacts,
     sourceDigest,
-    syntheticToolResult,
     type RuntimeConfiguration,
     type RuntimeMessage,
     type RuntimeUsage,
 } from "./session/runtime.js";
+export { syntheticToolResult } from "./session/facts.js";
 export { SessionStore, SessionStore as Session, environmentIdentity } from "./session/index.js";
 export { reduceSession, SessionCorruption, type SessionCorruptionCode, type SessionState } from "./session/reducer.js";
 export {
@@ -85,9 +85,7 @@ class ModelResponseError extends Error {
 }
 
 function usageFactIfModelError(error: unknown, operationId: string, attemptId: string) {
-    return error instanceof ModelResponseError
-        ? [{ kind: "usage" as const, operationId, attemptId, usage: error.usage }]
-        : [];
+    return error instanceof ModelResponseError ? [fact.usageFact(operationId, attemptId, error.usage)] : [];
 }
 
 // Names the `...(condition ? { field } : {})` idiom used to conditionally include an optional
@@ -301,17 +299,7 @@ ${list}
         return aborted;
     }
     private async recordAbort(operationId: string, phase: "model" | "tool" | "compact", toolCallId?: string) {
-        await this.session?.append({
-            kind: "record",
-            record: {
-                type: "abortRequested",
-                operationId,
-                operationKind: phase === "compact" ? "compaction" : "run",
-                phase,
-                ...when(toolCallId, { toolCallId }),
-                reason: "escape",
-            },
-        });
+        await this.session?.append(fact.abortRequested(operationId, phase, toolCallId));
     }
     private async runModelRequest(
         messages: Message[],
@@ -327,17 +315,8 @@ ${list}
             const response = await this.callModel(messages, tools, signal);
             if (await this.settleOperation(active)) {
                 await this.session?.append([
-                    { kind: "usage", operationId, attemptId, usage: response.usage },
-                    {
-                        kind: "record",
-                        record: {
-                            type: "stepFailed",
-                            operationId,
-                            stepId,
-                            attemptId,
-                            error: { code: "aborted", message: "Operation aborted" },
-                        },
-                    },
+                    fact.usageFact(operationId, attemptId, response.usage),
+                    fact.stepFailed(operationId, stepId, attemptId, { code: "aborted", message: "Operation aborted" }),
                 ]);
                 return;
             }
@@ -346,16 +325,7 @@ ${list}
             if (!(await this.settleOperation(active))) throw error;
             await this.session?.append([
                 ...usageFactIfModelError(error, operationId, attemptId),
-                {
-                    kind: "record",
-                    record: {
-                        type: "stepFailed",
-                        operationId,
-                        stepId,
-                        attemptId,
-                        error: { code: "aborted", message: "Operation aborted" },
-                    },
-                },
+                fact.stepFailed(operationId, stepId, attemptId, { code: "aborted", message: "Operation aborted" }),
             ]);
         } finally {
             this.endOperation(active);
@@ -395,50 +365,25 @@ ${list}
             if (plan.type === "blocked") {
                 if (plan.reason !== "attempts_exhausted" || operation.kind === "compaction")
                     throw Error(`Session recovery blocked: ${plan.reason}`);
-                await this.session.append({
-                    kind: "record",
-                    record: {
-                        type: "operationFinished",
-                        operationId,
-                        operationKind: operation.kind,
-                        outcome: "failed",
+                await this.session.append(
+                    fact.operationFinished(operationId, operation.kind, "failed", {
                         error: { code: "model_error", message: "provider request attempts exhausted" },
-                    },
-                });
+                    }),
+                );
                 continue;
             }
             if (plan.type === "finish") {
-                await this.session.append({
-                    kind: "record",
-                    record: {
-                        type: "operationFinished",
-                        operationId,
-                        operationKind: operation.kind,
-                        outcome: plan.outcome,
-                        ...when(plan.completion, { completion: plan.completion }),
-                        ...when(plan.finalEntryId, { finalEntryId: plan.finalEntryId }),
-                        ...when(plan.error, { error: plan.error }),
-                    },
-                });
+                await this.session.append(fact.operationFinished(operationId, operation.kind, plan.outcome, plan));
                 continue;
             }
             if (plan.type === "closeAttempt") {
                 const step = expect(state.operation.step, "resumeSession: closeAttempt without an active step");
-                await this.session.append({
-                    kind: "record",
-                    record: {
-                        type: "stepFailed",
-                        operationId,
-                        stepId: step.stepId,
-                        attemptId: step.attemptId,
-                        error: plan.error,
-                    },
-                });
+                await this.session.append(fact.stepFailed(operationId, step.stepId, step.attemptId, plan.error));
                 continue;
             }
             if (plan.type === "appendSynthetic") {
                 const step = expect(state.operation.step, "resumeSession: appendSynthetic without an active step");
-                await this.session.append(plan.results.map((result) => syntheticToolResult(step.stepId, result)));
+                await this.session.append(plan.results.map((result) => fact.syntheticToolResult(step.stepId, result)));
                 continue;
             }
             if (plan.type === "startTool") {
@@ -457,19 +402,17 @@ ${list}
 
             const stepId = plan.stepId ?? this.session.allocateId();
             const attemptId = this.session.allocateId();
-            await this.session.append({
-                kind: "record",
-                record: {
-                    type: "stepAttempt",
+            await this.session.append(
+                fact.stepAttempt({
                     operationId,
                     stepId,
                     attemptId,
                     stepKind: plan.stepKind,
                     attempt: plan.attempt,
                     contextThroughEntryId: plan.contextThroughEntryId,
-                    ...configuration,
-                },
-            });
+                    configuration,
+                }),
+            );
             try {
                 const response = validateRunResponse(
                     await this.runModelRequest(
@@ -484,34 +427,18 @@ ${list}
                 if (!response) continue;
                 const assistantEntryId = this.session.allocateId();
                 await this.session.append([
-                    {
-                        kind: "entry",
-                        id: assistantEntryId,
-                        entry: {
-                            type: "message",
-                            stepId,
-                            attemptId,
-                            stopReason: response.stopReason,
-                            message: response.message,
-                        },
-                    },
-                    { kind: "usage", operationId, attemptId, usage: response.usage },
+                    fact.assistantMessage(assistantEntryId, stepId, attemptId, response.stopReason, response.message),
+                    fact.usageFact(operationId, attemptId, response.usage),
                 ]);
                 this.setLatestCacheHitRate(response.usage);
             } catch (error) {
                 recoveryError = error instanceof Error ? error : Error(String(error));
                 await this.session.append([
                     ...usageFactIfModelError(error, operationId, attemptId),
-                    {
-                        kind: "record",
-                        record: {
-                            type: "stepFailed",
-                            operationId,
-                            stepId,
-                            attemptId,
-                            error: { code: "model_error", message: recoveryError.message },
-                        },
-                    },
+                    fact.stepFailed(operationId, stepId, attemptId, {
+                        code: "model_error",
+                        message: recoveryError.message,
+                    }),
                 ]);
             }
         }
@@ -603,11 +530,9 @@ ${list}
         const resultEntryId = call.mode === "start" ? session.allocateId() : call.resultEntryId;
         const executionAttemptId = session.allocateId();
         if (call.mode === "start") {
-            await session.append({
-                kind: "record",
-                id: toolStartedId,
-                record: {
-                    type: "toolStarted",
+            await session.append(
+                fact.toolStarted({
+                    id: toolStartedId,
                     operationId: call.operationId,
                     stepId: call.stepId,
                     assistantEntryId: call.assistantEntryId,
@@ -615,11 +540,11 @@ ${list}
                     toolCallId: call.toolCallId,
                     toolName: call.tool.name,
                     arguments: call.args,
-                    ...durableToolReplay(call.tool),
+                    replay: durableToolReplay(call.tool),
                     environmentIdentity: call.environmentIdentity,
                     resultEntryId,
-                },
-            });
+                }),
+            );
         }
 
         this.lifecycle.observe({
@@ -652,18 +577,16 @@ ${list}
         this.onTool({ phase: "end", name: call.tool.name, args: call.args, result: content });
 
         const message: Message = { role: "tool", tool_call_id: call.toolCallId, content };
-        await session.append({
-            kind: "entry",
-            id: resultEntryId,
-            entry: {
-                type: "message",
+        await session.append(
+            fact.toolResult({
+                id: resultEntryId,
                 stepId: call.stepId,
-                message,
-                toolName: call.tool.name,
                 toolStartedId,
-                result: aborted ? { type: "synthetic", reason: "interrupted" } : { type: ok ? "success" : "error" },
-            },
-        });
+                toolName: call.tool.name,
+                message,
+                outcome: aborted ? "interrupted" : ok ? "success" : "error",
+            }),
+        );
         return { message, resultEntryId, aborted };
     }
     async callModel(messages = this.messages, tools: unknown = toolDefinitions(this.tools), signal?: AbortSignal) {
@@ -720,27 +643,24 @@ ${list}
         const operationId = accepted.operationId;
         let contextThroughEntryId = accepted.inputEntryId;
         const configuration = buildConfiguration(this.systemPrompt, this.tools);
-        const finish = (outcome: "completed" | "aborted" | "failed", extra: Record<string, unknown> = {}) =>
-            session.append({
-                kind: "record",
-                record: { type: "operationFinished", operationId, operationKind: "run", outcome, ...extra },
-            });
+        const finish = (
+            outcome: "completed" | "aborted" | "failed",
+            extra: Parameters<typeof fact.operationFinished>[3] = {},
+        ) => session.append(fact.operationFinished(operationId, "run", outcome, extra));
         for (;;) {
             const stepId = session.allocateId();
             const attemptId = session.allocateId();
-            await session.append({
-                kind: "record",
-                record: {
-                    type: "stepAttempt",
+            await session.append(
+                fact.stepAttempt({
                     operationId,
                     stepId,
                     attemptId,
                     stepKind: "assistant",
                     attempt: 1,
                     contextThroughEntryId,
-                    ...configuration,
-                },
-            });
+                    configuration,
+                }),
+            );
             let response: Awaited<ReturnType<Agent["callModel"]>> | undefined;
             try {
                 response = validateRunResponse(
@@ -757,26 +677,8 @@ ${list}
                 const message = error instanceof Error ? error.message : String(error);
                 await session.append([
                     ...usageFactIfModelError(error, operationId, attemptId),
-                    {
-                        kind: "record",
-                        record: {
-                            type: "stepFailed",
-                            operationId,
-                            stepId,
-                            attemptId,
-                            error: { code: "model_error", message },
-                        },
-                    },
-                    {
-                        kind: "record",
-                        record: {
-                            type: "operationFinished",
-                            operationId,
-                            operationKind: "run",
-                            outcome: "failed",
-                            error: { code: "model_error", message },
-                        },
-                    },
+                    fact.stepFailed(operationId, stepId, attemptId, { code: "model_error", message }),
+                    fact.operationFinished(operationId, "run", "failed", { error: { code: "model_error", message } }),
                 ]);
                 throw error;
             }
@@ -787,12 +689,8 @@ ${list}
             const { message: answer, usage, stopReason } = response;
             const assistantEntryId = session.allocateId();
             await session.append([
-                {
-                    kind: "entry",
-                    id: assistantEntryId,
-                    entry: { type: "message", stepId, attemptId, stopReason, message: answer },
-                },
-                { kind: "usage", operationId, attemptId, usage },
+                fact.assistantMessage(assistantEntryId, stepId, attemptId, stopReason, answer),
+                fact.usageFact(operationId, attemptId, usage),
             ]);
             this.setLatestCacheHitRate(usage);
             this.messages.push(answer);
@@ -814,26 +712,20 @@ ${list}
                 let args: ToolArgs = {};
                 const tool = this.tools.find((candidate) => candidate.name === call.function.name);
                 const synthetic = async (reason: "invalidArguments" | "unknownTool" | "truncated" | "aborted") => {
-                    const result: Message = {
-                        role: "tool",
-                        tool_call_id: call.id,
-                        content: SYNTHETIC_CONTENT[reason],
-                    };
                     const id = session.allocateId();
-                    await session.append({
-                        kind: "entry",
-                        id,
-                        entry: {
-                            type: "message",
-                            stepId,
+                    const content = SYNTHETIC_CONTENT[reason];
+                    await session.append(
+                        fact.syntheticToolResult(stepId, {
+                            resultEntryId: id,
                             assistantEntryId,
                             toolIndex: i,
-                            message: result,
+                            toolCallId: call.id,
                             toolName: call.function.name,
-                            result: { type: "synthetic", reason },
-                        },
-                    });
-                    this.messages.push(result);
+                            reason,
+                            content,
+                        }),
+                    );
+                    this.messages.push({ role: "tool", tool_call_id: call.id, content });
                     contextThroughEntryId = id;
                 };
                 if (stopReason === "length") {
@@ -896,19 +788,16 @@ ${list}
         const operationId = this.session.allocateId();
         const resultEntryId = this.session.allocateId();
         const inputThroughEntryId = expect(source.at(-1), "compact: source unexpectedly empty").id;
-        await this.session.append({
-            kind: "record",
-            record: {
-                type: "compactionStarted",
+        await this.session.append(
+            fact.compactionStarted({
                 operationId,
-                operationKind: "compaction",
                 inputThroughEntryId,
                 resultEntryId,
                 compactedEntryIds: compacted.map((item) => item.id),
                 retainedEntryIds: retained.map((item) => item.id),
                 sourceDigest: sourceDigest(source),
-            },
-        });
+            }),
+        );
         const result = await this.continueCompaction(
             operationId,
             { type: "startStep", stepKind: "compaction", attempt: 1, contextThroughEntryId: inputThroughEntryId },
@@ -930,19 +819,17 @@ ${list}
         const record = await this.compactionRecord(operationId);
         const stepId = plan.stepId ?? this.session.allocateId();
         const attemptId = this.session.allocateId();
-        await this.session.append({
-            kind: "record",
-            record: {
-                type: "stepAttempt",
+        await this.session.append(
+            fact.stepAttempt({
                 operationId,
                 stepId,
                 attemptId,
                 stepKind: "compaction",
                 attempt: plan.attempt,
                 contextThroughEntryId: plan.contextThroughEntryId,
-                ...configuration,
-            },
-        });
+                configuration,
+            }),
+        );
         try {
             const retainedCount = record.retainedEntryIds.length;
             const compactable = retainedCount ? state.activeContext.slice(0, -retainedCount) : state.activeContext;
@@ -962,13 +849,10 @@ ${list}
                 attemptId,
             );
             if (!response) {
-                await this.session.append({
-                    kind: "record",
-                    record: { type: "operationFinished", operationId, operationKind: "compaction", outcome: "aborted" },
-                });
+                await this.session.append(fact.operationFinished(operationId, "compaction", "aborted"));
                 return "Compaction aborted.";
             }
-            await this.session.append({ kind: "usage", operationId, attemptId, usage: response.usage });
+            await this.session.append(fact.usageFact(operationId, attemptId, response.usage));
             const summary = response.message.content;
             if (response.stopReason !== "stop" || !summary?.trim())
                 throw Error("Model returned an invalid compaction summary");
@@ -977,56 +861,33 @@ ${list}
             const retainedTail = source
                 .filter((item) => retainedIds.has(item.id))
                 .map((item) => ({ sourceEntryId: item.id, message: item.message }));
-            await this.session.append({
-                kind: "entry",
-                id: state.operation.resultEntryId,
-                entry: {
-                    type: "compaction",
+            await this.session.append(
+                fact.compactionEntry({
+                    id: state.operation.resultEntryId,
                     operationId,
                     summary,
                     compactedThroughEntryId: record.compactedEntryIds.at(-1),
                     retainedTail,
-                },
-            });
-            await this.session.append({
-                kind: "record",
-                record: {
-                    type: "operationFinished",
-                    operationId,
-                    operationKind: "compaction",
-                    outcome: "completed",
+                }),
+            );
+            await this.session.append(
+                fact.operationFinished(operationId, "compaction", "completed", {
                     finalEntryId: state.operation.resultEntryId,
-                },
-            });
+                }),
+            );
             return `Compacted ${source.length - retainedTail.length} messages (kept last ${retainedTail.length}).`;
         } catch (error) {
             if (error instanceof ModelResponseError) {
-                await this.session.append({ kind: "usage", operationId, attemptId, usage: error.usage });
+                await this.session.append(fact.usageFact(operationId, attemptId, error.usage));
             }
             const current = await this.session.load();
             if (current.operation.kind === "compaction" && current.operation.step?.status === "attempting") {
                 const message = error instanceof Error ? error.message : String(error);
                 await this.session.append([
-                    {
-                        kind: "record",
-                        record: {
-                            type: "stepFailed",
-                            operationId,
-                            stepId,
-                            attemptId,
-                            error: { code: "model_error", message },
-                        },
-                    },
-                    {
-                        kind: "record",
-                        record: {
-                            type: "operationFinished",
-                            operationId,
-                            operationKind: "compaction",
-                            outcome: "failed",
-                            error: { code: "model_error", message },
-                        },
-                    },
+                    fact.stepFailed(operationId, stepId, attemptId, { code: "model_error", message }),
+                    fact.operationFinished(operationId, "compaction", "failed", {
+                        error: { code: "model_error", message },
+                    }),
                 ]);
             }
             throw error;
