@@ -99,6 +99,7 @@ async def run_repl_command(terminal: Terminal, agent: Agent, skills: list[dict],
 
 async def run_repl(terminal: Terminal, agent: Agent, skills: list[dict]) -> None:
     print("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit")
+    terminal.report_status("idle")
     while True:
         text = terminal.readline("\x1b[32m›\x1b[0m ")
         if not text:

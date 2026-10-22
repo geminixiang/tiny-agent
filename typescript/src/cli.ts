@@ -140,7 +140,11 @@ async function main() {
     });
     for (const config of configs) {
         const started = performance.now();
-        activeLifecycle.observe({ type: "mcp.started", timestamp: new Date().toISOString(), server: config.alias });
+        activeLifecycle.observe({
+            type: "mcp.started",
+            timestamp: new Date().toISOString(),
+            server: config.alias,
+        });
         try {
             const loaded = await loadMcpTools(config, AbortSignal.timeout(10_000));
             loadedMcp.push(loaded);
@@ -197,7 +201,24 @@ async function main() {
     emitKeypressEvents(process.stdin, rl);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     let exiting = false;
+    let aborted = false;
+    const reportStatus = (state: "idle" | "working" | "done" | "error") => {
+        if (process.stdin.isTTY && !json) process.stdout.write(`\x1b]7501;state=${state}:app=tiny-agent\x1b\\`);
+    };
+    const run = async (operation: () => Promise<string>) => {
+        aborted = false;
+        reportStatus("working");
+        try {
+            const answer = await operation();
+            reportStatus(aborted ? "idle" : "done");
+            return answer;
+        } catch (error) {
+            reportStatus("error");
+            throw error;
+        }
+    };
     const requestAbort = () => {
+        aborted = true;
         void agent.abort().catch((error: unknown) => {
             console.error(`Failed to persist abort: ${error instanceof Error ? error.message : String(error)}`);
         });
@@ -228,7 +249,7 @@ async function main() {
     }
     if (oneShot) {
         try {
-            const answer = await agent.runAgentLoop(oneShot);
+            const answer = await run(() => agent.runAgentLoop(oneShot));
             if (!json) {
                 console.log(`\n${answer}`);
                 console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
@@ -241,12 +262,13 @@ async function main() {
         return;
     }
     console.log("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit");
+    reportStatus("idle");
     while (true) {
         const input = (await ask("\x1b[32m›\x1b[0m ")).trim();
         if (!input) continue;
         if (input === "/exit") break;
         if (input === "/compact") {
-            console.log(await agent.compact());
+            console.log(await run(() => agent.compact()));
             if (exiting) break;
             console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
             continue;
@@ -258,13 +280,14 @@ async function main() {
                 console.log(`Unknown skill: ${name}`);
                 continue;
             }
-            const answer = await agent.runAgentLoop(`${await readFile(skill.path, "utf8")}\n\nUser: ${rest.join(" ")}`);
+            const prompt = `${await readFile(skill.path, "utf8")}\n\nUser: ${rest.join(" ")}`;
+            const answer = await run(() => agent.runAgentLoop(prompt));
             if (exiting) break;
             console.log(answer);
             console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);
             continue;
         }
-        const answer = await agent.runAgentLoop(input);
+        const answer = await run(() => agent.runAgentLoop(input));
         if (exiting) break;
         console.log(`\x1b[36m${answer}\x1b[0m`);
         console.log(`\x1b[2m${formatUsage(agent.usage)}\x1b[0m`);

@@ -1466,6 +1466,7 @@ func runCLI(args []string) error {
 		return nil
 	}
 	fmt.Fprintln(out, "Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit")
+	tty.reportStatus("idle")
 	for {
 		input, err := tty.readLine("\x1b[32m›\x1b[0m ")
 		if errors.Is(err, io.EOF) || errors.Is(err, errExit) {

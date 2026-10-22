@@ -482,6 +482,7 @@ fn run_cli(args: Vec<String>) -> Result<i32, String> {
     }
 
     out.print("Esc aborts the active operation; Ctrl+C exits.\n/compact  /skill:name  /exit\n");
+    term.report_status("idle");
     loop {
         let input = match term.read_line("\x1b[32m›\x1b[0m ") {
             Ok(line) => line,

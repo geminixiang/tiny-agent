@@ -133,10 +133,16 @@ class Terminal:
                 pending.clear()
                 row = self.redraw(prompt, line, cursor, row)
 
+    def report_status(self, state: str) -> None:
+        if self.tty:
+            print(f"\x1b]7501;state={state}:app=tiny-agent\x1b\\", end="", flush=True)
+
     async def run(self, agent: Agent, operation: Callable[[], Awaitable[str]]) -> str:
         task = asyncio.create_task(operation())
         if not self.tty:
             return await task
+        self.report_status("working")
+        aborted = False
         while not task.done():
             await asyncio.sleep(0.05)
             ready, _, _ = select.select([self.fd], [], [], 0)
@@ -145,9 +151,16 @@ class Terminal:
             char = os.read(self.fd, 1)
             if char == b"\x1b" and self.escape_sequence() == b"":
                 print("\n\x1b[33mAborting...\x1b[0m")
+                aborted = True
                 agent.abort()
             if char == b"\x03":
                 agent.abort()
                 await asyncio.gather(task, return_exceptions=True)
                 raise KeyboardInterrupt
-        return await task
+        try:
+            answer = await task
+        except BaseException:
+            self.report_status("error")
+            raise
+        self.report_status("idle" if aborted else "done")
+        return answer

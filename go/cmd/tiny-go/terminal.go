@@ -238,10 +238,18 @@ func (t *terminal) readLine(prompt string) (string, error) {
 	}
 }
 
+func (t *terminal) reportStatus(state string) {
+	if t.old != nil {
+		fmt.Fprintf(t.out, "\x1b]7501;state=%s:app=tiny-agent\x1b\\", state)
+	}
+}
+
 func (t *terminal) run(agent *Agent, operation func() (string, error)) (string, error) {
 	if t.old == nil {
 		return operation()
 	}
+	t.reportStatus("working")
+	aborted := false
 	done := make(chan operationResult, 1)
 	go func() {
 		answer, err := operation()
@@ -250,6 +258,13 @@ func (t *terminal) run(agent *Agent, operation func() (string, error)) (string, 
 	for {
 		select {
 		case result := <-done:
+			if result.err != nil {
+				t.reportStatus("error")
+			} else if aborted {
+				t.reportStatus("idle")
+			} else {
+				t.reportStatus("done")
+			}
 			return result.answer, result.err
 		case event := <-t.keys:
 			if event.err != nil {
@@ -266,6 +281,7 @@ func (t *terminal) run(agent *Agent, operation func() (string, error)) (string, 
 				}
 				if standalone {
 					fmt.Fprint(t.out, "\r\n\x1b[33mAborting...\x1b[0m\r\n")
+					aborted = true
 					agent.abort()
 				}
 			}

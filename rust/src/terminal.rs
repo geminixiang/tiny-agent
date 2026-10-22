@@ -326,6 +326,13 @@ impl Terminal {
         }
     }
 
+    pub fn report_status(&self, state: &str) {
+        if self.tty {
+            self.out
+                .print(&format!("\x1b]7501;state={state}:app=tiny-agent\x1b\\"));
+        }
+    }
+
     /// Run an operation, giving Esc/Ctrl+C a chance to cancel it on the main
     /// thread while the operation runs on a worker thread.
     pub fn run<F, A>(
@@ -342,12 +349,19 @@ impl Terminal {
         if !self.tty {
             return operation().map_err(TermError::Error);
         }
+        self.report_status("working");
+        let mut aborted = false;
         let (tx, rx) = mpsc::channel::<Result<String, String>>();
         thread::spawn(move || {
             let _ = tx.send(operation());
         });
         loop {
             if let Ok(result) = rx.try_recv() {
+                self.report_status(match (&result, aborted) {
+                    (Err(_), _) => "error",
+                    (Ok(_), true) => "idle",
+                    (Ok(_), false) => "done",
+                });
                 return result.map_err(TermError::Error);
             }
             let Some(key) = self.next_key() else { continue };
@@ -355,6 +369,7 @@ impl Terminal {
                 let (_, is_arrow) = self.escape_sequence();
                 if !is_arrow {
                     self.out.print("\r\n\x1b[33mAborting...\x1b[0m\r\n");
+                    aborted = true;
                     if let Err(error) = abort() {
                         return Err(TermError::Error(error));
                     }
@@ -471,6 +486,34 @@ mod tests {
             "next"
         );
         assert!(!cancel.load(Ordering::SeqCst));
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn operation_reports_program_status() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let captured = Captured::default();
+        let (_tx, rx) = mpsc::channel();
+        let mut tty = Terminal::from_keys(rx, Box::new(captured.clone()), true);
+        tty.run(&cancel, || Ok(()), || Ok("ok".into())).unwrap();
+        let _ = tty.run(&cancel, || Ok(()), || Err("boom".into()));
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            output,
+            "\x1b]7501;state=working:app=tiny-agent\x1b\\\x1b]7501;state=done:app=tiny-agent\x1b\\\x1b]7501;state=working:app=tiny-agent\x1b\\\x1b]7501;state=error:app=tiny-agent\x1b\\"
+        );
     }
 
     #[test]
